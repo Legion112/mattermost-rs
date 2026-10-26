@@ -20,6 +20,7 @@
 
 mod app;
 pub mod bridge;
+mod login;
 mod row;
 
 pub use app::{Wiring, run};

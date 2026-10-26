@@ -15,6 +15,18 @@ use mm_types::{Channel, ChannelId, ChannelMember, PostList, Team, User, UserId};
 /// GUI to engine.
 #[derive(Debug, Clone)]
 pub enum Command {
+    /// Sign in with a password typed into the window.
+    ///
+    /// The password crosses this channel once and is used to build one
+    /// request. It is never written to disk -- only the session token the
+    /// server returns is -- and never logged, never an argument, never in the
+    /// environment.
+    LogIn {
+        server: String,
+        login_id: String,
+        password: String,
+        mfa: Option<String>,
+    },
     /// Load everything the sidebar needs.
     Sync,
     /// Fetch the newest page of a channel.
@@ -48,6 +60,18 @@ pub enum Command {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// There is no stored session, so the window should ask for one.
+    NeedLogin,
+    /// Signing in did not work.
+    ///
+    /// `needs_mfa` is separate from the message because it is not an error in
+    /// the usual sense — the credentials were accepted and the server wants a
+    /// second factor, so the window reveals the code field rather than
+    /// painting the form red.
+    LoginFailed {
+        message: String,
+        needs_mfa: bool,
+    },
     /// Session established.
     Connected {
         server: String,

@@ -20,10 +20,12 @@
 //! never be computed from the scroll adjustment.
 
 use crate::bridge::{Command, Event};
+use crate::login::LoginPage;
 use crate::row::PostRow;
+// adw::prelude re-exports gtk::prelude, so this one import covers both.
+use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use gtk::prelude::*;
 use mm_core::{PageAnchor, Store, Threading};
 use mm_types::{ChannelId, UserId};
 use std::cell::RefCell;
@@ -40,6 +42,12 @@ pub struct Wiring {
 
 struct Ui {
     store: Rc<RefCell<Store>>,
+    /// Swaps between the sign-in screen and the chat view. The window starts
+    /// on sign-in and only moves once the engine reports a session, so there
+    /// is never a moment where an empty chat view is shown as though it were
+    /// loading.
+    stack: gtk::Stack,
+    login: Rc<LoginPage>,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     selected: Rc<RefCell<Option<ChannelId>>>,
     sidebar: gtk::ListBox,
@@ -131,9 +139,17 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     refresh.set_tooltip_text(Some("Reload channels"));
     header.pack_end(&refresh);
 
+    let login = Rc::new(LoginPage::new());
+    let stack = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .build();
+    stack.add_named(&login.root, Some("login"));
+    stack.add_named(&split, Some("main"));
+    stack.set_visible_child_name("login");
+
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.append(&header);
-    root.append(&split);
+    root.append(&stack);
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -154,10 +170,54 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         status,
         title,
         composer: composer.clone(),
+        stack,
+        login: Rc::clone(&login),
     };
 
     wire(&ui, &refresh, &sidebar, &composer, commands);
+    wire_login(&login, commands);
     ui
+}
+
+/// Connect the sign-in form.
+fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    let submit = {
+        let login = Rc::clone(login);
+        let commands = commands.clone();
+        move || {
+            let values = login.values();
+            if let Some(problem) = values.problem() {
+                login.show_error(problem);
+                return;
+            }
+            login.set_busy(true);
+            login.show_hint("Signing in…");
+            commands
+                .send(Command::LogIn {
+                    server: values.server,
+                    login_id: values.login_id,
+                    password: values.password,
+                    mfa: values.mfa,
+                })
+                .ok();
+            // The request has been built; the field need not keep holding it.
+            login.clear_password();
+        }
+    };
+
+    {
+        let submit = submit.clone();
+        login.submit.connect_clicked(move |_| submit());
+    }
+    // Enter in any field submits, which is what every other login form does.
+    for entry in [&login.server, &login.login_id, &login.mfa] {
+        let submit = submit.clone();
+        entry.connect_entry_activated(move |_| submit());
+    }
+    {
+        let submit = submit.clone();
+        login.password.connect_entry_activated(move |_| submit());
+    }
 }
 
 /// Connect the widgets to the command channel.
@@ -342,11 +402,30 @@ impl Ui {
     /// truth.
     fn on_event(&self, event: Event) {
         match event {
+            Event::NeedLogin => {
+                self.stack.set_visible_child_name("login");
+                self.login.set_busy(false);
+                self.login
+                    .show_hint("Your password is sent to your server and never stored.");
+                self.title.set_subtitle("not signed in");
+            }
+            Event::LoginFailed { message, needs_mfa } => {
+                self.login.set_busy(false);
+                if needs_mfa {
+                    self.login.ask_for_mfa();
+                    self.login
+                        .show_hint("Enter the code from your authenticator app.");
+                } else {
+                    self.login.show_error(&message);
+                }
+            }
             Event::Connected {
                 server,
                 me,
                 username,
             } => {
+                self.stack.set_visible_child_name("main");
+                self.login.set_busy(false);
                 let threading = self.store.borrow().threading;
                 *self.store.borrow_mut() = Store::new(me, threading);
                 self.title.set_subtitle(&format!("{username} · {server}"));

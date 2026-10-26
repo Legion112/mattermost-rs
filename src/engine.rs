@@ -10,8 +10,12 @@
 //! it. Engine-to-GUI is an `async_channel`, because its receiver is a future
 //! that works under `glib::spawn_future_local`, and it is **bounded** so that
 //! a large backfill applies backpressure instead of inflating the heap.
+//!
+//! The engine can start with no session at all. In that state it answers
+//! nothing except [`Command::LogIn`], which is what lets the window show a
+//! sign-in screen instead of demanding that a token already exist.
 
-use mm_api::rest::{self, PostQuery};
+use mm_api::rest::{self, Login, PostQuery};
 use mm_api::ws::{WsOutcome, WsProtocol};
 use mm_api::{ApiError, HttpRequest, HttpResponse};
 use mm_core::Threading;
@@ -21,9 +25,16 @@ use mm_types::{ChannelId, UserId};
 
 use crate::session::Session;
 
+/// A signed-in connection.
+struct Active {
+    client: Client,
+    session: Session,
+    socket: tokio::task::JoinHandle<()>,
+}
+
 /// Start the engine on its own thread.
 pub(crate) fn spawn(
-    session: Session,
+    session: Option<Session>,
 ) -> (
     tokio::sync::mpsc::UnboundedSender<Command>,
     async_channel::Receiver<Event>,
@@ -55,15 +66,202 @@ pub(crate) fn spawn(
 }
 
 async fn run(
-    session: Session,
+    session: Option<Session>,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<Command>,
     events: async_channel::Sender<Event>,
 ) {
+    let mut active = match session {
+        Some(saved) => activate(saved, &events).await,
+        None => None,
+    };
+    if active.is_none() {
+        let _ = events.send(Event::NeedLogin).await;
+    } else if let Some(a) = &active {
+        sync(&a.client, &a.session, &events).await;
+    }
+
+    while let Some(command) = commands.recv().await {
+        // Signing in is the only thing that works without a session, and it is
+        // ignored once there is one: a second sign-in while connected would
+        // leave two sockets running.
+        if let Command::LogIn {
+            server,
+            login_id,
+            password,
+            mfa,
+        } = command
+        {
+            if active.is_some() {
+                continue;
+            }
+            if let Some(saved) = authenticate(&server, &login_id, password, mfa, &events).await {
+                active = activate(saved, &events).await;
+                if let Some(a) = &active {
+                    sync(&a.client, &a.session, &events).await;
+                }
+            }
+            continue;
+        }
+
+        if matches!(command, Command::Quit) {
+            break;
+        }
+
+        let Some(a) = &active else {
+            // Anything else before sign-in is a stray click on a window that
+            // has not connected yet.
+            continue;
+        };
+
+        match command {
+            Command::Sync => sync(&a.client, &a.session, &events).await,
+            Command::OpenChannel(channel) => open_channel(&a.client, &channel, &events).await,
+            Command::MarkRead(channel) => {
+                // Best effort: the GUI has already updated optimistically, and
+                // the store's monotonic joins mean a failure here cannot
+                // corrupt anything -- the next fetch corrects it.
+                let request = rest::view_channel(Some(&channel), None, true);
+                let _ = a.client.send(&request).await;
+            }
+            Command::Send { channel, text } => {
+                let pending = format!("mmrs-{}", now_millis());
+                let request = rest::create_post(&channel, &text, None, &pending);
+                // The `posted` event arrives over the WebSocket carrying the
+                // same post, so nothing is applied here: letting one path own
+                // it keeps the optimistic-post race out of this code entirely.
+                if let Err(e) = fetch(&a.client, &request, rest::parse_post).await {
+                    let _ = events.send(Event::Failed(e)).await;
+                }
+            }
+            Command::Notify(notification) => {
+                // A missing notification daemon is a normal state on a minimal
+                // desktop, and not a reason for a chat client to stop working.
+                if let Err(e) = mm_desktop_xdg::show(&notification) {
+                    let _ = events.send(Event::Status(e)).await;
+                }
+            }
+            Command::LogIn { .. } | Command::Quit => unreachable!("handled above"),
+        }
+    }
+
+    if let Some(a) = active {
+        a.socket.abort();
+    }
+}
+
+/// How a sign-in attempt turned out.
+pub(crate) enum LoginOutcome {
+    Signed(Session),
+    /// The credentials were accepted and the server wants a second factor.
+    /// Not an error: the caller should ask for a code and try again.
+    NeedsMfa,
+    Failed(String),
+}
+
+/// Exchange a password for a session token.
+///
+/// **The one login implementation**, shared by the window and the `login`
+/// subcommand. Two copies of this would drift, and the one nobody exercised
+/// would be the one that broke.
+///
+/// The password arrives here, is used to build exactly one request, and is
+/// dropped. It is never written to disk, never logged, and never placed in an
+/// argument or the environment — only the token that comes back is persisted.
+pub(crate) async fn attempt_login(
+    server: &str,
+    login_id: &str,
+    password: String,
+    mfa: Option<String>,
+) -> LoginOutcome {
+    let client = match Client::new(server) {
+        Ok(c) => c,
+        Err(e) => return LoginOutcome::Failed(e.to_string()),
+    };
+
+    let request = rest::login(&Login {
+        login_id: login_id.to_owned(),
+        password,
+        mfa_token: mfa,
+    });
+    let response = match client.send(&request).await {
+        Ok(r) => r,
+        Err(e) => return LoginOutcome::Failed(format!("Could not reach {server}: {e}")),
+    };
+
+    match rest::parse_login(&response) {
+        Ok(found) => LoginOutcome::Signed(Session {
+            server: client.base().to_string(),
+            token: found.token,
+            user_id: found.user.id.to_string(),
+            username: found.user.username.clone(),
+        }),
+        Err(ApiError::MfaRequired(_)) => LoginOutcome::NeedsMfa,
+        Err(e) => LoginOutcome::Failed(explain(&e)),
+    }
+}
+
+/// The window's wrapper: perform the attempt and report it as events.
+async fn authenticate(
+    server: &str,
+    login_id: &str,
+    password: String,
+    mfa: Option<String>,
+    events: &async_channel::Sender<Event>,
+) -> Option<Session> {
+    match attempt_login(server, login_id, password, mfa).await {
+        LoginOutcome::Signed(saved) => {
+            if let Err(e) = crate::session::save(&saved) {
+                // The sign-in worked; only persisting it did not. Carrying on
+                // means this session still works and only the next launch asks
+                // again, which beats refusing a valid login.
+                let _ = events.send(Event::Status(e)).await;
+            }
+            Some(saved)
+        }
+        LoginOutcome::NeedsMfa => {
+            let _ = events
+                .send(Event::LoginFailed {
+                    message: String::new(),
+                    needs_mfa: true,
+                })
+                .await;
+            None
+        }
+        LoginOutcome::Failed(message) => {
+            let _ = events
+                .send(Event::LoginFailed {
+                    message,
+                    needs_mfa: false,
+                })
+                .await;
+            None
+        }
+    }
+}
+
+/// Turn an API error into something worth showing a person.
+pub(crate) fn explain(error: &ApiError) -> String {
+    match error {
+        ApiError::Unauthorized(_) => {
+            "That email or password was not accepted. If your organisation uses single \
+             sign-on, use a personal access token instead."
+                .to_owned()
+        }
+        ApiError::RateLimited { retry_after_secs } => match retry_after_secs {
+            Some(s) => format!("Too many attempts. Try again in {s} seconds."),
+            None => "Too many attempts. Try again shortly.".to_owned(),
+        },
+        other => other.to_string(),
+    }
+}
+
+/// Build a client from a session and start its socket.
+async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Option<Active> {
     let client = match Client::new(&session.server) {
         Ok(c) => c.with_token(session.token.clone()),
         Err(e) => {
             let _ = events.send(Event::Failed(e.to_string())).await;
-            return;
+            return None;
         }
     };
 
@@ -75,53 +273,21 @@ async fn run(
         })
         .await;
 
-    // The WebSocket runs as its own task so that a slow REST fetch cannot
-    // stall event delivery -- and, more importantly, so the socket keeps being
+    // The WebSocket runs as its own task so a slow REST fetch cannot stall
+    // event delivery -- and, more importantly, so the socket keeps being
     // polled. The server pings every 60s and closes after 100s without a pong,
     // so a connection nobody is reading dies while looking healthy.
-    let socket_task = tokio::spawn(socket_loop(
+    let socket = tokio::spawn(socket_loop(
         client.clone(),
         session.token.clone(),
         events.clone(),
     ));
 
-    while let Some(command) = commands.recv().await {
-        match command {
-            Command::Quit => break,
-            Command::Notify(notification) => {
-                // A missing notification daemon is a normal state on a minimal
-                // desktop, and not a reason for a chat client to stop working.
-                if let Err(e) = mm_desktop_xdg::show(&notification) {
-                    let _ = events.send(Event::Status(e)).await;
-                }
-            }
-            Command::Sync => sync(&client, &session, &events).await,
-            Command::OpenChannel(channel) => open_channel(&client, &channel, &events).await,
-            Command::MarkRead(channel) => {
-                // Best effort: the GUI has already updated optimistically, and
-                // the store's monotonic joins mean a failure here cannot
-                // corrupt anything -- the next fetch corrects it.
-                let request = rest::view_channel(Some(&channel), None, true);
-                let _ = client.send(&request).await;
-            }
-            Command::Send { channel, text } => {
-                let pending = format!("mmrs-{}", now_millis());
-                let request = rest::create_post(&channel, &text, None, &pending);
-                match fetch(&client, &request, rest::parse_post).await {
-                    // The `posted` event will arrive over the WebSocket and
-                    // carry the same post, so nothing is applied here: letting
-                    // one path own it keeps the optimistic-post race out of
-                    // this code entirely.
-                    Ok(_) => {}
-                    Err(e) => {
-                        let _ = events.send(Event::Failed(e)).await;
-                    }
-                }
-            }
-        }
-    }
-
-    socket_task.abort();
+    Some(Active {
+        client,
+        session,
+        socket,
+    })
 }
 
 async fn sync(client: &Client, session: &Session, events: &async_channel::Sender<Event>) {
@@ -288,6 +454,7 @@ async fn socket_loop(client: Client, token: String, events: async_channel::Sende
 
         // Full-jitter backoff, with the jitter supplied as a number so the
         // schedule stays a pure function in mm-api.
+        //
         // Through u32 and `f64::from` rather than a cast: the value is already
         // bounded below 1000, so the conversion is lossless and the compiler
         // can see that it is.

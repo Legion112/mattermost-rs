@@ -13,7 +13,7 @@ mod engine;
 mod session;
 
 use mm_api::ApiError;
-use mm_api::rest::{self, Login, PostQuery};
+use mm_api::rest::{self, PostQuery};
 use mm_api::ws::{WsOutcome, WsProtocol};
 use mm_core::{PageAnchor, Store, Threading};
 use mm_http::Client;
@@ -143,7 +143,10 @@ fn doctor() -> Result<(), String> {
 /// runtime built above is dropped first, because two runtimes competing for
 /// the same thread is a deadlock waiting to happen.
 fn gui() -> Result<(), String> {
-    let saved = session::load()?;
+    // A missing session is not an error any more: the window shows a sign-in
+    // screen. Demanding a token before the GUI will even open was a developer's
+    // idea of a login flow.
+    let saved = session::load().ok();
     let (commands, events) = engine::spawn(saved);
     let code = mm_gui::run(mm_gui::Wiring { commands, events });
     if code == mm_gui::glib_exit_success() {
@@ -171,29 +174,18 @@ async fn login(args: &[String]) -> Result<(), String> {
     let password =
         std::env::var(&var).map_err(|_| format!("the environment variable {var} is not set"))?;
 
-    let client = Client::new(&server).map_err(|e| e.to_string())?;
-    let request = rest::login(&Login {
-        login_id,
-        password,
-        mfa_token: flag(args, "--mfa"),
-    });
-    let response = client.send(&request).await.map_err(|e| e.to_string())?;
-
-    match rest::parse_login(&response) {
-        Ok(found) => {
-            session::save(&session::Session {
-                server: client.base().to_string(),
-                token: found.token,
-                user_id: found.user.id.to_string(),
-                username: found.user.username.clone(),
-            })?;
-            println!("logged in as {} on {}", found.user.username, client.base());
+    // The same attempt the window makes. One login implementation, so testing
+    // either exercises both.
+    match engine::attempt_login(&server, &login_id, password, flag(args, "--mfa")).await {
+        engine::LoginOutcome::Signed(saved) => {
+            session::save(&saved)?;
+            println!("logged in as {} on {}", saved.username, saved.server);
             Ok(())
         }
-        Err(ApiError::MfaRequired(_)) => {
+        engine::LoginOutcome::NeedsMfa => {
             Err("this account needs a multi-factor code: re-run with --mfa <code>".to_owned())
         }
-        Err(e) => Err(format!("login failed: {e}")),
+        engine::LoginOutcome::Failed(message) => Err(format!("login failed: {message}")),
     }
 }
 

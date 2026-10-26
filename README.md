@@ -74,21 +74,34 @@ Also out for now: Windows and macOS, spellchecking, i18n beyond English.
 
 ## Try it
 
-Against your own server, with a personal access token (Account Settings →
-Security → Personal Access Tokens):
-
 ```bash
 make release
-./target/release/mattermost-rs token --server https://your.mattermost --token <pat>
-./target/release/mattermost-rs sync      # channels and unread counts, in the terminal
-./target/release/mattermost-rs gui       # the window
-./target/release/mattermost-rs doctor    # is anything listening for notifications?
+./target/release/mattermost-rs
 ```
 
-`login --server <url> --login-id <id> --password-env <VAR>` works too; the
-password is read from the environment rather than an argument so it stays out
-of shell history and out of `ps`. SSO accounts need a token: the browser-based
-desktop-token hand-off is not implemented yet.
+With no stored session the window opens on a sign-in screen: server address,
+email or username, password. A two-factor field appears only if the server
+asks for one. The password is sent to your server and nothing else — it is
+never written to disk, never logged, and never passed as an argument; only the
+session token the server returns is stored.
+
+There are terminal equivalents, which is how the stack gets tested without a
+window:
+
+```bash
+./target/release/mattermost-rs sync      # channels and unread counts
+./target/release/mattermost-rs send --channel town-square --text "hello"
+./target/release/mattermost-rs watch     # live WebSocket events
+./target/release/mattermost-rs doctor    # is anything listening for notifications?
+./target/release/mattermost-rs token --server <url> --token <pat>
+```
+
+`login --server <url> --login-id <id> --password-env <VAR>` reads the password
+from the environment rather than an argument, so it stays out of shell history
+and out of `ps`. It goes through the same code as the window.
+
+SSO-only accounts need a personal access token (Account Settings → Security):
+the browser-based desktop-token hand-off is not implemented yet.
 
 ### A throwaway server to try it against
 
