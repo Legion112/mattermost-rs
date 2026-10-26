@@ -23,6 +23,13 @@ pub enum Command {
     Send { channel: ChannelId, text: String },
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
+    /// Show a desktop notification.
+    ///
+    /// The *decision* is made on the GUI thread, which is the only place that
+    /// has the store and therefore knows whether the channel is muted or
+    /// already on screen. Only the D-Bus call crosses to the engine, so it
+    /// never blocks a frame.
+    Notify(mm_desktop::Notification),
     /// Stop.
     Quit,
 }

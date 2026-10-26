@@ -29,6 +29,8 @@ usage:
   mattermost-rs whoami
   mattermost-rs sync   [--channel <name>]
   mattermost-rs watch  [--seconds <n>]
+  mattermost-rs send   --channel <name> --text <message>
+  mattermost-rs doctor
   mattermost-rs gui
   mattermost-rs logout
   mattermost-rs --version | --help
@@ -71,6 +73,8 @@ fn main() -> ExitCode {
         "whoami" => runtime.block_on(whoami()),
         "sync" => runtime.block_on(sync(rest_args)),
         "watch" => runtime.block_on(watch(rest_args)),
+        "send" => runtime.block_on(send(rest_args)),
+        "doctor" => doctor(),
         "gui" => gui(),
         "logout" => session::clear(),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
@@ -83,6 +87,53 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Report what the desktop can actually do.
+///
+/// Notifications are the part most likely to be silently missing: a desktop
+/// with no notification daemon looks exactly like a bug in the notification
+/// rules. This is the manual check the plan calls for, since CI has no session
+/// bus and never will.
+fn doctor() -> Result<(), String> {
+    println!("mattermost-rs {}", env!("CARGO_PKG_VERSION"));
+    let mut problems: Vec<String> = Vec::new();
+
+    if let Ok(saved) = session::load() {
+        println!("session:       {} on {}", saved.username, saved.server);
+    } else {
+        println!("session:       none");
+        problems.push("no session — run `token` or `login`".into());
+    }
+
+    if mm_desktop_xdg::is_available() {
+        println!("notifications: a daemon is listening");
+        let probe = mm_desktop::Notification {
+            title: "mattermost-rs".into(),
+            body: "Notifications are working.".into(),
+            channel: mm_types::ChannelId::new("doctor"),
+            is_mention: false,
+        };
+        if let Err(e) = mm_desktop_xdg::show(&probe) {
+            println!("               the daemon refused it: {e}");
+            problems.push(e);
+        } else {
+            println!("               sent a test notification — did one appear?");
+        }
+    } else {
+        println!("notifications: no daemon is listening");
+        problems.push("no notification daemon; this client will never notify".into());
+    }
+
+    if problems.is_empty() {
+        println!("\neverything checks out");
+        return Ok(());
+    }
+    Err(format!(
+        "\n{} problem(s): {}",
+        problems.len(),
+        problems.join("; ")
+    ))
 }
 
 /// Launch the window.
@@ -264,6 +315,39 @@ async fn sync(args: &[String]) -> Result<(), String> {
         show_channel(&client, &mut store, &name).await?;
     }
     Ok(())
+}
+
+/// Post a message, so the create-post path is exercisable without the window.
+async fn send(args: &[String]) -> Result<(), String> {
+    let name = require(args, "--channel")?;
+    let text = require(args, "--text")?;
+    let (client, saved) = connect()?;
+
+    // Resolve the channel by name within whichever team has it.
+    let teams = fetch(&client, &rest::my_teams(), rest::parse_teams).await?;
+    let mut found = None;
+    for team in &teams {
+        let channels = fetch(&client, &rest::my_channels(&team.id), rest::parse_channels).await?;
+        if let Some(c) = channels.into_iter().find(|c| c.name == name) {
+            found = Some(c.id);
+            break;
+        }
+    }
+    let channel = found.ok_or_else(|| format!("no channel called {name:?}"))?;
+
+    // The pending id is what lets an optimistic post on screen be matched to
+    // the `posted` event that confirms it, instead of appearing twice.
+    let pending = format!("mmrs-{}-{}", saved.user_id, now_millis());
+    let request = rest::create_post(&channel, &text, None, &pending);
+    let post = fetch(&client, &request, rest::parse_post).await?;
+    println!("posted {} to {name} at {}", post.id, post.create_at);
+    Ok(())
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 async fn show_channel(client: &Client, store: &mut Store, name: &str) -> Result<(), String> {

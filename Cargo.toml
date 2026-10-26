@@ -58,6 +58,8 @@ path = "src/main.rs"
 [dependencies]
 mm-api   = { path = "crates/mm-api" }
 mm-core  = { path = "crates/mm-core" }
+mm-desktop     = { path = "crates/mm-desktop" }
+mm-desktop-xdg = { path = "crates/mm-desktop-xdg" }
 mm-gui   = { path = "crates/mm-gui" }
 mm-http  = { path = "crates/mm-http" }
 mm-types = { path = "crates/mm-types" }

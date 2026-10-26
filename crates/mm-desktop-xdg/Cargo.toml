@@ -1,6 +1,6 @@
 [package]
 name        = "mm-desktop-xdg"
-description = "XDG implementations: notifications, tray, secret storage"
+description = "XDG implementations: notifications"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -9,6 +9,11 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+mm-desktop = { path = "../mm-desktop" }
+
+# notify-rust goes through zbus, which is pure Rust: no libdbus, no C
+# dependency, and a shorter runtime dependency list on the .deb.
+notify-rust = { version = "4", default-features = false, features = ["z"] }
 
 [lints]
 workspace = true

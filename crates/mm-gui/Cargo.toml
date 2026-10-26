@@ -10,7 +10,8 @@ repository.workspace   = true
 
 [dependencies]
 mm-api   = { path = "../mm-api" }
-mm-core  = { path = "../mm-core" }
+mm-core    = { path = "../mm-core" }
+mm-desktop = { path = "../mm-desktop" }
 mm-types = { path = "../mm-types" }
 
 # v4_14 / v1_5, not higher: that is the apt API level on Ubuntu 24.04 and on

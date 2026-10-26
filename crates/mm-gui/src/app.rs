@@ -309,6 +309,7 @@ impl Ui {
                 }
             }
             Event::Ws(ws) => {
+                self.maybe_notify(&ws);
                 let changes = self.store.borrow_mut().apply_ws(&ws);
                 if changes.is_empty() {
                     return;
@@ -324,6 +325,65 @@ impl Ui {
             }
             Event::Status(text) => self.status.set_text(&text),
             Event::Failed(text) => self.status.set_text(&format!("error: {text}")),
+        }
+    }
+
+    /// Decide whether an incoming event deserves a desktop notification.
+    ///
+    /// Called before the store is updated, on purpose: "was I already looking
+    /// at this channel?" has to be answered against the state as it was when
+    /// the message arrived.
+    fn maybe_notify(&self, event: &mm_api::WsEvent) {
+        let mm_api::WsEvent::Posted {
+            post,
+            sender_name,
+            mentions,
+            ..
+        } = event
+        else {
+            return;
+        };
+
+        let store = self.store.borrow();
+        let me = store.me.clone();
+        let mentioned = mentions.iter().any(|id| *id == me.as_str());
+        let channel_name = store
+            .channels
+            .get(&post.channel_id)
+            .map(|c| store.channel_label(c))
+            .unwrap_or_default();
+        let author = if sender_name.is_empty() {
+            store
+                .users
+                .get(&post.user_id)
+                .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned())
+        } else {
+            sender_name.trim_start_matches('@').to_owned()
+        };
+
+        let member = store.my_member.get(&post.channel_id);
+        let settings = mm_desktop::NotifySettings {
+            channel: member.map_or(mm_desktop::DesktopNotify::Inherit, |m| {
+                mm_desktop::DesktopNotify::from_prop(
+                    m.notify_props.get("desktop").map_or("", String::as_str),
+                )
+            }),
+            muted: store.is_muted(&post.channel_id),
+            ..mm_desktop::NotifySettings::default()
+        };
+        let focused = self.selected.borrow().clone();
+        drop(store);
+
+        if let Ok(notification) = mm_desktop::notification_for(
+            post,
+            &me,
+            &author,
+            &channel_name,
+            mentioned,
+            focused.as_ref(),
+            &settings,
+        ) {
+            self.commands.send(Command::Notify(notification)).ok();
         }
     }
 

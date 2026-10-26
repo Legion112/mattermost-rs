@@ -1,6 +1,6 @@
 [package]
 name        = "mm-desktop"
-description = "Pure XDG logic: deep-link parsing, tray menu model, .desktop rendering"
+description = "Pure XDG logic: deep-link parsing, notification policy"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+mm-types = { path = "../mm-types" }
 
 [lints]
 workspace = true

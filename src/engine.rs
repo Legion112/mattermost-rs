@@ -88,6 +88,13 @@ async fn run(
     while let Some(command) = commands.recv().await {
         match command {
             Command::Quit => break,
+            Command::Notify(notification) => {
+                // A missing notification daemon is a normal state on a minimal
+                // desktop, and not a reason for a chat client to stop working.
+                if let Err(e) = mm_desktop_xdg::show(&notification) {
+                    let _ = events.send(Event::Status(e)).await;
+                }
+            }
             Command::Sync => sync(&client, &session, &events).await,
             Command::OpenChannel(channel) => open_channel(&client, &channel, &events).await,
             Command::MarkRead(channel) => {
