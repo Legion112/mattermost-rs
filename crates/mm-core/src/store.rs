@@ -163,6 +163,18 @@ impl Store {
         (name, self.stats.get(channel).map(|s| s.member_count))
     }
 
+    /// Whether the channel's history is fully loaded, so the view can stop
+    /// asking for older pages at the top of the scrollback.
+    ///
+    /// An unknown channel answers `false`: nothing has been loaded, so there
+    /// is certainly more to fetch.
+    #[must_use]
+    pub fn older_complete(&self, channel: &ChannelId) -> bool {
+        self.timelines
+            .get(channel)
+            .is_some_and(Timeline::older_complete)
+    }
+
     /// A post's reactions, grouped for display.
     ///
     /// Ordered by when each emoji was *first* used on the post, which is the

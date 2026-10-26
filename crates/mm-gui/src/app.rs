@@ -70,6 +70,14 @@ struct Ui {
     /// built on this thread, so the engine sends bytes and the decode
     /// happens here.
     avatars: Rc<RefCell<HashMap<UserId, gdk::Texture>>>,
+    /// One backfill request at a time. The top edge fires repeatedly while
+    /// the user sits there, and without this each firing would start another
+    /// identical request.
+    loading_older: Rc<std::cell::Cell<bool>>,
+    /// After a page of history is prepended, the post the view was resting
+    /// on. The list is rebuilt rather than spliced, so without this the
+    /// reader would be thrown to the top of sixty newly loaded messages.
+    restore_to: Rc<RefCell<Option<PostId>>>,
     /// Who has already been asked for. Without this, every redraw of a
     /// channel would re-request every face in it.
     asked: Rc<RefCell<HashSet<UserId>>>,
@@ -225,6 +233,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         selected: Rc::new(RefCell::new(None)),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
+        loading_older: Rc::new(std::cell::Cell::new(false)),
+        restore_to: Rc::new(RefCell::new(None)),
         avatars: Rc::new(RefCell::new(HashMap::new())),
         asked: Rc::new(RefCell::new(HashSet::new())),
         posts,
@@ -326,12 +336,49 @@ fn wire(
         }
         ui.scroller.add_controller(scrolling_up);
 
-        // Arriving back at the bottom opts back in.
+        // Arriving back at the bottom opts back in; arriving at the top
+        // asks for the page of history before what is held.
         let stick = Rc::clone(&ui.stick_to_bottom);
-        ui.scroller.connect_edge_reached(move |_, edge| {
-            if edge == gtk::PositionType::Bottom {
-                stick.set(true);
+        let loading = Rc::clone(&ui.loading_older);
+        let restore = Rc::clone(&ui.restore_to);
+        let selected = Rc::clone(&ui.selected);
+        let store = Rc::clone(&ui.store);
+        let posts = ui.posts.clone();
+        let commands = commands.clone();
+        ui.scroller.connect_edge_reached(move |_, edge| match edge {
+            gtk::PositionType::Bottom => stick.set(true),
+            gtk::PositionType::Top => {
+                let Some(channel) = selected.borrow().clone() else {
+                    return;
+                };
+                // The edge keeps firing while the reader sits at the top, so
+                // without the in-flight flag each firing starts another
+                // identical request.
+                if loading.get() || store.borrow().older_complete(&channel) {
+                    return;
+                }
+                // The oldest post held is both what to ask the server for
+                // and what to scroll back to afterwards. Row 0 is a date
+                // separator and carries no id, so this walks to the first
+                // real message -- reading row 0 would find an empty id and
+                // never backfill at all.
+                let Some(oldest) = (0..posts.n_items())
+                    .filter_map(|i| posts.item(i).and_downcast::<PostRow>())
+                    .map(|row| PostId::new(row.id()))
+                    .find(|id| !id.as_str().is_empty())
+                else {
+                    return;
+                };
+                loading.set(true);
+                *restore.borrow_mut() = Some(oldest.clone());
+                commands
+                    .send(Command::LoadOlder {
+                        channel,
+                        before: oldest,
+                    })
+                    .ok();
             }
+            _ => {}
         });
     }
     {
@@ -702,6 +749,10 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
 /// the message that named its author.
 const AVATAR_GUTTER: i32 = 32 + 8;
 
+/// Past this many rows the post list stops bottom-aligning. See
+/// `refresh_posts` for why.
+const BOTTOM_ALIGN_BELOW: u32 = 50;
+
 /// A category heading: not selectable, so arrow keys and the first-channel
 /// fallback walk straight past it.
 fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
@@ -794,10 +845,7 @@ fn build_post_list(
         .model(&gtk::NoSelection::new(Some(posts.clone())))
         .factory(&factory)
         .single_click_activate(false)
-        // A channel with four messages in it rests them on the composer
-        // rather than stranding them at the top of an empty pane, which is
-        // what the Electron client does and what a chat window should do.
-        .valign(gtk::Align::End)
+        // Bottom alignment is set per refresh, not here: see `refresh_posts`.
         .build();
     let scroller = gtk::ScrolledWindow::builder()
         .child(&post_view)
@@ -856,21 +904,8 @@ impl Ui {
                 self.store.borrow_mut().apply_members(members);
                 self.refresh_sidebar();
             }
-            Event::Avatar { user, image } => {
-                // `Texture::from_bytes` decodes on this thread. The plan
-                // puts image decode on the engine, and for message images it
-                // will stay there -- an avatar is at most 128px and decodes
-                // in well under a millisecond, which is cheaper than the
-                // round trip that moving it would cost.
-                let bytes = glib::Bytes::from_owned(image);
-                if let Ok(texture) = gdk::Texture::from_bytes(&bytes) {
-                    self.avatars.borrow_mut().insert(user, texture);
-                    self.refresh_sidebar();
-                    if let Some(open) = self.selected.borrow().clone() {
-                        self.refresh_posts(&open);
-                    }
-                }
-            }
+            Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
+            Event::Avatar { user, image } => self.on_avatar(user, image),
             Event::Stats(stats) => {
                 let channel = stats.channel_id.clone();
                 self.store.borrow_mut().apply_stats(stats);
@@ -1076,6 +1111,35 @@ impl Ui {
         }
     }
 
+    /// Merge a page of history fetched because the reader reached the top.
+    fn on_older_posts(&self, channel: &ChannelId, page: &mm_types::PostList) {
+        self.loading_older.set(false);
+        self.store
+            .borrow_mut()
+            .apply_post_list(channel, page, PageAnchor::OlderThanHeld);
+        if self.selected.borrow().as_ref() == Some(channel) {
+            self.refresh_posts(channel);
+        }
+    }
+
+    /// Decode a face and redraw wherever it appears.
+    ///
+    /// `Texture::from_bytes` decodes on this thread. The plan puts image
+    /// decode on the engine, and for message images it will stay there -- an
+    /// avatar is at most 128px and decodes in well under a millisecond,
+    /// which is cheaper than the round trip that moving it would cost.
+    fn on_avatar(&self, user: UserId, image: Vec<u8>) {
+        let bytes = glib::Bytes::from_owned(image);
+        let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
+            return;
+        };
+        self.avatars.borrow_mut().insert(user, texture);
+        self.refresh_sidebar();
+        if let Some(open) = self.selected.borrow().clone() {
+            self.refresh_posts(&open);
+        }
+    }
+
     /// Show a line of status, and only while it says something.
     ///
     /// The window used to carry a permanent "ready" under the messages,
@@ -1217,6 +1281,46 @@ impl Ui {
             }));
         }
         self.composer.set_sensitive(true);
+
+        // A channel with four messages in it rests them on the composer
+        // rather than stranding them at the top of an empty pane, which is
+        // what the Electron client does and what a chat window should do.
+        //
+        // Only while the model is small, though. `valign: End` asks
+        // ListView for its natural height instead of handing it the
+        // viewport's, and ListView only realizes the rows in view when it is
+        // given the viewport. Fifty rows is past any plausible window
+        // height, so beyond it there is no empty space to take up and
+        // nothing to gain by risking the virtualization -- which now
+        // matters, because backfill means a channel's model grows without
+        // limit as the reader scrolls.
+        self.post_view
+            .set_valign(if self.posts.n_items() < BOTTOM_ALIGN_BELOW {
+                gtk::Align::End
+            } else {
+                gtk::Align::Fill
+            });
+
+        // A page of history was just prepended: put the reader back on the
+        // message they were resting on, rather than at the top of sixty
+        // newly loaded ones. This takes precedence over following the tail,
+        // and the two cannot both apply -- reaching the top edge means they
+        // had already scrolled away from the bottom.
+        if let Some(anchor) = self.restore_to.borrow_mut().take() {
+            let at = (0..self.posts.n_items())
+                .filter_map(|i| self.posts.item(i).and_downcast::<PostRow>().map(|r| (i, r)))
+                .find(|(_, row)| row.id() == anchor.as_str())
+                .map(|(i, _)| i);
+            if let Some(at) = at {
+                let view = self.post_view.clone();
+                // The same timer as the initial scroll, for the same reason:
+                // ListView has not measured the rows it was just handed.
+                glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+                    view.scroll_to(at, gtk::ListScrollFlags::empty(), None);
+                });
+                return;
+            }
+        }
 
         if was_at_end {
             self.stick_to_bottom.set(true);

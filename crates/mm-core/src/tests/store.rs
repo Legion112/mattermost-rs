@@ -1232,3 +1232,27 @@ fn a_dm_row_names_the_other_party() {
     let open = rows.iter().find(|r| r.channel.as_str() == "c1").unwrap();
     assert_eq!(open.avatar_user, None);
 }
+
+/// The view stops asking for older pages once the channel's history is
+/// complete; without this it would re-request the first page forever at the
+/// top of the scrollback.
+#[test]
+fn a_channel_reports_whether_its_history_is_complete() {
+    let mut store = store();
+    let id = ChannelId::new("c1");
+    // Nothing loaded: there is certainly more to fetch.
+    assert!(!store.older_complete(&id));
+
+    // A page with no `prev_post_id` is the beginning of the channel.
+    let mut posts = std::collections::HashMap::new();
+    posts.insert(PostId::new("p1"), post("p1", "c1", 10));
+    let page = PostList {
+        order: vec![PostId::new("p1")],
+        posts,
+        // Empty means there is nothing before this page.
+        prev_post_id: String::new(),
+        ..PostList::default()
+    };
+    store.apply_post_list(&id, &page, PageAnchor::Newest);
+    assert!(store.older_complete(&id));
+}

@@ -32,6 +32,7 @@ usage:
   mattermost-rs watch  [--seconds <n>]
   mattermost-rs send   --channel <name> --text <message>
   mattermost-rs react  --post <id> --emoji <name> [--remove]
+  mattermost-rs history --channel <name> [--pages <n>]
   mattermost-rs doctor
   mattermost-rs gui
   mattermost-rs logout
@@ -88,6 +89,7 @@ fn main() -> ExitCode {
         "watch" => runtime.block_on(watch(rest_args)),
         "send" => runtime.block_on(send(rest_args)),
         "react" => runtime.block_on(react(rest_args)),
+        "history" => runtime.block_on(history(rest_args)),
         "doctor" => doctor(),
         "gui" => gui(),
         "logout" => session::clear(),
@@ -101,6 +103,98 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Find a channel by its URL name, in whichever team has it.
+async fn resolve_channel(client: &Client, name: &str) -> Result<ChannelId, String> {
+    let teams = fetch(client, &rest::my_teams(), rest::parse_teams).await?;
+    for team in &teams {
+        let channels = fetch(client, &rest::my_channels(&team.id), rest::parse_channels).await?;
+        if let Some(c) = channels.into_iter().find(|c| c.name == name) {
+            return Ok(c.id);
+        }
+    }
+    Err(format!("no channel called {name:?}"))
+}
+
+/// Walk a channel's scrollback backwards, the way the window does when the
+/// reader reaches the top.
+///
+/// This exists to exercise the part of backfill that no unit test reaches:
+/// that `before=` returns what the server says it does, and that merging
+/// those pages with `PageAnchor::OlderThanHeld` produces one timeline with
+/// no gap and no duplicates. The window's half of it -- restoring the
+/// reading position after a prepend -- needs a human at the scroll wheel.
+async fn history(args: &[String]) -> Result<(), String> {
+    let name = require(args, "--channel")?;
+    let pages: usize = match flag(args, "--pages") {
+        Some(n) => n
+            .parse()
+            .map_err(|_| format!("--pages {n:?} is not a number"))?,
+        None => 3,
+    };
+    let (client, saved) = connect()?;
+    let channel = resolve_channel(&client, &name).await?;
+    let mut store = Store::new(UserId::new(saved.user_id.clone()), Threading::Flat);
+
+    let first = fetch(
+        &client,
+        &rest::posts_for_channel(&channel, &PostQuery::first()),
+        rest::parse_post_list,
+    )
+    .await?;
+    store.apply_post_list(&channel, &first, PageAnchor::Newest);
+    println!(
+        "page 1: {} post(s) held",
+        store.channel_posts(&channel).len()
+    );
+
+    for page in 2..=pages {
+        if store.older_complete(&channel) {
+            println!("reached the beginning of the channel");
+            break;
+        }
+        let Some(oldest) = store.channel_posts(&channel).first().map(|p| p.id.clone()) else {
+            break;
+        };
+        let query = PostQuery::Before {
+            post: oldest.to_string(),
+            per_page: rest::DEFAULT_PER_PAGE,
+        };
+        let older = fetch(
+            &client,
+            &rest::posts_for_channel(&channel, &query),
+            rest::parse_post_list,
+        )
+        .await?;
+        store.apply_post_list(&channel, &older, PageAnchor::OlderThanHeld);
+        println!(
+            "page {page}: {} post(s) held, oldest is {:?}",
+            store.channel_posts(&channel).len(),
+            store
+                .channel_posts(&channel)
+                .first()
+                .map(|p| p.message.clone())
+                .unwrap_or_default()
+        );
+    }
+
+    // The whole point: one run of posts, strictly ordered, no repeats.
+    let held = store.channel_posts(&channel);
+    let ordered = held.windows(2).all(|w| w[0].create_at <= w[1].create_at);
+    let mut ids: Vec<&str> = held.iter().map(|p| p.id.as_str()).collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    println!(
+        "
+{total} post(s), ordered={ordered}, distinct={}",
+        ids.len()
+    );
+    if !ordered || ids.len() != total {
+        return Err("the merged timeline is out of order or has duplicates".into());
+    }
+    Ok(())
 }
 
 /// Add or take back a reaction.
@@ -363,17 +457,7 @@ async fn send(args: &[String]) -> Result<(), String> {
     let text = require(args, "--text")?;
     let (client, saved) = connect()?;
 
-    // Resolve the channel by name within whichever team has it.
-    let teams = fetch(&client, &rest::my_teams(), rest::parse_teams).await?;
-    let mut found = None;
-    for team in &teams {
-        let channels = fetch(&client, &rest::my_channels(&team.id), rest::parse_channels).await?;
-        if let Some(c) = channels.into_iter().find(|c| c.name == name) {
-            found = Some(c.id);
-            break;
-        }
-    }
-    let channel = found.ok_or_else(|| format!("no channel called {name:?}"))?;
+    let channel = resolve_channel(&client, &name).await?;
 
     // The pending id is what lets an optimistic post on screen be matched to
     // the `posted` event that confirms it, instead of appearing twice.

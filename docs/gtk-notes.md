@@ -153,10 +153,16 @@ view, and that depends on `ScrolledWindow` handing it the *viewport* height.
 channel in the lab the window still opened instantly and landed on the newest
 message — but the store only ever held the newest page of 60, because
 scrollback paging is not implemented yet, so the model never grew past one
-screen's worth either way. **That measurement proves the common path and not
-the virtualization.** When backfill lands, measure this again with tens of
-thousands of rows in the model before trusting it; if it does fall over, the
-fix is to drop the alignment, not to work around it.
+screen's worth either way. **That measurement proved the common path and not
+the virtualization.**
+
+Backfill has since landed, so a channel's model now grows without limit as
+the reader scrolls up. Rather than leave the question open, the alignment is
+applied **only while the model holds fewer than fifty rows** — past any
+plausible window height, so beyond that there is no empty space to take up
+and nothing to gain by risking it. The visible benefit is kept for the short
+channels it was for, and large channels get the plain `Fill` that ListView
+is designed around.
 
 ## Two things about avatars that cost a screenshot each
 

@@ -116,6 +116,26 @@ async fn run(
         match command {
             Command::Sync => sync(&a.client, &a.session, &events).await,
             Command::OpenChannel(channel) => open_channel(&a.client, &channel, &events).await,
+            Command::LoadOlder { channel, before } => {
+                let query = PostQuery::Before {
+                    post: before.to_string(),
+                    per_page: rest::DEFAULT_PER_PAGE,
+                };
+                match fetch(
+                    &a.client,
+                    &rest::posts_for_channel(&channel, &query),
+                    rest::parse_post_list,
+                )
+                .await
+                {
+                    Ok(page) => {
+                        let _ = events.send(Event::OlderPosts { channel, page }).await;
+                    }
+                    Err(e) => {
+                        let _ = events.send(Event::Failed(e)).await;
+                    }
+                }
+            }
             Command::FetchAvatar { user, version } => {
                 // The cache first, so a relaunch draws faces without a
                 // single request.

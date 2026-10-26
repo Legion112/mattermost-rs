@@ -38,6 +38,9 @@ pub enum Command {
     Send { channel: ChannelId, text: String },
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
+    /// Fetch the page of history immediately before `before`, which is the
+    /// oldest post currently held.
+    LoadOlder { channel: ChannelId, before: PostId },
     /// Fetch one person's avatar. The window asks per author it has not
     /// drawn yet, and asks once: the engine answers with bytes either from
     /// its file cache or from the server.
@@ -113,6 +116,12 @@ pub enum Event {
     },
     Users(Vec<User>),
     Posts {
+        channel: ChannelId,
+        page: PostList,
+    },
+    /// A page of history older than what was held. Separate from `Posts`
+    /// because it merges with a different anchor and must not move the view.
+    OlderPosts {
         channel: ChannelId,
         page: PostList,
     },
