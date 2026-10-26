@@ -75,8 +75,13 @@ jobs:
       - name: 100% line coverage on the gated crates
         run: make cover-gate
 
+      # `if: always()` alone does not make a step non-gating -- a failing step
+      # still fails the job, so the label was a lie until continue-on-error
+      # went on it. Found the honest way: this step turned the run red after an
+      # earlier failure meant cargo-llvm-cov was never installed.
       - name: coverage report (whole workspace, informational, never gating)
         if: always()
+        continue-on-error: true
         run: make cover-report
 
       - uses: actions/upload-artifact@v7

@@ -32,15 +32,6 @@ pub(crate) fn run() -> Result<(), String> {
     println!("toolchain");
     report("rustc", &version_of("rustc", &["--version"]));
     report("cargo", &version_of("cargo", &["--version"]));
-    if let Some(v) = first_line(Command::new("cargo").args(["llvm-cov", "--version"])) {
-        report("cargo-llvm-cov", &v);
-    } else {
-        report(
-            "cargo-llvm-cov",
-            "MISSING — cargo install cargo-llvm-cov (make cover-gate needs it)",
-        );
-        problems.push("cargo-llvm-cov is not installed".into());
-    }
 
     println!("system libraries (pkg-config, Homebrew excluded)");
     for (module, want) in REQUIRED {
@@ -85,12 +76,30 @@ pub(crate) fn run() -> Result<(), String> {
         );
     }
 
-    println!("lab prerequisites");
+    // Optional tooling is REPORTED but never fatal. Only the things needed to
+    // compile the client are hard requirements; a tool that one target needs
+    // is that target's problem to complain about, and it will -- `cover-gate`
+    // without cargo-llvm-cov fails on its own with a clear message.
+    //
+    // This distinction is not cosmetic. CI installs cargo-llvm-cov with an
+    // action that runs *after* this check, so treating it as required made
+    // doctor fail every run while reporting a perfectly healthy environment.
+    println!("optional tooling (reported, never fatal)");
+    if let Some(v) = first_line(Command::new("cargo").args(["llvm-cov", "--version"])) {
+        report("cargo-llvm-cov", &v);
+    } else {
+        report(
+            "cargo-llvm-cov",
+            "not installed — `cargo install cargo-llvm-cov`; only `make cover-gate` needs it",
+        );
+    }
     if succeeds("docker", &["info"]) {
         report("docker", &version_of("docker", &["--version"]));
     } else {
         report("docker", "daemon not answering — 'make lab' will not run");
     }
+
+    println!("lab prerequisites");
 
     let targets =
         output(Command::new("rustup").args(["target", "list", "--installed"])).unwrap_or_default();
