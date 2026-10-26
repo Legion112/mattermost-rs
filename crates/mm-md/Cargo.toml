@@ -9,6 +9,9 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+# Pinned deliberately: 0.13 changed the event API, and a silent bump would
+# reshape the parse tree under the renderer.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [lints]
 workspace = true

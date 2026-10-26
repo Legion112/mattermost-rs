@@ -205,6 +205,56 @@ fn wire(
     }
 }
 
+/// Render a parsed message to Pango markup.
+///
+/// Block structure is flattened to lines: block-level widgets per paragraph
+/// arrive with the component tree, and emitting them as separate labels now
+/// would mean rebuilding the row factory for a layout that is about to change.
+fn render_markup(doc: &mm_md::Document) -> String {
+    let mut out = String::new();
+    for block in &doc.blocks {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        match block {
+            mm_md::Block::Paragraph(inlines) | mm_md::Block::Heading { inlines, .. } => {
+                out.push_str(&mm_md::to_pango(inlines));
+            }
+            mm_md::Block::ListItem(inlines) => {
+                out.push_str("• ");
+                out.push_str(&mm_md::to_pango(inlines));
+            }
+            mm_md::Block::Code { code, .. } => {
+                out.push_str("<tt>");
+                out.push_str(&mm_md::escape(code.trim_end()));
+                out.push_str("</tt>");
+            }
+            mm_md::Block::Quote(blocks) => {
+                let inner = mm_md::Document {
+                    blocks: blocks.clone(),
+                };
+                out.push_str("<i>");
+                out.push_str(&render_markup(&inner));
+                out.push_str("</i>");
+            }
+            mm_md::Block::Rule => out.push_str("───"),
+        }
+    }
+    out
+}
+
+/// `HH:MM` in local time.
+fn clock_time(millis: i64) -> String {
+    use chrono::{Local, TimeZone};
+    // An out-of-range or ambiguous timestamp is not worth failing a render
+    // over; an empty time column is better than no message.
+    if let chrono::offset::LocalResult::Single(dt) = Local.timestamp_millis_opt(millis) {
+        dt.format("%H:%M").to_string()
+    } else {
+        String::new()
+    }
+}
+
 /// The message list: a `ListView` over a model of ids, with one recycled
 /// widget set per visible row.
 ///
@@ -220,10 +270,17 @@ fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
         row.set_margin_end(12);
         row.set_margin_top(4);
         row.set_margin_bottom(4);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         let author = gtk::Label::builder()
             .xalign(0.0)
             .css_classes(["heading"])
             .build();
+        let time = gtk::Label::builder()
+            .xalign(0.0)
+            .css_classes(["dim-label", "caption"])
+            .build();
+        header.append(&author);
+        header.append(&time);
         // A non-editable TextView rather than a Label: selection across the
         // whole message, and the inline paintables custom emoji will need.
         let body = gtk::Label::builder()
@@ -231,7 +288,7 @@ fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
             .wrap(true)
             .selectable(true)
             .build();
-        row.append(&author);
+        row.append(&header);
         row.append(&body);
         item.downcast_ref::<gtk::ListItem>()
             .expect("a list item")
@@ -245,11 +302,22 @@ fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
         let Some(row) = item.child().and_downcast::<gtk::Box>() else {
             return;
         };
-        if let Some(author) = row.first_child().and_downcast::<gtk::Label>() {
-            author.set_text(&data.author());
+        if let Some(header) = row.first_child().and_downcast::<gtk::Box>() {
+            if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
+                author.set_text(&data.author());
+            }
+            if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
+                time.set_text(&data.time());
+            }
         }
         if let Some(body) = row.last_child().and_downcast::<gtk::Label>() {
-            body.set_text(&data.body());
+            // set_markup on text that is not markup would make GTK log an
+            // error and drop the message, so the flag decides.
+            if data.is_markup() {
+                body.set_markup(&data.body());
+            } else {
+                body.set_text(&data.body());
+            }
         }
     });
 
@@ -472,10 +540,21 @@ impl Ui {
                 .get(&post.user_id)
                 .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned());
             let suffix = if post.is_edited() { " (edited)" } else { "" };
+            let doc = mm_md::parse(&post.message);
+            // Most messages are a single plain paragraph, and for those the
+            // markup round-trip is skipped entirely.
+            let (body, markup) = if let Some(plain) = doc.plain_text() {
+                (format!("{plain}{suffix}"), false)
+            } else {
+                let rendered = render_markup(&doc);
+                (format!("{rendered}{}", mm_md::escape(suffix)), true)
+            };
             self.posts.append(&PostRow::new(
                 post.id.as_str(),
                 &author,
-                &format!("{}{suffix}", post.message),
+                &body,
+                &clock_time(post.create_at.millis()),
+                markup,
             ));
         }
         self.composer.set_sensitive(true);

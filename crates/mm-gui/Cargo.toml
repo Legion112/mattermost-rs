@@ -12,6 +12,7 @@ repository.workspace   = true
 mm-api   = { path = "../mm-api" }
 mm-core    = { path = "../mm-core" }
 mm-desktop = { path = "../mm-desktop" }
+mm-md      = { path = "../mm-md" }
 mm-types = { path = "../mm-types" }
 
 # v4_14 / v1_5, not higher: that is the apt API level on Ubuntu 24.04 and on
@@ -22,6 +23,7 @@ adw  = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
 gtk  = { package = "gtk4", version = "0.9", features = ["v4_14"] }
 
 async-channel = "2"
+chrono        = { version = "0.4", default-features = false, features = ["clock"] }
 tokio         = { version = "1", features = ["sync"] }
 
 [lints]
