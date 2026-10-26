@@ -178,6 +178,19 @@ fn the_categories_path_carries_the_user_id_not_me() {
     assert_eq!(list.order, ["channels_u1_t1"]);
 }
 
+/// The stats endpoint feeds the member count in the channel header.
+#[test]
+fn channel_stats_reads_the_member_count() {
+    let c = ChannelId::new("c1");
+    assert_eq!(channel_stats(&c).path, "/api/v4/channels/c1/stats");
+    let stats = parse_channel_stats(&ok(
+        r#"{"channel_id":"c1","member_count":4,"pinnedpost_count":1}"#,
+    ))
+    .unwrap();
+    assert_eq!(stats.member_count, 4);
+    assert_eq!(stats.pinned_post_count, 1);
+}
+
 /// An empty channel id is a legal, meaningful body meaning "focus loss".
 #[test]
 fn view_channel_allows_an_empty_channel_for_focus_loss() {
@@ -398,6 +411,10 @@ fn every_parser_propagates_a_server_error() {
     assert!(matches!(parse_ping(&err), Err(ApiError::Forbidden(_))));
     assert!(matches!(
         parse_categories(&err),
+        Err(ApiError::Forbidden(_))
+    ));
+    assert!(matches!(
+        parse_channel_stats(&err),
         Err(ApiError::Forbidden(_))
     ));
     assert!(matches!(

@@ -63,6 +63,7 @@ struct Ui {
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     selected: Rc<RefCell<Option<ChannelId>>>,
     sidebar: gtk::ListBox,
+    identity: gtk::Label,
     posts: gio::ListStore,
     post_view: gtk::ListView,
     scroller: gtk::ScrolledWindow,
@@ -102,7 +103,7 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
             while let Ok(event) = events.recv().await {
                 pump.on_event(event);
             }
-            pump.status.set_text("the engine stopped");
+            pump.set_status("the engine stopped");
         });
     });
 
@@ -117,8 +118,25 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let sidebar_scroll = gtk::ScrolledWindow::builder()
         .child(&sidebar)
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .width_request(260)
+        .vexpand(true)
         .build();
+    // Which account this window is looking at. It used to live in the window
+    // subtitle, which the channel header now owns; this is where Mattermost
+    // puts the server and team too.
+    let identity = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(10)
+        .margin_bottom(6)
+        .css_classes(["dim-label", "caption"])
+        .label("connecting…")
+        .build();
+    let sidebar_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar_pane.set_size_request(260, -1);
+    sidebar_pane.append(&identity);
+    sidebar_pane.append(&sidebar_scroll);
 
     let (posts, post_view, scroller) = build_post_list();
 
@@ -146,7 +164,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
 
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .start_child(&sidebar_scroll)
+        .start_child(&sidebar_pane)
         .end_child(&content)
         .resize_start_child(false)
         .position(260)
@@ -197,6 +215,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         commands: commands.clone(),
         selected: Rc::new(RefCell::new(None)),
         sidebar: sidebar.clone(),
+        identity: identity.clone(),
         posts,
         post_view,
         scroller,
@@ -692,7 +711,7 @@ impl Ui {
                 self.login.set_busy(false);
                 self.login
                     .show_hint("Your password is sent to your server and never stored.");
-                self.title.set_subtitle("not signed in");
+                self.identity.set_text("not signed in");
             }
             Event::LoginFailed { message, needs_mfa } => {
                 self.login.set_busy(false);
@@ -713,8 +732,8 @@ impl Ui {
                 self.login.set_busy(false);
                 let threading = self.store.borrow().threading;
                 *self.store.borrow_mut() = Store::new(me, threading);
-                self.title.set_subtitle(&format!("{username} · {server}"));
-                self.status.set_text("connected");
+                self.identity.set_text(&format!("{username} · {server}"));
+                self.set_status("connected");
             }
             Event::Threading(threading) => {
                 self.store.borrow_mut().threading = threading;
@@ -727,6 +746,13 @@ impl Ui {
             Event::Members(members) => {
                 self.store.borrow_mut().apply_members(members);
                 self.refresh_sidebar();
+            }
+            Event::Stats(stats) => {
+                let channel = stats.channel_id.clone();
+                self.store.borrow_mut().apply_stats(stats);
+                if self.selected.borrow().as_ref() == Some(&channel) {
+                    self.refresh_heading(&channel);
+                }
             }
             Event::Categories(list) => {
                 self.store.borrow_mut().apply_categories(&list);
@@ -763,11 +789,11 @@ impl Ui {
                 }
             }
             Event::ResyncRequired(why) => {
-                self.status.set_text(&format!("reconnected: {why}"));
+                self.set_status(&format!("reconnected: {why}"));
                 self.commands.send(Command::Sync).ok();
             }
-            Event::Status(text) => self.status.set_text(&text),
-            Event::Failed(text) => self.status.set_text(&format!("error: {text}")),
+            Event::Status(text) => self.set_status(&text),
+            Event::Failed(text) => self.set_status(&format!("error: {text}")),
         }
     }
 
@@ -902,7 +928,34 @@ impl Ui {
         }
     }
 
+    /// Show a line of status, and only while it says something.
+    ///
+    /// The window used to carry a permanent "ready" under the messages,
+    /// which is a developer's line: it tells the user what they can already
+    /// see and takes up room doing it. Anything that is not the quiet steady
+    /// state -- loading, reconnecting, an error -- still shows.
+    fn set_status(&self, text: &str) {
+        const QUIET: [&str; 2] = ["ready", "connected"];
+        self.status.set_text(text);
+        self.status.set_visible(!QUIET.contains(&text));
+    }
+
+    /// Put the open channel's name, and how many people are in it, in the
+    /// window's title bar.
+    fn refresh_heading(&self, channel: &ChannelId) {
+        let (name, members) = self.store.borrow().channel_heading(channel);
+        self.title.set_title(&name);
+        self.title.set_subtitle(&match members {
+            // "1 member" would be the user alone in a channel, which is a
+            // real state and reads badly in the plural.
+            Some(1) => "1 member".to_owned(),
+            Some(n) => format!("{n} members"),
+            None => String::new(),
+        });
+    }
+
     fn refresh_posts(&self, channel: &ChannelId) {
+        self.refresh_heading(channel);
         // Was the newest message in view before this update? Asked of the
         // model, not of the scroll adjustment: `upper` is an estimate GTK
         // revises as rows are realized, and it was observed moving 20% in both

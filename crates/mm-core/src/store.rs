@@ -14,8 +14,8 @@ use crate::timeline::{Merge, PageAnchor, PostKey, Timeline};
 use crate::unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread};
 use mm_api::ws::WsEvent;
 use mm_types::{
-    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelType, Post, PostId,
-    PostList, Team, Timestamp, User, UserId,
+    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, ChannelType,
+    Post, PostId, PostList, Team, Timestamp, User, UserId,
 };
 use std::collections::HashMap;
 
@@ -75,6 +75,8 @@ pub struct Store {
     /// The server's grouping of the sidebar, already in stacking order.
     /// Empty until the first sync, which is why `sidebar` still exists.
     pub categories: Vec<ChannelCategory>,
+    /// Member counts, fetched per channel when it is opened.
+    pub stats: HashMap<ChannelId, ChannelStats>,
 }
 
 impl Store {
@@ -117,6 +119,28 @@ impl Store {
             .map(|(id, c)| (id.clone(), c.last_post_at.millis()))
             .collect();
         group(self.sidebar(), &self.categories, &recency)
+    }
+
+    /// Record a channel's member count.
+    pub fn apply_stats(&mut self, stats: ChannelStats) -> Vec<Change> {
+        let channel = stats.channel_id.clone();
+        self.stats.insert(channel.clone(), stats);
+        vec![Change::Unread(channel)]
+    }
+
+    /// What the channel header says: the channel's name, and how many people
+    /// are in it once that is known.
+    ///
+    /// Returns the raw id for a channel we have not loaded, for the same
+    /// reason `channel_label` does: showing something beats showing a blank
+    /// header while the first sync is still in flight.
+    #[must_use]
+    pub fn channel_heading(&self, channel: &ChannelId) -> (String, Option<i64>) {
+        let name = self
+            .channels
+            .get(channel)
+            .map_or_else(|| channel.to_string(), |c| self.channel_label(c));
+        (name, self.stats.get(channel).map(|s| s.member_count))
     }
 
     pub fn apply_users(&mut self, users: Vec<User>) -> Vec<Change> {

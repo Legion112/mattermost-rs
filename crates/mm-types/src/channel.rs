@@ -144,6 +144,22 @@ impl ChannelMember {
     }
 }
 
+/// `GET /channels/{id}/stats`.
+///
+/// The member count the channel header shows. Note `pinnedpost_count`: the
+/// server spells it without the second underscore, unlike every neighbouring
+/// field, and a `#[serde(default)]` struct would silently read zero forever.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelStats {
+    pub channel_id: ChannelId,
+    pub member_count: i64,
+    pub guest_count: i64,
+    #[serde(rename = "pinnedpost_count")]
+    pub pinned_post_count: i64,
+    pub files_count: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +286,29 @@ mod tests {
         let round: ChannelMember =
             serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(round, m);
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    /// Captured from 12.0.1. `pinnedpost_count` is the whole reason this test
+    /// exists: every other field in the payload uses underscores between
+    /// words, and reading it as `pinned_post_count` parses happily and
+    /// returns zero forever.
+    #[test]
+    fn the_pinned_post_count_is_spelled_without_the_second_underscore() {
+        let json = r#"{"channel_id":"c1","member_count":2,"guest_count":0,
+                       "pinnedpost_count":7,"files_count":3}"#;
+        let stats: ChannelStats = serde_json::from_str(json).expect("parses");
+        assert_eq!(stats.member_count, 2);
+        assert_eq!(stats.pinned_post_count, 7);
+        assert_eq!(stats.files_count, 3);
+        assert_eq!(stats.channel_id, ChannelId::new("c1"));
+
+        // And it goes back out the way it came in.
+        let text = serde_json::to_string(&stats).expect("serializes");
+        assert!(text.contains("pinnedpost_count"), "{text}");
     }
 }

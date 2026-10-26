@@ -10,7 +10,9 @@
 
 use mm_api::ws::WsEvent;
 use mm_core::Threading;
-use mm_types::{CategoryList, Channel, ChannelId, ChannelMember, PostList, Team, User, UserId};
+use mm_types::{
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, PostList, Team, User, UserId,
+};
 
 /// GUI to engine.
 #[derive(Debug, Clone)]
@@ -86,6 +88,8 @@ pub enum Event {
     Members(Vec<ChannelMember>),
     /// The server's sidebar grouping for a team.
     Categories(CategoryList),
+    /// A channel's member count, for its header.
+    Stats(ChannelStats),
     Users(Vec<User>),
     Posts {
         channel: ChannelId,

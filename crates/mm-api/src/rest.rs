@@ -6,8 +6,8 @@
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, Post, PostList, Preference, Team, TeamId,
-    User, UserId,
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, Post, PostList, Preference,
+    Team, TeamId, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -211,6 +211,16 @@ pub fn my_categories(user: &UserId, team: &TeamId) -> HttpRequest {
 
 pub fn parse_categories(resp: &HttpResponse) -> Result<CategoryList, ApiError> {
     parse_json(resp, "GET /users/{user}/teams/{team}/channels/categories")
+}
+
+/// How many people are in a channel, for the channel header.
+#[must_use]
+pub fn channel_stats(channel: &ChannelId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/channels/{channel}/stats"))
+}
+
+pub fn parse_channel_stats(resp: &HttpResponse) -> Result<ChannelStats, ApiError> {
+    parse_json(resp, "GET /channels/{id}/stats")
 }
 
 /// Mark a channel read.

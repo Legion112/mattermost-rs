@@ -386,6 +386,20 @@ async fn sync(client: &Client, session: &Session, events: &async_channel::Sender
 }
 
 async fn open_channel(client: &Client, channel: &ChannelId, events: &async_channel::Sender<Event>) {
+    // The member count for the header. Sent before the posts because it is a
+    // small request and the header is the first thing that changes; a
+    // failure is not worth reporting, since the header simply shows the
+    // channel name without a count.
+    if let Ok(stats) = fetch(
+        client,
+        &rest::channel_stats(channel),
+        rest::parse_channel_stats,
+    )
+    .await
+    {
+        let _ = events.send(Event::Stats(stats)).await;
+    }
+
     let request = rest::posts_for_channel(channel, &PostQuery::first());
     match fetch(client, &request, rest::parse_post_list).await {
         Ok(page) => {

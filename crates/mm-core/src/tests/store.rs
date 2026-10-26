@@ -942,3 +942,36 @@ fn the_sidebar_still_draws_before_any_categories_arrive() {
     assert_eq!(sections.len(), 1);
     assert_eq!(sections[0].rows.len(), 1);
 }
+
+/// The channel header asks one question and gets both halves of its answer.
+#[test]
+fn the_channel_heading_carries_the_name_and_the_member_count() {
+    let mut store = store();
+    store.apply_channels(vec![channel("c1", 0, 0)]);
+    let id = ChannelId::new("c1");
+
+    // Before the stats arrive there is a name and no count, and the header
+    // has to draw anyway.
+    assert_eq!(store.channel_heading(&id), ("Channel c1".to_owned(), None));
+
+    let changes = store.apply_stats(mm_types::ChannelStats {
+        channel_id: id.clone(),
+        member_count: 7,
+        ..mm_types::ChannelStats::default()
+    });
+    assert_eq!(changes, vec![Change::Unread(id.clone())]);
+    assert_eq!(
+        store.channel_heading(&id),
+        ("Channel c1".to_owned(), Some(7))
+    );
+}
+
+/// A channel we have never loaded still gets a heading rather than a blank
+/// one -- the same reason `channel_label` falls back to the raw id.
+#[test]
+fn an_unknown_channel_still_gets_a_heading() {
+    let store = store();
+    let (name, members) = store.channel_heading(&ChannelId::new("c-unknown"));
+    assert_eq!(name, "c-unknown");
+    assert_eq!(members, None);
+}

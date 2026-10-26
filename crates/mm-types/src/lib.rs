@@ -33,7 +33,9 @@ mod user;
 pub mod wire;
 
 pub use category::{CategoryKind, CategoryList, CategorySorting, ChannelCategory};
-pub use channel::{Channel, ChannelMember, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION};
+pub use channel::{
+    Channel, ChannelMember, ChannelStats, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION,
+};
 pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
 pub use post::{FileRef, Post, PostList};
 pub use prefs::{NameFormat, Preference, is_true, keys};
