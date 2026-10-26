@@ -159,8 +159,12 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     header.pack_end(&refresh);
 
     let login = Rc::new(LoginPage::new());
+    // No transition. A crossfade queued while the stack is still unmapped
+    // leaves `visible_child_name()` reporting the new page while the old one
+    // is what actually renders -- which presented as "signed in, but the
+    // login form is still on screen".
     let stack = gtk::Stack::builder()
-        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_type(gtk::StackTransitionType::None)
         .build();
     stack.add_named(&login.root, Some("login"));
     stack.add_named(&split, Some("main"));
@@ -170,8 +174,18 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     root.append(&header);
     root.append(&stack);
 
+    // When the application id is overridden for development, put it in the
+    // window title too. Two instances otherwise present as two windows with
+    // the same name and no way to tell them apart -- which is how a test
+    // capture ended up photographing the wrong one.
+    let window_title = std::env::var(APP_ID_OVERRIDE).map_or_else(
+        |_| "mattermost-rs".to_owned(),
+        |id| format!("mattermost-rs [{id}]"),
+    );
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
+        .title(window_title)
         .default_width(1_040)
         .default_height(720)
         .content(&root)
@@ -244,9 +258,6 @@ fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSend
 ///
 /// Separate from `build` only so neither function grows past the point where
 /// it can be read in one go.
-/// How close to the end still counts as "at the bottom".
-const STICK_SLACK: f64 = 48.0;
-
 fn wire(
     ui: &Ui,
     refresh: &gtk::Button,
@@ -261,40 +272,58 @@ fn wire(
         });
     }
     {
-        // Following new messages, done the only way that is reliable here.
+        // Following new messages, driven by what the reader did rather than by
+        // arithmetic on the scroll position.
         //
-        // `changed` fires whenever the content height or page size moves,
-        // which with variable-height rows happens repeatedly as GTK realizes
-        // them and refines its estimate. Re-pinning on each one converges on
-        // the true bottom; a single scroll never does. `value-changed` is how
-        // the reader opts out: scrolling away from the end clears the flag, so
-        // history is never yanked out from under them.
-        let adjustment = ui.scroller.vadjustment();
+        // The arithmetic version was tried and does not work: `upper` is an
+        // estimate GTK revises as rows are realized, so a view pinned to the
+        // bottom stops looking pinned the moment the estimate grows, and the
+        // flag clears itself. Scroll gestures and edge hits are facts about
+        // intent and do not drift.
+        let scrolling_up = gtk::EventControllerScroll::new(
+            gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC,
+        );
         {
             let stick = Rc::clone(&ui.stick_to_bottom);
-            adjustment.connect_value_changed(move |adj| {
-                let at_end = adj.value() + adj.page_size() >= adj.upper() - STICK_SLACK;
-                stick.set(at_end);
-            });
-        }
-        {
-            let stick = Rc::clone(&ui.stick_to_bottom);
-            adjustment.connect_changed(move |adj| {
-                if stick.get() {
-                    adj.set_value(adj.upper() - adj.page_size());
+            scrolling_up.connect_scroll(move |_, _, dy| {
+                // Any upward scroll means the reader is looking at history and
+                // must not be yanked away from it.
+                if dy < 0.0 {
+                    stick.set(false);
                 }
+                glib::Propagation::Proceed
             });
         }
+        ui.scroller.add_controller(scrolling_up);
+
+        // Arriving back at the bottom opts back in.
+        let stick = Rc::clone(&ui.stick_to_bottom);
+        ui.scroller.connect_edge_reached(move |_, edge| {
+            if edge == gtk::PositionType::Bottom {
+                stick.set(true);
+            }
+        });
     }
     {
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
         let stick = Rc::clone(&ui.stick_to_bottom);
         sidebar.connect_row_selected(move |_, row| {
-            // Opening a channel always starts at the newest message.
-            stick.set(true);
             let Some(row) = row else { return };
             let id = ChannelId::new(row.widget_name().to_string());
+
+            // `refresh_sidebar` rebuilds every row and re-selects the open
+            // channel, so this handler fires on its own output. Without this
+            // guard each WebSocket event -- including a stranger's `typing` --
+            // re-fetched the whole channel over the network, rebuilt the post
+            // list and wrote a mark-read. Only a real change of channel is a
+            // user action.
+            if selected.borrow().as_ref() == Some(&id) {
+                return;
+            }
+
+            // Opening a channel always starts at the newest message.
+            stick.set(true);
             *selected.borrow_mut() = Some(id.clone());
             commands.send(Command::OpenChannel(id.clone())).ok();
             commands.send(Command::MarkRead(id)).ok();

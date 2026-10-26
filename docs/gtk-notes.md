@@ -117,3 +117,26 @@ splice or a `scroll_to` is premature. Wait a tick.
   path `mm-md::is_plain()` will emit. Rows containing a `TextView` with inline
   custom emoji are heavier and need their own measurement before P2.
 - Wayland. X11 only so far.
+
+## Capturing one window when two instances are running
+
+`MMRS_APP_ID` overrides the GTK application id *and* appends it to the window
+title, so a test instance is `mattermost-rs [mmrs.lab]` while the one you use
+all day is plain `mattermost-rs`. That exists because `xwininfo -root -tree`
+prints the WM **class** on every line:
+
+```
+0x2e00004 "mattermost-rs [mmrs.lab]": ("mattermost-rs" "mattermost-rs") ...
+0x2c00004 "mattermost-rs":            ("mattermost-rs" "mattermost-rs") ...
+```
+
+so matching `"mattermost-rs"` matches the class and therefore *both* windows.
+Twice during development that photographed the real session instead of the
+test one. Match the bracketed title and nothing else:
+
+```
+xwininfo -root -tree | grep -F "\"mattermost-rs [$MMRS_APP_ID]\"" | awk '{print $1}'
+```
+
+`xdotool` and `wmctrl` are not installed on this machine; `import -window <id>`
+from ImageMagick is.
