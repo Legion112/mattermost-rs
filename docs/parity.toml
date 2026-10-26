@@ -22,22 +22,22 @@
 id       = "unread.channel_counts"
 area     = "unread"
 upstream = "server-api"
-status   = "partial"
+status   = "done"
 endpoints = [
   "GET /api/v4/users/me/teams/{team_id}/channels/members",
   "POST /api/v4/channels/members/{user_id}/view",
 ]
 ws_events        = ["channel_member_updated", "multiple_channels_viewed"]
-verified_against = ""
+verified_against = "12.0.1"
 notes = """
-The arithmetic is implemented in mm-core::unread from the server's own SQL \
-(GetChannelUnread): total_msg_count - msg_count, the _root variants under CRT, \
-mention counts read off the member row, clamped at zero because \
-UpdateLastViewedAt assigns greatest(). What is NOT yet verified is the policy \
-at the edges: a muted channel holding a direct mention, DM channels, and the \
-interaction with ignore_channel_mentions. That policy lives in the webapp's \
-TypeScript selectors, so it needs a recorded trace against a live server \
-rather than more reading."""
+Verified against a live Mattermost 12.0.1: a channel with 6 plain messages and \
+1 mention reported 7 unread with a mention badge, while a muted channel \
+reported its 3 unread without an unread marker and contributed nothing to the \
+mention total. CollapsedThreads came back as always_on and the client switched \
+itself to root-only counting. Still NOT verified at the edges: a muted channel \
+holding a direct mention, DM channels, and the interaction with \
+ignore_channel_mentions. That policy lives in the webapp's TypeScript \
+selectors and wants a recorded trace rather than more reading."""
 
 [[feature]]
 id       = "calls"
@@ -91,3 +91,73 @@ StatusNotifierWatcher is present with a registered host, and a real ksni item \
 registers successfully. See docs/gtk-notes.md. Depends on that GNOME \
 extension, so the implementation must detect an absent watcher and say so \
 rather than publishing into the void."""
+
+[[feature]]
+id       = "auth.password_and_pat"
+area     = "auth"
+upstream = "server-api"
+status   = "done"
+endpoints = ["POST /api/v4/users/login", "GET /api/v4/users/me"]
+verified_against = "12.0.1"
+notes = """
+The session token arrives in the Token response header, 26 characters, with \
+the body carrying only the sanitized user -- confirmed on a live server. The \
+MFA field is named `token`, not `mfa_token`. A personal access token is used \
+identically via Authorization: Bearer."""
+
+[[feature]]
+id       = "auth.sso_desktop_token"
+area     = "auth"
+upstream = "server-api"
+status   = "planned"
+endpoints = ["POST /api/v4/users/login/desktop_token"]
+verified_against = ""
+notes = """
+The server side of the desktop-token flow is confirmed from source, including \
+the 3-minute TTL. What is NOT confirmed is how the /login/desktop page hands \
+server_token to a native process. Until that is answered, SSO users use a \
+personal access token, and the login dialog should say so rather than failing \
+at the password field."""
+
+[[feature]]
+id       = "ws.live_events"
+area     = "posts"
+upstream = "server-api"
+status   = "partial"
+ws_events = ["hello", "posted", "post_edited", "post_deleted", "channel_member_updated", "multiple_channels_viewed", "channel_viewed", "typing", "status_change", "user_updated"]
+verified_against = "12.0.1"
+notes = """
+posted / post_edited / post_deleted confirmed live, including the `post` \
+payload being a JSON document inside a JSON string. A hello carrying a NEW \
+connection id is treated as lost events; an event-sequence hole is treated the \
+same way. NOT yet done: acting on either signal with a REST resync -- the GUI \
+currently re-syncs the sidebar but does not close a post gap, which is why \
+mm-core::Timeline refuses to merge a page whose adjacency it cannot \
+establish."""
+
+[[feature]]
+id       = "desktop.notifications"
+area     = "notify"
+upstream = "desktop"
+status   = "partial"
+verified_against = ""
+notes = """
+Policy is implemented and fully covered in mm-desktop; delivery goes through \
+zbus in mm-desktop-xdg and returns Ok against gnome-shell 46. Whether a banner \
+is actually drawn is the shell's own policy and cannot be asserted from here \
+-- `mattermost-rs doctor` exists so a person can settle it in one command. \
+UNVERIFIED: whether muting alone should silence notifications; see \
+NotifySettings::muted_is_silent."""
+
+[[feature]]
+id       = "posts.timeline_gaps"
+area     = "posts"
+upstream = "server-api"
+status   = "partial"
+verified_against = ""
+notes = """
+The timeline holds one contiguous run and REFUSES to merge a page whose \
+adjacency cannot be established, rather than joining two disjoint runs and \
+letting the reader scroll past messages with nothing on screen to say so. The \
+plan's full multi-segment model is not built, which is what `since`-based \
+backfill needs. Until then every fetch is anchored to what is held."""

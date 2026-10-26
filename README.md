@@ -6,8 +6,14 @@ This is a from-scratch reimplementation, not a fork. The official desktop app is
 an Electron shell around the server's web app; this talks the Mattermost REST
 v4 API and WebSocket event stream directly and draws its own GTK4 interface.
 
-**Status: early. Not yet usable.** See [docs/parity.md](docs/parity.md) for what
-works, and the Phases section below for what lands when.
+**Status: early, but it runs.** It logs in, lists channels with correct unread
+and mention counts, shows a channel's messages, sends messages, follows live
+WebSocket events, and raises desktop notifications. There is no markdown
+rendering, no threads, no files, no search, and no reconnect backfill yet.
+
+See [docs/parity.toml](docs/parity.toml) for feature-by-feature status,
+including which behaviours have been verified against a live server and which
+have not.
 
 ## Purpose
 
@@ -76,6 +82,7 @@ make release
 ./target/release/mattermost-rs token --server https://your.mattermost --token <pat>
 ./target/release/mattermost-rs sync      # channels and unread counts, in the terminal
 ./target/release/mattermost-rs gui       # the window
+./target/release/mattermost-rs doctor    # is anything listening for notifications?
 ```
 
 `login --server <url> --login-id <id> --password-env <VAR>` works too; the
