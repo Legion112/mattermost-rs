@@ -1,41 +1,395 @@
 //! `mattermost-rs` — a native Linux Mattermost client.
 //!
-//! **Outside the coverage gate.** This crate is wiring only: it constructs the
-//! real transports, starts the engine thread, and hands the GUI its two
-//! channels. Every decision it looks like it is making is made in `mm-core`.
+//! **Outside the coverage gate.** This crate is wiring: it constructs the real
+//! transports and drives `mm-core`. Every decision it looks like it is making
+//! is made in a gated crate.
+//!
+//! The GUI arrives in P1. Until then these subcommands exist so the stack can
+//! be exercised end to end against a real server — which is a better test of
+//! `mm-core` than any mock, because the server is the thing whose behaviour
+//! the store is modelling.
 
+mod session;
+
+use mm_api::ApiError;
+use mm_api::rest::{self, Login, PostQuery};
+use mm_api::ws::{WsOutcome, WsProtocol};
+use mm_core::{PageAnchor, Store, Threading};
+use mm_http::Client;
+use mm_types::{ChannelId, UserId};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-usage: mattermost-rs [options]
+mattermost-rs — a native Linux Mattermost client
 
-  --version    print the version and exit
-  --help       print this message and exit
+usage:
+  mattermost-rs login  --server <url> --login-id <id> --password-env <VAR> [--mfa <code>]
+  mattermost-rs token  --server <url> --token <pat>
+  mattermost-rs whoami
+  mattermost-rs sync   [--channel <name>]
+  mattermost-rs watch  [--seconds <n>]
+  mattermost-rs logout
+  mattermost-rs --version | --help
+
+A personal access token (`token`) is the supported path for SSO users: the
+browser-based SSO flow needs a hand-off this client does not implement yet.
+Passwords are read from an environment variable, never from an argument, so
+they do not land in your shell history or in `ps` output.
 ";
 
 fn main() -> ExitCode {
-    // Real argument parsing arrives with the `login`, `import-electron-config`
-    // and `record` subcommands in P0/P1. Until then this is enough to make the
-    // build job's `--version` smoke test mean something.
-    if let Some(arg) = std::env::args().nth(1) {
-        match arg.as_str() {
-            "--version" | "-V" => {
-                println!("mattermost-rs {}", env!("CARGO_PKG_VERSION"));
-                return ExitCode::SUCCESS;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(command) = args.first().map(String::as_str) else {
+        eprint!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let rest_args = &args[1..];
+
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("could not start the async runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let outcome = match command {
+        "--version" | "-V" => {
+            println!("mattermost-rs {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        "--help" | "-h" | "help" => {
+            print!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        "login" => runtime.block_on(login(rest_args)),
+        "token" => runtime.block_on(store_token(rest_args)),
+        "whoami" => runtime.block_on(whoami()),
+        "sync" => runtime.block_on(sync(rest_args)),
+        "watch" => runtime.block_on(watch(rest_args)),
+        "logout" => session::clear(),
+        other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
+    };
+
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(msg) => {
+            eprintln!("{msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn flag(args: &[String], name: &str) -> Option<String> {
+    let at = args.iter().position(|a| a == name)?;
+    args.get(at + 1).cloned()
+}
+
+fn require(args: &[String], name: &str) -> Result<String, String> {
+    flag(args, name).ok_or_else(|| format!("{name} is required\n\n{USAGE}"))
+}
+
+// ---------------------------------------------------------------- auth
+
+async fn login(args: &[String]) -> Result<(), String> {
+    let server = require(args, "--server")?;
+    let login_id = require(args, "--login-id")?;
+    let var = require(args, "--password-env")?;
+    let password =
+        std::env::var(&var).map_err(|_| format!("the environment variable {var} is not set"))?;
+
+    let client = Client::new(&server).map_err(|e| e.to_string())?;
+    let request = rest::login(&Login {
+        login_id,
+        password,
+        mfa_token: flag(args, "--mfa"),
+    });
+    let response = client.send(&request).await.map_err(|e| e.to_string())?;
+
+    match rest::parse_login(&response) {
+        Ok(found) => {
+            session::save(&session::Session {
+                server: client.base().to_string(),
+                token: found.token,
+                user_id: found.user.id.to_string(),
+                username: found.user.username.clone(),
+            })?;
+            println!("logged in as {} on {}", found.user.username, client.base());
+            Ok(())
+        }
+        Err(ApiError::MfaRequired(_)) => {
+            Err("this account needs a multi-factor code: re-run with --mfa <code>".to_owned())
+        }
+        Err(e) => Err(format!("login failed: {e}")),
+    }
+}
+
+async fn store_token(args: &[String]) -> Result<(), String> {
+    let server = require(args, "--server")?;
+    let token = require(args, "--token")?;
+    let client = Client::new(&server)
+        .map_err(|e| e.to_string())?
+        .with_token(token.clone());
+
+    // Prove the token works before saving it, so a typo fails here rather
+    // than at every later command.
+    let response = client.send(&rest::me()).await.map_err(|e| e.to_string())?;
+    let user = rest::parse_user(&response).map_err(|e| format!("the token was rejected: {e}"))?;
+
+    session::save(&session::Session {
+        server: client.base().to_string(),
+        token,
+        user_id: user.id.to_string(),
+        username: user.username.clone(),
+    })?;
+    println!("stored a token for {} on {}", user.username, client.base());
+    Ok(())
+}
+
+async fn whoami() -> Result<(), String> {
+    let (client, saved) = connect()?;
+    let response = client.send(&rest::me()).await.map_err(|e| e.to_string())?;
+    let user = rest::parse_user(&response).map_err(|e| e.to_string())?;
+    println!("{} ({}) on {}", user.username, user.id, saved.server);
+    if !user.full_name().is_empty() {
+        println!("name: {}", user.full_name());
+    }
+    println!("roles: {}", user.roles);
+    Ok(())
+}
+
+fn connect() -> Result<(Client, session::Session), String> {
+    let saved = session::load()?;
+    let client = Client::new(&saved.server)
+        .map_err(|e| e.to_string())?
+        .with_token(saved.token.clone());
+    Ok((client, saved))
+}
+
+// ---------------------------------------------------------------- sync
+
+/// Load everything the sidebar needs and print it.
+///
+/// This is the whole initial-load path the GUI will use, in the order that
+/// matters: teams, then channels and my membership of them, which is what
+/// makes the unread counts correct before any post is fetched.
+async fn sync(args: &[String]) -> Result<(), String> {
+    let (client, saved) = connect()?;
+    let mut store = Store::new(UserId::new(saved.user_id.clone()), Threading::Flat);
+
+    // Collapsed reply threads change which counters the unread arithmetic
+    // reads, and the server default has changed across versions, so it must be
+    // asked rather than assumed.
+    let config = fetch(&client, &rest::client_config(), rest::parse_client_config).await?;
+    if let Some(mode) = config.get("CollapsedThreads") {
+        if mode == "always_on" || mode == "default_on" {
+            store.threading = Threading::Collapsed;
+        }
+        println!("server CollapsedThreads={mode} -> {:?}", store.threading);
+    }
+
+    let teams = fetch(&client, &rest::my_teams(), rest::parse_teams).await?;
+    println!("{} team(s)", teams.len());
+
+    for team in &teams {
+        let channels = fetch(&client, &rest::my_channels(&team.id), rest::parse_channels).await?;
+        let members = fetch(
+            &client,
+            &rest::my_channel_members(&team.id),
+            rest::parse_channel_members,
+        )
+        .await?;
+        store.apply_channels(channels);
+        store.apply_members(members);
+    }
+    store.apply_teams(teams);
+
+    // DM labels come from the roster, so fetch the participants of any DM.
+    let dm_ids: Vec<String> = store
+        .channels
+        .values()
+        .filter(|c| c.kind == mm_types::ChannelType::Direct)
+        .flat_map(|c| c.name.split("__").map(str::to_owned).collect::<Vec<_>>())
+        .filter(|id| *id != saved.user_id)
+        .collect();
+    if !dm_ids.is_empty() {
+        let users = fetch(&client, &rest::users_by_ids(&dm_ids), rest::parse_users).await?;
+        store.apply_users(users);
+    }
+
+    let rows = store.sidebar();
+    println!(
+        "\n{} channel(s), {} unread, {} mention(s)\n",
+        rows.len(),
+        rows.iter().filter(|r| r.is_unread()).count(),
+        store.total_mentions()
+    );
+    for row in &rows {
+        let marker = if row.is_unread() { '*' } else { ' ' };
+        let mentions = if row.unread.mentions > 0 {
+            format!(" [{}]", row.unread.mentions)
+        } else {
+            String::new()
+        };
+        let muted = if row.muted { " (muted)" } else { "" };
+        println!(
+            "{marker} {:>4}{mentions:<5} {}{muted}",
+            row.unread.messages, row.display_name
+        );
+    }
+
+    if let Some(name) = flag(args, "--channel") {
+        show_channel(&client, &mut store, &name).await?;
+    }
+    Ok(())
+}
+
+async fn show_channel(client: &Client, store: &mut Store, name: &str) -> Result<(), String> {
+    let found = store
+        .channels
+        .values()
+        .find(|c| c.name == name || store.channel_label(c) == name)
+        .map(|c| c.id.clone())
+        .ok_or_else(|| format!("no channel called {name:?}"))?;
+
+    let page = fetch_posts(client, &found).await?;
+    store.apply_post_list(&found, &page, PageAnchor::Newest);
+
+    println!("\n--- {name} ---");
+    for post in store.channel_posts(&found) {
+        let author = store
+            .users
+            .get(&post.user_id)
+            .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned());
+        let edited = if post.is_edited() { " (edited)" } else { "" };
+        println!("[{}] {author}: {}{edited}", post.create_at, post.message);
+    }
+    Ok(())
+}
+
+async fn fetch_posts(client: &Client, channel: &ChannelId) -> Result<mm_types::PostList, String> {
+    fetch(
+        client,
+        &rest::posts_for_channel(channel, &PostQuery::first()),
+        rest::parse_post_list,
+    )
+    .await
+}
+
+/// Send a request and parse it, turning both failure kinds into one message.
+async fn fetch<T>(
+    client: &Client,
+    request: &mm_api::HttpRequest,
+    parse: impl Fn(&mm_api::HttpResponse) -> Result<T, ApiError>,
+) -> Result<T, String> {
+    let response = client
+        .send(request)
+        .await
+        .map_err(|e| format!("{}: {e}", request.route_key()))?;
+    parse(&response).map_err(|e| format!("{}: {e}", request.route_key()))
+}
+
+// ---------------------------------------------------------------- watch
+
+/// Connect the WebSocket and print what arrives, applying it to the store.
+///
+/// This is the cheapest way to see that the protocol layer and the reducers
+/// agree with a live server: send a message from another client and watch the
+/// unread count move here.
+async fn watch(args: &[String]) -> Result<(), String> {
+    let (client, saved) = connect()?;
+    let seconds: u64 = flag(args, "--seconds")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+
+    let mut protocol = WsProtocol::new();
+    let url = client
+        .websocket_url(&protocol.reconnect_query(None))
+        .map_err(|e| e.to_string())?;
+    println!("connecting to {url}");
+
+    let mut socket = mm_http::WsConn::connect(&url, &saved.token)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut store = Store::new(UserId::new(saved.user_id), Threading::Flat);
+
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(seconds);
+    println!("listening for {seconds}s — send yourself a message to see it arrive\n");
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            println!("\n(time is up)");
+            return Ok(());
+        }
+        let frame = match tokio::time::timeout(remaining, socket.next_text()).await {
+            Err(_) => continue,
+            Ok(None) => {
+                println!("the server closed the connection");
+                return Ok(());
             }
-            "--help" | "-h" => {
-                print!("{USAGE}");
-                return ExitCode::SUCCESS;
-            }
-            other => {
-                eprintln!("unknown argument {other:?}\n\n{USAGE}");
-                return ExitCode::FAILURE;
+            Ok(Some(Err(e))) => return Err(e.to_string()),
+            Ok(Some(Ok(text))) => text,
+        };
+
+        for outcome in protocol.on_frame(&frame) {
+            match outcome {
+                WsOutcome::Hello {
+                    server_version,
+                    lost_events,
+                    ..
+                } => {
+                    println!("hello from server {server_version}");
+                    if lost_events {
+                        println!("  ! events were lost; a REST resync would be required here");
+                    }
+                }
+                WsOutcome::SequenceGap { expected, got } => {
+                    println!("! sequence gap: expected {expected}, got {got} — resync required");
+                }
+                WsOutcome::Event(event) => {
+                    let changes = store.apply_ws(&event);
+                    println!("{}", describe(&event));
+                    for change in changes {
+                        println!("  -> {change:?}");
+                    }
+                }
+                WsOutcome::Reply { client_seq, ok, .. } => {
+                    println!("reply to #{client_seq}: ok={ok}");
+                }
+                WsOutcome::Undecodable { detail } => println!("? undecodable frame: {detail}"),
             }
         }
     }
-    eprintln!(
-        "mattermost-rs {}: no GUI yet — see docs/parity.md",
-        env!("CARGO_PKG_VERSION")
-    );
-    ExitCode::SUCCESS
+}
+
+fn describe(event: &mm_api::WsEvent) -> String {
+    use mm_api::WsEvent as E;
+    match event {
+        E::Posted {
+            post, sender_name, ..
+        } => {
+            format!(
+                "posted by {sender_name} in {}: {}",
+                post.channel_id, post.message
+            )
+        }
+        E::PostEdited(p) => format!("edited {}", p.id),
+        E::PostDeleted(p) => format!("deleted {}", p.id),
+        E::ChannelMemberUpdated(m) => format!(
+            "read state for {}: {} unread-seen, {} mentions",
+            m.channel_id, m.msg_count, m.mention_count
+        ),
+        E::MultipleChannelsViewed { channel_times } => {
+            format!("{} channel(s) marked viewed", channel_times.len())
+        }
+        E::ChannelViewed { channel_id } => format!("{channel_id} marked viewed (legacy event)"),
+        E::Typing { user_id, .. } => format!("{user_id} is typing"),
+        E::StatusChange { user_id, status } => format!("{user_id} is now {status}"),
+        E::UserUpdated(u) => format!("user {} updated", u.username),
+        E::Unknown { event } => format!("(unhandled event {event})"),
+    }
 }
