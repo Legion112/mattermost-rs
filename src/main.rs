@@ -41,12 +41,23 @@ Passwords are read from an environment variable, never from an argument, so
 they do not land in your shell history or in `ps` output.
 ";
 
+/// Split argv into a command and its arguments.
+///
+/// No arguments means "open the app", which is what launching from the desktop
+/// entry does.
+///
+/// Separated out and tested because the obvious spelling of the tail is
+/// `&args[1..]`, which panics on an empty slice — so running the binary with
+/// no arguments at all, the single most common way anybody starts it, crashed
+/// before reaching any of the code that had been tested.
+fn split_args(args: &[String]) -> (&str, &[String]) {
+    let command = args.first().map_or("gui", String::as_str);
+    (command, args.get(1..).unwrap_or(&[]))
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // No arguments means "open the app", which is what double-clicking the
-    // desktop entry does.
-    let command = args.first().map_or("gui", String::as_str);
-    let rest_args = &args[1..];
+    let (command, rest_args) = split_args(&args);
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -486,5 +497,56 @@ fn describe(event: &mm_api::WsEvent) -> String {
         E::StatusChange { user_id, status } => format!("{user_id} is now {status}"),
         E::UserUpdated(u) => format!("user {} updated", u.username),
         E::Unknown { event } => format!("(unhandled event {event})"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_args;
+
+    fn owned(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    /// The regression this exists for: `mattermost-rs` with no arguments
+    /// panicked on `&args[1..]` before reaching anything that had been tested.
+    /// It is the most common way the binary is started.
+    #[test]
+    fn no_arguments_opens_the_window() {
+        let (command, rest) = split_args(&[]);
+        assert_eq!(command, "gui");
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn a_bare_command_has_no_arguments() {
+        let args = owned(&["sync"]);
+        let (command, rest) = split_args(&args);
+        assert_eq!(command, "sync");
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn a_command_keeps_everything_after_it() {
+        let args = owned(&["send", "--channel", "town-square", "--text", "hi"]);
+        let (command, rest) = split_args(&args);
+        assert_eq!(command, "send");
+        assert_eq!(
+            rest,
+            &owned(&["--channel", "town-square", "--text", "hi"])[..]
+        );
+    }
+
+    /// A flag in the command position is still the command, so `--version`
+    /// and `--help` reach their handlers rather than being treated as an
+    /// argument to something.
+    #[test]
+    fn a_leading_flag_is_the_command() {
+        for flag in ["--version", "--help", "-h", "-V"] {
+            let args = owned(&[flag]);
+            let (command, rest) = split_args(&args);
+            assert_eq!(command, flag);
+            assert!(rest.is_empty());
+        }
     }
 }
