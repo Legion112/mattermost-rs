@@ -161,6 +161,33 @@ than it does:
 - **Scale.** The lab fixture is a handful of users and ~170 posts. It says
   nothing about 50 teams or a 10k-post channel.
 
+## What the window does today
+
+Verified by driving the real window against a Mattermost 12.0.1 server in
+Docker, not by reading the code:
+
+- **Sign in** from the window with a server, email or username, password and
+  MFA code. The password never reaches the environment, an argument or disk.
+- **The sidebar is the server's**: your categories, in your order, with your
+  sorting — Favorites, Channels, Direct Messages and any of your own. Public
+  channels carry a `#`, private ones a padlock, DMs the other person's face.
+  Two rows that would read the same are told apart by username or team.
+- **Messages** with markdown, links, emoji shortcodes, attachments named and
+  sized, date separators, author grouping, avatars, and a "New messages"
+  line where you left off.
+- **Reactions**, shown in the order each emoji first appeared, and a chip
+  you click to add or take back your own.
+- **Threads** in a panel on the right, with replies arriving live. With
+  collapsed reply threads — the server default since 12.1 — this is the only
+  place replies appear at all.
+- **Scrollback**: reaching the top loads the page before it and keeps your
+  place.
+- **Live**: new messages, edits, reactions and read state arrive over the
+  WebSocket and the view follows if you are at the bottom.
+
+Not yet: search, file download and preview, editing or deleting your own
+messages, mention autocomplete, typing indicators, presence, preferences.
+
 ## Phases
 
 | | |
