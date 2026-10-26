@@ -380,3 +380,35 @@ Verified against 12.0.1 on 2026-10-26.
 Both request shapes are exercised against a live server by
 `mattermost-rs react`, which exists for that reason: no unit test can prove
 the server accepts an emoji name in a URL path.
+
+## Two settings that are not single values
+
+Both decide how every message reads, and both were being guessed. Each is a
+server default plus a user preference, resolved in `mm_core::settings`.
+
+**`TeammateNameDisplay`** — `username` (the Mattermost default),
+`nickname_full_name` or `full_name`. The user's `display.name_format`
+preference overrides it **unless `LockTeammateNameDisplay` is true**, in
+which case the administrator has decided for everyone. Ignoring this showed
+a roster of names nobody else in the organisation sees; verified wrong
+against a real server, where the setting is `username` and this client was
+rendering nicknames.
+
+**`CollapsedThreads`** — `disabled` and `always_on` decide outright, while
+`default_on` and `default_off` only say which way an *unexpressed*
+preference falls. The preference is `display.collapsed_reply_threads`, whose
+value is the string `on` or `off`. Reading `default_on` as "on" regardless
+hides every reply from a user who turned threads off deliberately.
+
+## Attached images
+
+`post.metadata.files[]` carries `width`, `height`, `has_preview_image` and
+**`mini_preview`** — a base64 JPEG thumbnail of a couple of kilobytes, in
+the metadata itself. It costs no request, so a row can draw something at the
+right size on its first frame and never reflow when the real image lands.
+
+Verified on 12.0.1 for a 240×120 PNG: `GET /files/{id}` returned the
+original, `/thumbnail` a 120×60 copy, and `/preview` a 240×120 one. The
+thumbnail is too small to read, so a message row wants `/preview` when
+`has_preview_image` says the server made one, and the file itself when it
+did not.

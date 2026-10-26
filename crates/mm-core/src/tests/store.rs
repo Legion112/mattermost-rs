@@ -469,6 +469,11 @@ fn a_dm_is_labelled_with_the_other_participant() {
         nickname: "Jane".into(),
         ..User::default()
     }]);
+    // The server's default format is `username`, and this follows it rather
+    // than preferring the nickname the way it once did.
+    assert_eq!(s.channel_label(&dm), "jane");
+
+    s.name_format = mm_types::NameFormat::NicknameFullName;
     assert_eq!(s.channel_label(&dm), "Jane");
 }
 
@@ -1113,9 +1118,14 @@ fn person(id: &str, username: &str, nickname: &str) -> User {
 
 /// Two colleagues who both go by "Alex" are two identical rows, and an
 /// unread badge on one of them tells the user nothing.
+///
+/// Only reachable under a format that can collide: usernames are unique on
+/// a server by construction, so under the default there is nothing to tell
+/// apart.
 #[test]
 fn two_people_with_the_same_display_name_are_told_apart_by_username() {
     let mut store = store();
+    store.name_format = mm_types::NameFormat::NicknameFullName;
     store.apply_users(vec![
         person("u-1", "alex.m", "Alex"),
         person("u-2", "alex.t", "Alex"),
@@ -1147,6 +1157,7 @@ fn two_people_with_the_same_display_name_are_told_apart_by_username() {
 #[test]
 fn an_unambiguous_name_is_left_alone() {
     let mut store = store();
+    store.name_format = mm_types::NameFormat::NicknameFullName;
     store.apply_users(vec![
         person("u-1", "alex.m", "Alex"),
         person("u-2", "sam.t", "Sam"),
@@ -1378,4 +1389,25 @@ fn the_last_viewed_time_is_readable_and_moves_on_opening() {
     store.mark_read_locally(&id);
     let after = store.last_viewed(&id).expect("still a member");
     assert!(after >= before, "{after:?} went backwards from {before:?}");
+}
+
+/// Under the server's default there is nothing to disambiguate: a username
+/// is unique on a server by construction, so two rows can never read the
+/// same and nothing is appended to either.
+#[test]
+fn usernames_never_need_disambiguating() {
+    let mut store = store();
+    store.apply_users(vec![
+        person("u-1", "alex.m", "Alex"),
+        person("u-2", "alex.t", "Alex"),
+    ]);
+    store.apply_channels(vec![dm_channel("d1", "u-1"), dm_channel("d2", "u-2")]);
+    store.apply_members(vec![member("d1", 0, 0, 0), member("d2", 0, 0, 0)]);
+
+    let names: Vec<String> = store
+        .sidebar()
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    assert_eq!(names, ["alex.m", "alex.t"]);
 }

@@ -6,7 +6,7 @@
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, Post, PostId, PostList,
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, FileId, Post, PostId, PostList,
     Preference, Reaction, Team, TeamId, User, UserId,
 };
 use serde::Deserialize;
@@ -270,6 +270,22 @@ pub fn parse_image(resp: &HttpResponse) -> Result<Vec<u8>, ApiError> {
         return Err(ApiError::from_response(resp));
     }
     Ok(resp.body.clone())
+}
+
+/// An attached file's bytes.
+///
+/// `preview` asks for the server's downscaled copy, which is what a message
+/// list wants: the original can be a 12-megapixel phone photo and the row it
+/// goes in is four hundred pixels wide. Only ask for it when the file's
+/// metadata says the server made one.
+#[must_use]
+pub fn file_contents(file: &FileId, preview: bool) -> HttpRequest {
+    let path = if preview {
+        format!("{API}/files/{file}/preview")
+    } else {
+        format!("{API}/files/{file}")
+    };
+    HttpRequest::get(path)
 }
 
 /// Mark a channel read.

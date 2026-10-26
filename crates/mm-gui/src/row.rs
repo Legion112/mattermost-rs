@@ -7,6 +7,18 @@
 //! open at all.
 
 use gtk::glib;
+
+/// One image attached to a message, at the size it will be drawn.
+///
+/// The texture is optional: a file whose thumbnail could not be decoded and
+/// whose full image has not arrived yet still reserves its space, so the
+/// list does not jump when it lands.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    pub texture: Option<gtk::gdk::Texture>,
+    pub width: i32,
+    pub height: i32,
+}
 use gtk::subclass::prelude::*;
 
 mod imp {
@@ -45,6 +57,8 @@ mod imp {
         /// How many replies hang off this post, for the button that opens
         /// the thread. Zero on a reply, which has no thread of its own.
         pub replies: Cell<i64>,
+        /// Images attached to the message, already sized.
+        pub images: RefCell<Vec<super::Attachment>>,
     }
 
     #[glib::object_subclass]
@@ -75,6 +89,7 @@ pub struct PostRowFields<'a> {
     pub reactions: Vec<mm_core::ReactionSummary>,
     pub avatar: Option<gtk::gdk::Texture>,
     pub replies: i64,
+    pub images: Vec<Attachment>,
 }
 
 impl PostRow {
@@ -93,6 +108,7 @@ impl PostRow {
         inner.reactions.replace(fields.reactions);
         inner.avatar.replace(fields.avatar);
         inner.replies.set(fields.replies);
+        inner.images.replace(fields.images);
         this
     }
 
@@ -122,6 +138,11 @@ impl PostRow {
     #[must_use]
     pub fn is_separator(&self) -> bool {
         self.imp().separator.get()
+    }
+
+    #[must_use]
+    pub fn images(&self) -> Vec<Attachment> {
+        self.imp().images.borrow().clone()
     }
 
     #[must_use]

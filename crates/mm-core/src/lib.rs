@@ -15,6 +15,7 @@
 
 pub mod rows;
 pub mod sections;
+pub mod settings;
 pub mod store;
 pub mod timeline;
 pub mod unread;

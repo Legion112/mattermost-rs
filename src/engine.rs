@@ -18,10 +18,10 @@
 use mm_api::rest::{self, Login, PostQuery};
 use mm_api::ws::{WsOutcome, WsProtocol};
 use mm_api::{ApiError, HttpRequest, HttpResponse};
-use mm_core::Threading;
 use mm_gui::{Command, Event};
 use mm_http::Client;
 use mm_types::{ChannelId, PostId, UserId};
+use std::collections::BTreeMap;
 
 use crate::session::Session;
 
@@ -108,6 +108,22 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
                 Err(e) => {
                     let _ = events.send(Event::Failed(e)).await;
                 }
+            }
+        }
+        Command::FetchFile { file, preview } => {
+            // The cache first, so a channel full of screenshots redraws
+            // without a single request.
+            if let Some(image) = crate::avatars::load_file(&file) {
+                let _ = events.send(Event::File { file, image }).await;
+            } else if let Ok(image) = fetch(
+                &a.client,
+                &rest::file_contents(&file, preview),
+                rest::parse_image,
+            )
+            .await
+            {
+                crate::avatars::store_file(&file, &image);
+                let _ = events.send(Event::File { file, image }).await;
             }
         }
         Command::FetchAvatar { user, version } => {
@@ -367,18 +383,39 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
 async fn sync(client: &Client, session: &Session, events: &async_channel::Sender<Event>) {
     let _ = events.send(Event::Status("loading…".into())).await;
 
-    match fetch(client, &rest::client_config(), rest::parse_client_config).await {
-        Ok(config) => {
-            let threading = match config.get("CollapsedThreads").map(String::as_str) {
-                Some("always_on" | "default_on") => Threading::Collapsed,
-                _ => Threading::Flat,
-            };
-            let _ = events.send(Event::Threading(threading)).await;
-        }
+    // Two settings decide how every message reads, and neither is a single
+    // value: the server states a default and the user may hold a preference
+    // that overrides it. The precedence lives in `mm_core::settings`, where
+    // it is covered; this just gathers the inputs.
+    let config = match fetch(client, &rest::client_config(), rest::parse_client_config).await {
+        Ok(config) => config,
         Err(e) => {
             let _ = events.send(Event::Failed(e)).await;
+            BTreeMap::new()
         }
-    }
+    };
+    let preferences = fetch(client, &rest::my_preferences(), rest::parse_preferences)
+        .await
+        .unwrap_or_default();
+    let preference = |name: &str| {
+        preferences
+            .iter()
+            .find(|p| p.category == "display" && p.name == name)
+            .map(|p| p.value.as_str())
+    };
+
+    let threading = mm_core::settings::threading(
+        config.get("CollapsedThreads").map(String::as_str),
+        preference("collapsed_reply_threads"),
+    );
+    let _ = events.send(Event::Threading(threading)).await;
+
+    let names = mm_core::settings::name_format(
+        config.get("TeammateNameDisplay").map(String::as_str),
+        config.get("LockTeammateNameDisplay").map(String::as_str) == Some("true"),
+        preference("name_format"),
+    );
+    let _ = events.send(Event::NameFormat(names)).await;
 
     let teams = match fetch(client, &rest::my_teams(), rest::parse_teams).await {
         Ok(t) => t,

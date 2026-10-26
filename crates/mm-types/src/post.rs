@@ -58,12 +58,50 @@ pub struct FileRef {
     /// Zero for anything that is not an image.
     pub width: i64,
     pub height: i64,
+    /// Whether the server generated a downscaled copy. When it did,
+    /// `/preview` is what to fetch; when it did not, the file is already
+    /// small enough to show as it is.
+    pub has_preview_image: bool,
+    /// A base64 JPEG thumbnail, a couple of kilobytes, already in the
+    /// metadata. It costs no request at all, so a row can show *something*
+    /// at the right size the instant it is drawn and never reflow when the
+    /// real image lands.
+    pub mini_preview: String,
 }
 
 impl FileRef {
     #[must_use]
     pub fn is_image(&self) -> bool {
         self.mime_type.starts_with("image/") || (self.width > 0 && self.height > 0)
+    }
+
+    /// How big to draw this, fitted inside `max`, keeping its proportions.
+    ///
+    /// Returns `None` when the server did not state the dimensions, which is
+    /// the case for anything that is not an image and occasionally for one
+    /// that is: nothing can be reserved for a size nobody knows.
+    #[must_use]
+    pub fn fitted(&self, max_width: i64, max_height: i64) -> Option<(i32, i32)> {
+        if self.width <= 0 || self.height <= 0 {
+            return None;
+        }
+        // Scale by whichever dimension is further over, and never enlarge a
+        // small image to fill the box -- a 16-pixel icon blown up to 400 is
+        // worse than a 16-pixel icon.
+        let by_width = f64::from(i32::try_from(max_width).unwrap_or(i32::MAX))
+            / f64::from(i32::try_from(self.width).unwrap_or(i32::MAX));
+        let by_height = f64::from(i32::try_from(max_height).unwrap_or(i32::MAX))
+            / f64::from(i32::try_from(self.height).unwrap_or(i32::MAX));
+        let scale = by_width.min(by_height).min(1.0);
+        let scaled = |n: i64| -> i32 {
+            let n = f64::from(i32::try_from(n).unwrap_or(i32::MAX)) * scale;
+            // At least one pixel: a row with a zero-height image reads as a
+            // missing image rather than a small one.
+            #[allow(clippy::cast_possible_truncation)]
+            let rounded = n.round() as i32;
+            rounded.max(1)
+        };
+        Some((scaled(self.width), scaled(self.height)))
     }
 
     /// A size a person can read.
@@ -432,5 +470,75 @@ mod reaction_tests {
         assert_eq!(post("{}").reactions(), None);
         assert_eq!(post(r#"{"reactions":null}"#).reactions(), Some(Vec::new()));
         assert_eq!(post(r#"{"reactions":[]}"#).reactions(), Some(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod file_size_tests {
+    use super::*;
+
+    fn image(width: i64, height: i64) -> FileRef {
+        FileRef {
+            width,
+            height,
+            mime_type: "image/png".into(),
+            ..FileRef::default()
+        }
+    }
+
+    /// A big image is scaled down by whichever side is further over, keeping
+    /// its proportions -- a squashed screenshot is worse than a small one.
+    #[test]
+    fn a_large_image_is_fitted_inside_the_box() {
+        assert_eq!(image(1920, 1080).fitted(400, 300), Some((400, 225)));
+        // Tall rather than wide: the height is what binds.
+        assert_eq!(image(1080, 1920).fitted(400, 300), Some((169, 300)));
+    }
+
+    /// A small image is left alone. Blowing a 16-pixel icon up to fill the
+    /// box makes it worse, not bigger.
+    #[test]
+    fn a_small_image_is_not_enlarged() {
+        assert_eq!(image(16, 16).fitted(400, 300), Some((16, 16)));
+    }
+
+    /// An image whose dimensions the server did not state cannot have space
+    /// reserved for it, and saying so is better than guessing a size and
+    /// reflowing the list when the real one arrives.
+    #[test]
+    fn an_unmeasured_file_has_no_size() {
+        assert_eq!(image(0, 0).fitted(400, 300), None);
+        let document = FileRef {
+            mime_type: "application/pdf".into(),
+            ..FileRef::default()
+        };
+        assert_eq!(document.fitted(400, 300), None);
+    }
+
+    /// Rounding must never produce a zero dimension: a row with a
+    /// zero-height image reads as a missing image rather than a thin one.
+    #[test]
+    fn an_extreme_aspect_ratio_still_has_a_pixel() {
+        let (w, h) = image(4000, 1).fitted(400, 300).expect("an image");
+        assert_eq!(w, 400);
+        assert_eq!(h, 1);
+    }
+
+    /// The metadata the preview path depends on round-trips from the live
+    /// payload shape.
+    #[test]
+    fn the_preview_metadata_parses() {
+        let post: Post = serde_json::from_str(
+            r#"{"id":"p1","metadata":{"files":[{"id":"f1","name":"lab.png",
+                "extension":"png","size":4164,"mime_type":"image/png",
+                "width":240,"height":120,"has_preview_image":true,
+                "mini_preview":"/9j/2wCEAA=="}]}}"#,
+        )
+        .expect("parses");
+        let file = &post.attachments()[0];
+        assert!(file.is_image());
+        assert!(file.has_preview_image);
+        assert_eq!(file.mini_preview, "/9j/2wCEAA==");
+        assert_eq!(file.fitted(400, 300), Some((240, 120)));
     }
 }

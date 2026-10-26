@@ -15,7 +15,7 @@ use crate::unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread};
 use mm_api::ws::WsEvent;
 use mm_types::{
     CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, ChannelType,
-    Post, PostId, PostList, Team, Timestamp, User, UserId,
+    NameFormat, Post, PostId, PostList, Team, Timestamp, User, UserId,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -91,6 +91,10 @@ pub struct Store {
     /// The server's grouping of the sidebar, already in stacking order.
     /// Empty until the first sync, which is why `sidebar` still exists.
     pub categories: Vec<ChannelCategory>,
+    /// Which name to show for a person, from the server's setting and the
+    /// user's preference. Never assumed: the default is `username`, and
+    /// guessing otherwise renames everyone in the window.
+    pub name_format: NameFormat,
     /// Member counts, fetched per channel when it is opened.
     pub stats: HashMap<ChannelId, ChannelStats>,
     /// Who reacted with what, and when they first did. Keyed separately from
@@ -161,6 +165,18 @@ impl Store {
             .get(channel)
             .map_or_else(|| channel.to_string(), |c| self.channel_label(c));
         (name, self.stats.get(channel).map(|s| s.member_count))
+    }
+
+    /// What to call a person, in the format this server asked for.
+    ///
+    /// Falls back to the raw id for someone not in the roster, for the same
+    /// reason `channel_label` does: showing something beats showing a blank
+    /// where a name should be.
+    #[must_use]
+    pub fn user_label(&self, user: &UserId) -> String {
+        self.users
+            .get(user)
+            .map_or_else(|| user.to_string(), |u| u.name_as(self.name_format))
     }
 
     /// When the reader last viewed a channel, as the server knows it.
@@ -555,9 +571,7 @@ impl Store {
             .split("__")
             .find(|part| *part != self.me.as_str())
             .unwrap_or_default();
-        self.users
-            .get(&UserId::new(other))
-            .map_or_else(|| other.to_owned(), |u| u.display_name().to_owned())
+        self.user_label(&UserId::new(other))
     }
 
     /// Tell apart two rows that would otherwise read identically.

@@ -21,7 +21,7 @@
 
 use crate::bridge::{Command, Event};
 use crate::login::LoginPage;
-use crate::row::{PostRow, PostRowFields};
+use crate::row::{Attachment, PostRow, PostRowFields};
 // adw::prelude re-exports gtk::prelude, so this one import covers both.
 use adw::prelude::*;
 use gtk::gdk;
@@ -70,6 +70,10 @@ struct Ui {
     /// built on this thread, so the engine sends bytes and the decode
     /// happens here.
     avatars: Rc<RefCell<HashMap<UserId, gdk::Texture>>>,
+    /// Decoded images attached to messages, by file id. Seeded from the
+    /// `mini_preview` thumbnail that already rides in the metadata, then
+    /// replaced by the real image when it arrives.
+    images: Rc<RefCell<HashMap<mm_types::FileId, gdk::Texture>>>,
     /// The thread pane: its model, its view, the panel itself and which
     /// root it is showing.
     thread_posts: gio::ListStore,
@@ -92,6 +96,8 @@ struct Ui {
     /// Who has already been asked for. Without this, every redraw of a
     /// channel would re-request every face in it.
     asked: Rc<RefCell<HashSet<UserId>>>,
+    /// The same, for attached images.
+    asked_files: Rc<RefCell<HashSet<mm_types::FileId>>>,
     posts: gio::ListStore,
     post_view: gtk::ListView,
     scroller: gtk::ScrolledWindow,
@@ -327,7 +333,9 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
         avatars: Rc::new(RefCell::new(HashMap::new())),
+        images: Rc::new(RefCell::new(HashMap::new())),
         asked: Rc::new(RefCell::new(HashSet::new())),
+        asked_files: Rc::new(RefCell::new(HashSet::new())),
         posts,
         post_view,
         scroller,
@@ -635,6 +643,13 @@ fn render_markup(doc: &mm_md::Document) -> String {
 fn describe_extras(post: &mm_types::Post) -> String {
     let mut parts: Vec<String> = Vec::new();
     for file in post.attachments() {
+        // An image drawn in the row names itself. The line is still where a
+        // document goes, and where an image goes whose dimensions the server
+        // did not state -- that one is not drawn, so without this it would
+        // vanish from the message entirely.
+        if file.is_image() && file.fitted(IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT).is_some() {
+            continue;
+        }
         let icon = if file.is_image() { "🖼" } else { "📎" };
         let name = if file.name.is_empty() {
             // Some endpoints omit metadata, leaving only the id. Saying a file
@@ -783,8 +798,15 @@ fn setup_post_row(item: &gtk::ListItem) {
         .build();
     let main = gtk::Box::new(gtk::Orientation::Vertical, 2);
     main.set_hexpand(true);
+    // Attached images, above the file line that names them. Rebuilt on each
+    // bind like the reaction chips: a recycled row can go from none to three.
+    let images = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    images.set_margin_top(4);
+    images.set_halign(gtk::Align::Start);
+
     main.append(&header);
     main.append(&body);
+    main.append(&images);
     main.append(&meta);
     main.append(&reactions);
 
@@ -827,6 +849,31 @@ fn bind_separator_row(day: &gtk::Box, line: &gtk::Box, data: &PostRow) {
     line.set_visible(false);
 }
 
+/// Fill a row's image strip. Rebuilt rather than recycled: a reused row can
+/// go from no images to three.
+fn bind_images(images: &gtk::Box, data: &PostRow) {
+    while let Some(old) = images.first_child() {
+        images.remove(&old);
+    }
+    let attached = data.images();
+    images.set_visible(!attached.is_empty());
+    for image in attached {
+        let picture = gtk::Picture::builder()
+            // The row already reserved this much, from the dimensions in the
+            // metadata, so the list does not jump when the real image lands
+            // on top of the thumbnail.
+            .width_request(image.width)
+            .height_request(image.height)
+            .content_fit(gtk::ContentFit::Contain)
+            .build();
+        if let Some(texture) = &image.texture {
+            picture.set_paintable(Some(texture));
+        }
+        picture.add_css_class("card");
+        images.append(&picture);
+    }
+}
+
 fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
@@ -855,7 +902,10 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
         return;
     };
-    let Some(meta) = body.next_sibling().and_downcast::<gtk::Label>() else {
+    let Some(images) = body.next_sibling().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(meta) = images.next_sibling().and_downcast::<gtk::Label>() else {
         return;
     };
     let Some(reactions) = meta.next_sibling().and_downcast::<gtk::Box>() else {
@@ -913,6 +963,8 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     }
     body.set_visible(!data.body().is_empty());
 
+    bind_images(&images, &data);
+
     let extra = data.meta();
     meta.set_text(&extra);
     meta.set_visible(!extra.is_empty());
@@ -952,6 +1004,23 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
 /// avatar and borrows this as a left margin, so its text stays in line with
 /// the message that named its author.
 const AVATAR_GUTTER: i32 = 32 + 8;
+
+/// The box an inline image is fitted into. Wide enough to read a
+/// screenshot, short enough that one photo does not fill the window.
+const IMAGE_MAX_WIDTH: i64 = 420;
+const IMAGE_MAX_HEIGHT: i64 = 320;
+
+/// Decode the base64 JPEG thumbnail the server puts in a file's metadata.
+///
+/// A couple of kilobytes and no request, which is the whole point: it is
+/// what lets a row show something at the right size on the first frame.
+fn decode_mini_preview(encoded: &str) -> Option<gdk::Texture> {
+    if encoded.is_empty() {
+        return None;
+    }
+    let bytes = glib::base64_decode(encoded);
+    gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()
+}
 
 /// How much of the window a thread takes when it is open.
 const THREAD_PANE_WIDTH: i32 = 380;
@@ -1122,6 +1191,11 @@ impl Ui {
             }
             Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
             Event::Avatar { user, image } => self.on_avatar(user, image),
+            Event::File { file, image } => self.on_file(file, image),
+            Event::NameFormat(format) => {
+                self.store.borrow_mut().name_format = format;
+                self.redraw_everything();
+            }
             Event::Stats(stats) => {
                 let channel = stats.channel_id.clone();
                 self.store.borrow_mut().apply_stats(stats);
@@ -1202,10 +1276,7 @@ impl Ui {
             .map(|c| store.channel_label(c))
             .unwrap_or_default();
         let author = if sender_name.is_empty() {
-            store
-                .users
-                .get(&post.user_id)
-                .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned())
+            store.user_label(&post.user_id)
         } else {
             sender_name.trim_start_matches('@').to_owned()
         };
@@ -1353,10 +1424,7 @@ impl Ui {
                 })
                 .ok();
         }
-        let author = store
-            .users
-            .get(&post.user_id)
-            .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned());
+        let author = store.user_label(&post.user_id);
         let suffix = if post.is_edited() { " (edited)" } else { "" };
         let doc = mm_md::parse(&post.message);
         // Most messages are a single plain paragraph, and for those the
@@ -1367,6 +1435,7 @@ impl Ui {
             let rendered = render_markup(&doc);
             (format!("{rendered}{}", mm_md::escape(suffix)), true)
         };
+        let images = self.images_for(post);
         let replies = store.reply_count(&post.id);
         PostRow::new(PostRowFields {
             id: post.id.as_str(),
@@ -1379,12 +1448,64 @@ impl Ui {
             grouped,
             reactions: store.reactions_for(&post.id),
             avatar,
+            images,
             // A reply never opens a thread of its own: in Mattermost the
             // whole conversation hangs off the root, and offering "2
             // replies" on a reply would open its parent under a different
             // name.
             replies: if post.is_reply() { 0 } else { replies },
         })
+    }
+
+    /// The images attached to a post, at the size they will be drawn.
+    ///
+    /// Every image gets a texture immediately, decoded from the
+    /// `mini_preview` thumbnail that already rides in the post's metadata —
+    /// no request, so the row is the right size from the first frame and
+    /// never reflows when the real image lands on top of it.
+    fn images_for(&self, post: &mm_types::Post) -> Vec<Attachment> {
+        let mut out = Vec::new();
+        for file in post.attachments() {
+            if !file.is_image() {
+                continue;
+            }
+            let Some((width, height)) = file.fitted(IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT) else {
+                // No dimensions means no space can be reserved, and an image
+                // that reflows the list when it arrives is worse than the
+                // attachment line the meta row already shows.
+                continue;
+            };
+
+            let held = self.images.borrow().get(&file.id).cloned();
+            let texture = if let Some(texture) = held {
+                Some(texture)
+            } else {
+                {
+                    // Ask for the real one, once.
+                    if self.asked_files.borrow_mut().insert(file.id.clone()) {
+                        self.commands
+                            .send(Command::FetchFile {
+                                file: file.id.clone(),
+                                preview: file.has_preview_image,
+                            })
+                            .ok();
+                    }
+                    let placeholder = decode_mini_preview(&file.mini_preview);
+                    if let Some(texture) = &placeholder {
+                        self.images
+                            .borrow_mut()
+                            .insert(file.id.clone(), texture.clone());
+                    }
+                    placeholder
+                }
+            };
+            out.push(Attachment {
+                texture,
+                width,
+                height,
+            });
+        }
+        out
     }
 
     /// Draw the open thread, or hide the panel when there is none.
@@ -1441,6 +1562,30 @@ impl Ui {
         if self.selected.borrow().as_ref() == Some(channel) {
             self.refresh_posts(channel);
         }
+    }
+
+    /// An attached image arrived: decode it over whatever placeholder the
+    /// row is showing.
+    fn on_file(&self, file: mm_types::FileId, image: Vec<u8>) {
+        let bytes = glib::Bytes::from_owned(image);
+        let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
+            return;
+        };
+        self.images.borrow_mut().insert(file, texture);
+        if let Some(open) = self.selected.borrow().clone() {
+            self.refresh_posts(&open);
+        }
+        self.refresh_thread();
+    }
+
+    /// Redraw both lists and the sidebar, for a change that affects all of
+    /// them -- a setting, rather than one message.
+    fn redraw_everything(&self) {
+        self.refresh_sidebar();
+        if let Some(open) = self.selected.borrow().clone() {
+            self.refresh_posts(&open);
+        }
+        self.refresh_thread();
     }
 
     /// Decode a face and redraw wherever it appears.

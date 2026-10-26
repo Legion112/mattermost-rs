@@ -11,8 +11,8 @@
 use mm_api::ws::WsEvent;
 use mm_core::Threading;
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, PostId, PostList, Team,
-    Timestamp, User, UserId,
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, FileId, NameFormat, PostId,
+    PostList, Team, Timestamp, User, UserId,
 };
 
 /// GUI to engine.
@@ -47,6 +47,9 @@ pub enum Command {
     /// Fetch the page of history immediately before `before`, which is the
     /// oldest post currently held.
     LoadOlder { channel: ChannelId, before: PostId },
+    /// Fetch an image attached to a message. `preview` asks for the
+    /// server's downscaled copy, which is what a message row wants.
+    FetchFile { file: FileId, preview: bool },
     /// Fetch one person's avatar. The window asks per author it has not
     /// drawn yet, and asks once: the engine answers with bytes either from
     /// its file cache or from the server.
@@ -108,6 +111,9 @@ pub enum Event {
     /// Whether collapsed reply threads apply, from the server config and the
     /// user preference. Never assumed.
     Threading(Threading),
+    /// Which name to show for a person, resolved from the server's setting
+    /// and the user's preference.
+    NameFormat(NameFormat),
     Teams(Vec<Team>),
     Channels(Vec<Channel>),
     Members(Vec<ChannelMember>),
@@ -118,6 +124,11 @@ pub enum Event {
     /// One person's avatar, as encoded image bytes.
     Avatar {
         user: UserId,
+        image: Vec<u8>,
+    },
+    /// An attached image, as encoded image bytes.
+    File {
+        file: FileId,
         image: Vec<u8>,
     },
     Users(Vec<User>),

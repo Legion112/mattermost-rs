@@ -505,3 +505,14 @@ fn a_profile_image_is_bytes_on_success_and_an_api_error_on_failure() {
     let err = HttpResponse::new(404, r#"{"id":"api.user.no","message":"gone"}"#);
     assert!(matches!(parse_image(&err), Err(ApiError::NotFound(_))));
 }
+
+/// The preview is a different path from the file itself, and a message list
+/// wants the preview: the original can be a twelve-megapixel phone photo
+/// going into a four-hundred-pixel row.
+#[test]
+fn a_file_is_fetched_whole_or_as_the_servers_preview() {
+    let f = mm_types::FileId::new("f1");
+    assert_eq!(file_contents(&f, false).path, "/api/v4/files/f1");
+    assert_eq!(file_contents(&f, true).path, "/api/v4/files/f1/preview");
+    assert_eq!(file_contents(&f, true).method, Method::Get);
+}

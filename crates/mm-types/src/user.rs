@@ -1,6 +1,6 @@
 //! Users, teams and presence.
 
-use crate::{TeamId, Timestamp, UserId};
+use crate::{NameFormat, TeamId, Timestamp, UserId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -53,6 +53,35 @@ impl User {
             return &self.first_name;
         }
         &self.username
+    }
+
+    /// The name to show, in the format the server or the user asked for.
+    ///
+    /// Separate from `display_name`, which is the old unconditional
+    /// nickname-then-first-name-then-username rule. That rule is one of the
+    /// four the server supports, and not the default: Mattermost ships
+    /// `TeammateNameDisplay = username`, so ignoring the setting showed
+    /// people a roster of names nobody else in their organisation sees.
+    ///
+    /// Every arm falls back to the username, which is the one field that is
+    /// always set and always unique.
+    #[must_use]
+    pub fn name_as(&self, format: NameFormat) -> String {
+        let fallback = || self.username.clone();
+        match format {
+            NameFormat::Username => fallback(),
+            NameFormat::NicknameFullName => {
+                if !self.nickname.is_empty() {
+                    return self.nickname.clone();
+                }
+                let full = self.full_name();
+                if full.is_empty() { fallback() } else { full }
+            }
+            NameFormat::FullName | NameFormat::ShowFullName => {
+                let full = self.full_name();
+                if full.is_empty() { fallback() } else { full }
+            }
+        }
     }
 
     #[must_use]
@@ -207,5 +236,87 @@ mod tests {
         assert_eq!(round, t);
         let round: User = serde_json::from_str(&serde_json::to_string(&u).unwrap()).unwrap();
         assert_eq!(round, u);
+    }
+}
+
+#[cfg(test)]
+mod name_format_tests {
+    use super::*;
+
+    fn person() -> User {
+        User {
+            username: "lowroar".into(),
+            nickname: "Паша".into(),
+            first_name: "Павел".into(),
+            last_name: "Иванов".into(),
+            ..User::default()
+        }
+    }
+
+    /// The server's default, and the one that was being ignored: Mattermost
+    /// ships `TeammateNameDisplay = username`, so showing a nickname instead
+    /// gave people a roster of names nobody else in their organisation sees.
+    #[test]
+    fn username_is_the_default_and_wins_outright() {
+        assert_eq!(person().name_as(NameFormat::Username), "lowroar");
+        assert_eq!(NameFormat::default(), NameFormat::Username);
+    }
+
+    /// Nickname first, then the full name, then the username.
+    #[test]
+    fn nickname_full_name_walks_down_to_something_that_exists() {
+        let p = person();
+        assert_eq!(p.name_as(NameFormat::NicknameFullName), "Паша");
+
+        let no_nickname = User {
+            nickname: String::new(),
+            ..person()
+        };
+        assert_eq!(
+            no_nickname.name_as(NameFormat::NicknameFullName),
+            "Павел Иванов"
+        );
+
+        let bare = User {
+            username: "lowroar".into(),
+            ..User::default()
+        };
+        assert_eq!(bare.name_as(NameFormat::NicknameFullName), "lowroar");
+    }
+
+    /// `show_fullname` is the older spelling and must behave identically, or
+    /// an account that set the preference years ago reads differently from
+    /// one that set it last week.
+    #[test]
+    fn both_spellings_of_full_name_agree() {
+        let p = person();
+        assert_eq!(p.name_as(NameFormat::FullName), "Павел Иванов");
+        assert_eq!(p.name_as(NameFormat::ShowFullName), "Павел Иванов");
+
+        // With no name set at all, both still produce something usable.
+        let bare = User {
+            username: "lowroar".into(),
+            ..User::default()
+        };
+        assert_eq!(bare.name_as(NameFormat::FullName), "lowroar");
+        assert_eq!(bare.name_as(NameFormat::ShowFullName), "lowroar");
+    }
+
+    /// Only a first name, or only a last one, is a real state.
+    #[test]
+    fn a_half_filled_name_is_still_a_name() {
+        let first_only = User {
+            username: "lowroar".into(),
+            first_name: "Павел".into(),
+            ..User::default()
+        };
+        assert_eq!(first_only.name_as(NameFormat::FullName), "Павел");
+
+        let last_only = User {
+            username: "lowroar".into(),
+            last_name: "Иванов".into(),
+            ..User::default()
+        };
+        assert_eq!(last_only.name_as(NameFormat::FullName), "Иванов");
     }
 }

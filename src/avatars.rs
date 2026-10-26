@@ -1,51 +1,58 @@
-//! The avatar file cache.
+//! The image cache: avatars, and the images attached to messages.
 //!
-//! Avatars are the one thing this client fetches per *person* rather than
-//! per channel, so without a cache every launch re-downloads the same dozen
-//! images. The key is the user id plus `last_picture_update`, which the
-//! server moves whenever the picture changes — so invalidation is automatic
-//! and a stale file is impossible rather than merely unlikely.
+//! Both are fetched once and kept, because without a cache every launch
+//! re-downloads the same faces and the same screenshots. What they are keyed
+//! on differs, and the difference is the point:
+//!
+//! - An **avatar** is keyed on the user id *plus* `last_picture_update`. The
+//!   server moves that whenever the picture changes, so invalidation is
+//!   automatic and a stale file is impossible rather than merely unlikely.
+//! - A **file** is keyed on its id alone. File ids are immutable — a file is
+//!   never edited in place, only replaced by a new upload with a new id — so
+//!   there is no version to key on and nothing can go stale.
 
-use mm_types::{Timestamp, UserId};
+use mm_types::{FileId, Timestamp, UserId};
 use std::path::{Path, PathBuf};
 
-/// `$XDG_CACHE_HOME/mattermost-rs/avatars`, falling back to `~/.cache`.
+/// `$XDG_CACHE_HOME/mattermost-rs`, falling back to `~/.cache`.
 ///
-/// Returns `None` rather than failing: an avatar that cannot be cached is
-/// still an avatar that can be fetched, so a read-only or unset HOME costs
+/// Returns `None` rather than failing: an image that cannot be cached is
+/// still an image that can be fetched, so a read-only or unset HOME costs
 /// bandwidth and nothing else.
-fn directory() -> Option<PathBuf> {
+fn cache_root() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))?;
-    Some(base.join("mattermost-rs").join("avatars"))
+    Some(base.join("mattermost-rs"))
 }
 
-/// The filename for one user at one version, under `dir`.
+/// The file for one cache key, under `dir`.
 ///
-/// Split from `directory` so the naming rule can be tested without touching
+/// Split from `cache_root` so the naming rule can be tested without touching
 /// the environment — the environment is process-wide and `set_var` is
 /// `unsafe`, which this workspace forbids outright.
-fn path_in(dir: &Path, user: &UserId, version: Timestamp) -> Option<PathBuf> {
-    // The id is 26 base32 characters and the version is a number, so the
-    // name cannot contain a path separator however odd the server's data is.
-    let name: String = user
-        .as_str()
+fn path_in(dir: &Path, key: &str) -> Option<PathBuf> {
+    // Ids are base32 and versions are numbers, so a key cannot contain a
+    // path separator however odd the server's data is. Filtering rather than
+    // escaping, because a key that is entirely punctuation must produce no
+    // path at all: writing to the cache directory itself would be worse than
+    // not caching.
+    let safe: String = key
         .chars()
-        .filter(char::is_ascii_alphanumeric)
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
-    if name.is_empty() {
+    if safe.trim_matches('_').is_empty() {
         return None;
     }
-    Some(dir.join(format!("{name}_{}", version.millis())))
+    Some(dir.join(safe))
 }
 
-fn load_from(dir: &Path, user: &UserId, version: Timestamp) -> Option<Vec<u8>> {
-    std::fs::read(path_in(dir, user, version)?).ok()
+fn load_from(dir: &Path, key: &str) -> Option<Vec<u8>> {
+    std::fs::read(path_in(dir, key)?).ok()
 }
 
-fn store_in(dir: &Path, user: &UserId, version: Timestamp, bytes: &[u8]) {
-    let Some(file) = path_in(dir, user, version) else {
+fn store_in(dir: &Path, key: &str, bytes: &[u8]) {
+    let Some(file) = path_in(dir, key) else {
         return;
     };
     let _ = std::fs::create_dir_all(dir);
@@ -57,16 +64,32 @@ fn store_in(dir: &Path, user: &UserId, version: Timestamp, bytes: &[u8]) {
     }
 }
 
-/// The cached image for this user at this version, if one was written.
-#[must_use]
-pub(crate) fn load(user: &UserId, version: Timestamp) -> Option<Vec<u8>> {
-    load_from(&directory()?, user, version)
+fn avatar_key(user: &UserId, version: Timestamp) -> String {
+    format!("{}_{}", user.as_str(), version.millis())
 }
 
-/// Write an image to the cache, best effort.
+/// The cached avatar for this user at this version, if one was written.
+#[must_use]
+pub(crate) fn load(user: &UserId, version: Timestamp) -> Option<Vec<u8>> {
+    load_from(&cache_root()?.join("avatars"), &avatar_key(user, version))
+}
+
+/// Write an avatar to the cache, best effort.
 pub(crate) fn store(user: &UserId, version: Timestamp, bytes: &[u8]) {
-    if let Some(dir) = directory() {
-        store_in(&dir, user, version, bytes);
+    if let Some(root) = cache_root() {
+        store_in(&root.join("avatars"), &avatar_key(user, version), bytes);
+    }
+}
+
+/// The cached copy of an attached file.
+#[must_use]
+pub(crate) fn load_file(file: &FileId) -> Option<Vec<u8>> {
+    load_from(&cache_root()?.join("files"), file.as_str())
+}
+
+pub(crate) fn store_file(file: &FileId, bytes: &[u8]) {
+    if let Some(root) = cache_root() {
+        store_in(&root.join("files"), file.as_str(), bytes);
     }
 }
 
@@ -74,37 +97,52 @@ pub(crate) fn store(user: &UserId, version: Timestamp, bytes: &[u8]) {
 mod tests {
     use super::*;
 
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mmrs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
     /// A round trip through the cache, keyed by version.
     #[test]
     fn an_avatar_comes_back_under_the_version_it_was_written_with() {
-        let dir = std::env::temp_dir().join(format!("mmrs-avatars-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let user = UserId::new("abc123");
+        let dir = scratch("avatars");
+        let key = avatar_key(&UserId::new("abc123"), Timestamp(7));
 
-        assert_eq!(load_from(&dir, &user, Timestamp(7)), None);
-        store_in(&dir, &user, Timestamp(7), b"png-bytes");
-        assert_eq!(
-            load_from(&dir, &user, Timestamp(7)),
-            Some(b"png-bytes".to_vec())
-        );
+        assert_eq!(load_from(&dir, &key), None);
+        store_in(&dir, &key, b"png-bytes");
+        assert_eq!(load_from(&dir, &key), Some(b"png-bytes".to_vec()));
+
         // A new picture moves the version, so the old file is simply never
         // looked at again.
-        assert_eq!(load_from(&dir, &user, Timestamp(8)), None);
+        let moved = avatar_key(&UserId::new("abc123"), Timestamp(8));
+        assert_eq!(load_from(&dir, &moved), None);
         // And nothing is left half-written behind it.
-        assert!(!dir.join("abc123_7.part").exists());
+        assert!(!dir.join(format!("{key}.part")).exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An id with nothing usable in it must not produce a path at all --
-    /// writing to the cache directory itself would be worse than not caching.
+    /// A file has no version: its id is immutable, so the key is the id.
     #[test]
-    fn an_empty_id_has_no_cache_path() {
+    fn a_file_is_keyed_on_its_id_alone() {
+        let dir = scratch("files");
+        store_in(&dir, "fileid123", b"jpeg-bytes");
+        assert_eq!(load_from(&dir, "fileid123"), Some(b"jpeg-bytes".to_vec()));
+        assert_eq!(load_from(&dir, "otherfile"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A key with nothing usable in it must not produce a path at all.
+    #[test]
+    fn a_key_with_no_usable_characters_has_no_path() {
         let dir = PathBuf::from("/tmp");
-        assert_eq!(path_in(&dir, &UserId::new("///"), Timestamp(1)), None);
+        assert_eq!(path_in(&dir, "///"), None);
+        assert_eq!(path_in(&dir, "_"), None);
         assert_eq!(
-            path_in(&dir, &UserId::new("abc"), Timestamp(2)),
-            Some(dir.join("abc_2"))
+            path_in(&dir, "../../etc/passwd"),
+            Some(dir.join("etcpasswd"))
         );
+        assert_eq!(path_in(&dir, "abc_2"), Some(dir.join("abc_2")));
     }
 }
