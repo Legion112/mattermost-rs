@@ -629,6 +629,7 @@ fn render_blocks(doc: &mm_md::Document) -> Vec<BlockView> {
             text: plain.to_owned(),
             markup: false,
             quoted: false,
+            cells: Vec::new(),
         }];
     }
     let mut out = Vec::new();
@@ -645,6 +646,7 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                     text: mm_md::to_pango(inlines),
                     markup: true,
                     quoted,
+                    cells: Vec::new(),
                 });
             }
             mm_md::Block::ListItem(inlines) => out.push(BlockView {
@@ -652,6 +654,17 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                 text: mm_md::to_pango(inlines),
                 markup: true,
                 quoted,
+                cells: Vec::new(),
+            }),
+            mm_md::Block::Table(rows) => out.push(BlockView {
+                kind: BlockKind::Table,
+                text: String::new(),
+                markup: true,
+                quoted,
+                cells: rows
+                    .iter()
+                    .map(|row| row.iter().map(|cell| mm_md::to_pango(cell)).collect())
+                    .collect(),
             }),
             mm_md::Block::Code { code, .. } => out.push(BlockView {
                 kind: BlockKind::Code,
@@ -660,6 +673,7 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                 text: code.trim_end().to_owned(),
                 markup: false,
                 quoted,
+                cells: Vec::new(),
             }),
             // A quote inside a quote still draws one bar. Mattermost's own
             // rendering nests them, but a second bar on a chat message is
@@ -670,6 +684,7 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                 text: String::new(),
                 markup: false,
                 quoted,
+                cells: Vec::new(),
             }),
         }
     }
@@ -1004,10 +1019,16 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
             BlockKind::Bullet => {
                 let item = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 item.set_margin_start(6);
-                item.append(&card_label("•", false, &["dim-label"]));
+                let bullet = card_label("•", false, &["dim-label"]);
+                // Labels expand by default so they can wrap; a bullet that
+                // expands takes the whole line and pushes its own text to
+                // the far right.
+                bullet.set_hexpand(false);
+                item.append(&bullet);
                 item.append(&card_label(&block.text, block.markup, &[]));
                 item.upcast()
             }
+            BlockKind::Table => build_table(&block.cells).upcast(),
             BlockKind::Text => card_label(&block.text, block.markup, &[]).upcast(),
         };
 
@@ -1026,6 +1047,35 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
     }
 }
 
+/// A GFM table, as a grid with its header picked out.
+fn build_table(rows: &[Vec<String>]) -> gtk::Grid {
+    let grid = gtk::Grid::builder()
+        .row_spacing(2)
+        .column_spacing(16)
+        .margin_start(10)
+        .margin_end(10)
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+    grid.add_css_class("card");
+    for (r, row) in rows.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            // The header is the first row, by GFM's definition.
+            let classes: &[&str] = if r == 0 { &["heading"] } else { &[] };
+            let label = card_label(cell, true, classes);
+            // A cell sizes to its content; letting one expand would push the
+            // rest of the table off the edge.
+            label.set_hexpand(false);
+            label.set_wrap(false);
+            let (Ok(c), Ok(r)) = (i32::try_from(c), i32::try_from(r)) else {
+                continue;
+            };
+            grid.attach(&label, c, r, 1, 1);
+        }
+    }
+    grid
+}
+
 /// The bar beside a block quote, in the theme's own dim colour rather than
 /// a colour of its own.
 fn quote_bar() -> gtk::Separator {
@@ -1039,6 +1089,17 @@ fn card_label(text: &str, markup: bool, classes: &[&str]) -> gtk::Label {
     let label = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
+        // A wrapping label still reports its *unwrapped* width as its
+        // natural size, so the row asks for that width and a long message
+        // runs off the right-hand edge. `NaturalWrapMode::None` makes the
+        // natural size the wrapped one, which is what lets it fit.
+        .natural_wrap_mode(gtk::NaturalWrapMode::None)
+        // And break inside a word when a word is wider than the window: a
+        // bare URL or a long code span is one unbreakable token, and one
+        // such token in one message widened every row in the channel and
+        // pushed the rest of the text off the edge.
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .hexpand(true)
         .selectable(true)
         .css_classes(classes.to_vec())
         .build();
@@ -1369,6 +1430,12 @@ fn build_post_list(
     let scroller = gtk::ScrolledWindow::builder()
         .child(&post_view)
         .vexpand(true)
+        // Never horizontally. Without this the list takes the width of its
+        // widest row -- its *natural* width -- and a long message runs off
+        // the right-hand edge behind a horizontal scrollbar instead of
+        // wrapping. Forbidding the scrollbar is what forces the rows to the
+        // viewport's width, which is what makes a wrapping label wrap.
+        .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
     (posts, post_view, scroller)
@@ -1679,6 +1746,7 @@ impl Ui {
                     text: " (edited)".to_owned(),
                     markup: false,
                     quoted: false,
+                    cells: Vec::new(),
                 }),
             }
         }

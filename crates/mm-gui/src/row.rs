@@ -20,6 +20,8 @@ pub enum BlockKind {
     Code,
     /// A horizontal rule.
     Rule,
+    /// A table, drawn as a grid. `text` is unused; `cells` carries it.
+    Table,
 }
 
 /// One block of a message, already rendered to what the row draws.
@@ -37,6 +39,9 @@ pub struct BlockView {
     pub markup: bool,
     /// Inside a block quote, which draws a bar down the left.
     pub quoted: bool,
+    /// For `Table`: the rows, each a list of cells of Pango markup, the
+    /// header first.
+    pub cells: Vec<Vec<String>>,
 }
 
 /// One Slack-style attachment, already rendered to what the row draws.

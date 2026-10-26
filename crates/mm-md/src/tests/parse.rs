@@ -797,3 +797,39 @@ fn mentions_are_found_in_quotes_and_lists() {
     mark_mentions(&mut listed, &roster);
     assert!(listed.to_plain().contains("@a"));
 }
+
+/// Mattermost renders GFM tables, and a client that does not shows the
+/// pipes -- which is how a version matrix read in a real channel.
+#[test]
+fn a_table_is_parsed_into_rows_and_cells() {
+    let doc = parse("| Gate | Stage |\n|---|---|\n| alanbase | 8.5.11 |\n| cdn | 8.5.12 |");
+    let Some(Block::Table(rows)) = doc.blocks.first() else {
+        panic!("expected a table, got {:?}", doc.blocks);
+    };
+    assert_eq!(rows.len(), 3, "a header and two rows");
+    assert_eq!(rows[0].len(), 2);
+    assert_eq!(doc.to_plain(), "Gate\tStage\nalanbase\t8.5.11\ncdn\t8.5.12");
+}
+
+/// Cells carry inlines like anything else: links are linkified and mentions
+/// are marked inside them.
+#[test]
+fn a_cell_is_not_a_dead_end_for_links_and_mentions() {
+    let mut doc = parse("| who | where |\n|---|---|\n| @alex | https://example.invalid/x |");
+    mark_mentions(&mut doc, &|name| {
+        (name == "alex").then_some(Mentioned::Someone)
+    });
+    let Some(Block::Table(rows)) = doc.blocks.first() else {
+        panic!("expected a table");
+    };
+    assert!(
+        matches!(&rows[1][0][0], Inline::Mention { name, .. } if name == "alex"),
+        "{:?}",
+        rows[1][0]
+    );
+    assert!(
+        matches!(&rows[1][1][0], Inline::Link { .. }),
+        "{:?}",
+        rows[1][1]
+    );
+}

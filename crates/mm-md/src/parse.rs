@@ -51,6 +51,22 @@ impl Document {
                     push_plain(&mut out, inlines);
                 }
                 Block::Rule => out.push_str("---"),
+                // A table summarises as its cells, tab-separated: enough
+                // for a notification body and a search index, which is all
+                // `to_plain` is for.
+                Block::Table(rows) => {
+                    for (n, row) in rows.iter().enumerate() {
+                        if n > 0 {
+                            out.push('\n');
+                        }
+                        for (i, cell) in row.iter().enumerate() {
+                            if i > 0 {
+                                out.push('\t');
+                            }
+                            push_plain(&mut out, cell);
+                        }
+                    }
+                }
             }
         }
         out
@@ -94,6 +110,9 @@ pub enum Block {
     /// currently does rather than carrying structure nothing reads.
     ListItem(Vec<Inline>),
     Rule,
+    /// A GFM table. The first row is the header; every row is a list of
+    /// cells and every cell is a list of inlines.
+    Table(Vec<Vec<Vec<Inline>>>),
 }
 
 /// An inline element.
@@ -133,6 +152,9 @@ pub enum Inline {
 pub fn parse(source: &str) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
+    // Mattermost renders GFM tables, and a client that does not shows the
+    // pipes -- which is how a version matrix read here.
+    options.insert(Options::ENABLE_TABLES);
 
     let mut builder = Builder::default();
     for event in Parser::new_ext(source, options) {
@@ -171,6 +193,10 @@ struct Builder {
     code: Option<(Option<String>, String)>,
     link: Option<(String, String)>,
     heading: Option<u8>,
+    /// The rows of an open table, the header first.
+    table: Option<Vec<Vec<Vec<Inline>>>>,
+    /// The cells of the row being read.
+    row: Option<Vec<Vec<Inline>>>,
 }
 
 impl Builder {
@@ -197,6 +223,8 @@ impl Builder {
                 };
                 self.code = Some((lang, String::new()));
             }
+            Tag::Table(_) => self.table = Some(Vec::new()),
+            Tag::TableHead | Tag::TableRow => self.row = Some(Vec::new()),
             Tag::BlockQuote(_) => self.quote = Some(Vec::new()),
             Tag::Heading { level, .. } => self.heading = Some(*level as u8),
             _ => {}
@@ -222,6 +250,23 @@ impl Builder {
                 if let Some((lang, code)) = self.code.take() {
                     self.target().push(Block::Code { lang, code });
                 }
+            }
+            // The three table ends, written without a "what if there is no
+            // open row" branch: pulldown-cmark emits these strictly nested,
+            // so the only way to reach such a branch is a parser bug, and a
+            // branch no input can reach is one no test can cover.
+            TagEnd::TableCell => {
+                // A cell's inlines have been collecting in the usual place.
+                let cell = std::mem::take(&mut self.inlines);
+                self.row.get_or_insert_with(Vec::new).push(cell);
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                let row = self.row.take().unwrap_or_default();
+                self.table.get_or_insert_with(Vec::new).push(row);
+            }
+            TagEnd::Table => {
+                let table = self.table.take().unwrap_or_default();
+                self.blocks.push(Block::Table(table));
             }
             TagEnd::BlockQuote(_) => {
                 if let Some(inner) = self.quote.take() {
@@ -348,6 +393,11 @@ fn linkify_block(block: Block) -> Block {
         },
         Block::ListItem(inlines) => Block::ListItem(linkify_inlines(inlines)),
         Block::Quote(blocks) => Block::Quote(blocks.into_iter().map(linkify_block).collect()),
+        Block::Table(rows) => Block::Table(
+            rows.into_iter()
+                .map(|row| row.into_iter().map(linkify_inlines).collect())
+                .collect(),
+        ),
         // Code is left exactly as typed; a URL in a code block is text.
         other @ (Block::Code { .. } | Block::Rule) => other,
     }
@@ -505,6 +555,14 @@ fn mark_block(block: &mut Block, roster: &Roster<'_>) {
         Block::Quote(blocks) => {
             for inner in blocks {
                 mark_block(inner, roster);
+            }
+        }
+        Block::Table(rows) => {
+            for row in rows {
+                for cell in row {
+                    let taken = std::mem::take(cell);
+                    *cell = mark_inlines(taken, roster);
+                }
             }
         }
         // Code is literal, and a rule has no text.
