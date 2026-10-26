@@ -65,6 +65,8 @@ fn push_plain(out: &mut String, inlines: &[Inline]) {
                 push_plain(out, inner);
             }
             Inline::Link { text, .. } => out.push_str(text),
+            // A space, not a newline, unlike the display path: this is the
+            // one-line summary a notification body and a search index want.
             Inline::SoftBreak => out.push(' '),
         }
     }
@@ -98,7 +100,17 @@ pub enum Inline {
     Emphasis(Vec<Inline>),
     Strong(Vec<Inline>),
     Strike(Vec<Inline>),
-    Link { href: String, text: String },
+    Link {
+        href: String,
+        text: String,
+    },
+    /// A newline inside a paragraph.
+    ///
+    /// **Mattermost renders this as a line break, not as a space.** That is
+    /// a deliberate departure from `CommonMark`, and it is what every other
+    /// Mattermost client does: a message typed with shift-enter, and an
+    /// alert whose summary sits under its severity, both read as two lines
+    /// everywhere else and ran together here.
     SoftBreak,
 }
 

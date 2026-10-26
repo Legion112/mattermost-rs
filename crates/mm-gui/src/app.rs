@@ -21,7 +21,7 @@
 
 use crate::bridge::{Command, Event};
 use crate::login::LoginPage;
-use crate::row::{Attachment, PostRow, PostRowFields};
+use crate::row::{Attachment, BlockKind, BlockView, PostRow, PostRowFields};
 // adw::prelude re-exports gtk::prelude, so this one import covers both.
 use adw::prelude::*;
 use gtk::gdk;
@@ -597,37 +597,63 @@ fn wire(
 /// Block structure is flattened to lines: block-level widgets per paragraph
 /// arrive with the component tree, and emitting them as separate labels now
 /// would mean rebuilding the row factory for a layout that is about to change.
-fn render_markup(doc: &mm_md::Document) -> String {
-    let mut out = String::new();
-    for block in &doc.blocks {
-        if !out.is_empty() {
-            out.push('\n');
-        }
+/// Turn a parsed message into the blocks a row draws.
+///
+/// A code block is a box and a rule is a line; neither is expressible as
+/// Pango markup, which is why this returns a list rather than one string.
+/// The common case -- a single paragraph of plain text -- comes back as one
+/// block that needs no markup parsing at all.
+fn render_blocks(doc: &mm_md::Document) -> Vec<BlockView> {
+    if let Some(plain) = doc.plain_text() {
+        return vec![BlockView {
+            kind: BlockKind::Text,
+            text: plain.to_owned(),
+            markup: false,
+            quoted: false,
+        }];
+    }
+    let mut out = Vec::new();
+    push_blocks(&doc.blocks, false, &mut out);
+    out
+}
+
+fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) {
+    for block in blocks {
         match block {
             mm_md::Block::Paragraph(inlines) | mm_md::Block::Heading { inlines, .. } => {
-                out.push_str(&mm_md::to_pango(inlines));
+                out.push(BlockView {
+                    kind: BlockKind::Text,
+                    text: mm_md::to_pango(inlines),
+                    markup: true,
+                    quoted,
+                });
             }
-            mm_md::Block::ListItem(inlines) => {
-                out.push_str("• ");
-                out.push_str(&mm_md::to_pango(inlines));
-            }
-            mm_md::Block::Code { code, .. } => {
-                out.push_str("<tt>");
-                out.push_str(&mm_md::escape(code.trim_end()));
-                out.push_str("</tt>");
-            }
-            mm_md::Block::Quote(blocks) => {
-                let inner = mm_md::Document {
-                    blocks: blocks.clone(),
-                };
-                out.push_str("<i>");
-                out.push_str(&render_markup(&inner));
-                out.push_str("</i>");
-            }
-            mm_md::Block::Rule => out.push_str("───"),
+            mm_md::Block::ListItem(inlines) => out.push(BlockView {
+                kind: BlockKind::Bullet,
+                text: mm_md::to_pango(inlines),
+                markup: true,
+                quoted,
+            }),
+            mm_md::Block::Code { code, .. } => out.push(BlockView {
+                kind: BlockKind::Code,
+                // Code is literal by definition: it is the one thing that
+                // must never be parsed as markup.
+                text: code.trim_end().to_owned(),
+                markup: false,
+                quoted,
+            }),
+            // A quote inside a quote still draws one bar. Mattermost's own
+            // rendering nests them, but a second bar on a chat message is
+            // noise and the depth is not information the reader needs.
+            mm_md::Block::Quote(inner) => push_blocks(inner, true, out),
+            mm_md::Block::Rule => out.push(BlockView {
+                kind: BlockKind::Rule,
+                text: String::new(),
+                markup: false,
+                quoted,
+            }),
         }
     }
-    out
 }
 
 /// The trailing line: what is attached, and how many replies there are.
@@ -773,13 +799,9 @@ fn setup_post_row(item: &gtk::ListItem) {
     header.append(&author);
     header.append(&bot);
     header.append(&time);
-    // A non-editable TextView rather than a Label: selection across the
-    // whole message, and the inline paintables custom emoji will need.
-    let body = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .selectable(true)
-        .build();
+    // A box of blocks rather than one label: a code block is a panel and a
+    // rule is a line, and neither is expressible as Pango markup.
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
     // Attachments and "N replies" -- the line that keeps a post whose
     // only content is a file from rendering as an author and nothing.
     let meta = gtk::Label::builder()
@@ -907,8 +929,10 @@ fn bind_cards(cards: &gtk::Box, data: &PostRow) {
                 column.append(&card_label(&markup, true, &["heading"]));
             }
         }
-        if !view.text.is_empty() {
-            column.append(&card_label(&view.text, view.markup, &[]));
+        if !view.blocks.is_empty() {
+            let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            fill_blocks(&body, &view.blocks);
+            column.append(&body);
         }
         for (title, value) in &view.fields {
             if !title.is_empty() {
@@ -931,7 +955,67 @@ fn bind_cards(cards: &gtk::Box, data: &PostRow) {
     }
 }
 
-/// One line inside an attachment.
+/// Build the widgets for a message body, a block at a time.
+///
+/// A code block becomes a padded box rather than a run of monospace text,
+/// which is what every other Mattermost client draws and what makes an
+/// alert's details readable at all.
+fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
+    while let Some(old) = into.first_child() {
+        into.remove(&old);
+    }
+    into.set_visible(!blocks.is_empty());
+
+    for block in blocks {
+        let widget: gtk::Widget = match block.kind {
+            BlockKind::Rule => gtk::Separator::new(gtk::Orientation::Horizontal).upcast(),
+            BlockKind::Code => {
+                let code = card_label(&block.text, false, &["monospace"]);
+                code.set_margin_start(10);
+                code.set_margin_end(10);
+                code.set_margin_top(6);
+                code.set_margin_bottom(6);
+                let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                panel.append(&code);
+                // "card" is libadwaita's panel styling: a background a shade
+                // off the window's, and rounded corners.
+                panel.add_css_class("card");
+                panel.upcast()
+            }
+            BlockKind::Bullet => {
+                let item = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                item.set_margin_start(6);
+                item.append(&card_label("•", false, &["dim-label"]));
+                item.append(&card_label(&block.text, block.markup, &[]));
+                item.upcast()
+            }
+            BlockKind::Text => card_label(&block.text, block.markup, &[]).upcast(),
+        };
+
+        if block.quoted {
+            // A quote is a bar down the left, like an attachment, and dimmed
+            // -- it is somebody else's words.
+            let quoted = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            quoted.append(&quote_bar());
+            widget.add_css_class("dim-label");
+            widget.set_hexpand(true);
+            quoted.append(&widget);
+            into.append(&quoted);
+        } else {
+            into.append(&widget);
+        }
+    }
+}
+
+/// The bar beside a block quote, in the theme's own dim colour rather than
+/// a colour of its own.
+fn quote_bar() -> gtk::Separator {
+    let bar = gtk::Separator::new(gtk::Orientation::Vertical);
+    bar.add_css_class("dim-label");
+    bar
+}
+
+/// One line of text inside a message or an attachment.
 fn card_label(text: &str, markup: bool, classes: &[&str]) -> gtk::Label {
     let label = gtk::Label::builder()
         .xalign(0.0)
@@ -1017,7 +1101,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     let Some(header) = main.first_child().and_downcast::<gtk::Box>() else {
         return;
     };
-    let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
+    let Some(body) = header.next_sibling().and_downcast::<gtk::Box>() else {
         return;
     };
     let Some(cards) = body.next_sibling().and_downcast::<gtk::Box>() else {
@@ -1069,19 +1153,12 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         time.set_text(&data.time());
     }
 
-    // set_markup on text that is not markup would make GTK log an error
-    // and drop the message, so the flag decides.
-    if data.is_markup() {
-        body.set_markup(&data.body());
-    } else {
-        body.set_text(&data.body());
-    }
+    fill_blocks(&body, &data.blocks());
     if system {
         body.add_css_class("dim-label");
     } else {
         body.remove_css_class("dim-label");
     }
-    body.set_visible(!data.body().is_empty());
 
     bind_cards(&cards, &data);
     bind_images(&images, &data);
@@ -1137,18 +1214,12 @@ const IMAGE_MAX_HEIGHT: i64 = 320;
 /// callback -- bind runs on every scroll, and a channel of alerts would
 /// re-parse every one of them each time it moved.
 fn render_card(attachment: &mm_types::MessageAttachment) -> crate::row::AttachmentView {
-    let doc = mm_md::parse(&attachment.text);
-    let (text, markup) = doc.plain_text().map_or_else(
-        || (render_markup(&doc), true),
-        |plain| (plain.to_owned(), false),
-    );
     crate::row::AttachmentView {
+        blocks: render_blocks(&mm_md::parse(&attachment.text)),
         rgb: attachment.rgb(),
         pretext: attachment.pretext.clone(),
         title: attachment.title.clone(),
         title_link: attachment.title_link.clone(),
-        text,
-        markup,
         fields: attachment
             .fields
             .iter()
@@ -1317,54 +1388,19 @@ impl Ui {
                 self.login.set_busy(false);
                 let threading = self.store.borrow().threading;
                 *self.store.borrow_mut() = Store::new(me, threading);
-                self.identity.set_text(&format!("{username} · {server}"));
+                // A read-only window must say so on its face. The whole
+                // point is that it is pointed at somebody's real server.
+                let mode = if std::env::var_os("MMRS_READ_ONLY").is_some() {
+                    "  ·  read-only"
+                } else {
+                    ""
+                };
+                self.identity
+                    .set_text(&format!("{username} · {server}{mode}"));
                 self.set_status("connected");
             }
             Event::Threading(threading) => {
                 self.store.borrow_mut().threading = threading;
-            }
-            Event::Teams(teams) => self.store.borrow_mut().apply_teams(teams),
-            Event::Channels(channels) => {
-                self.store.borrow_mut().apply_channels(channels);
-                self.refresh_sidebar();
-            }
-            Event::Members(members) => {
-                self.store.borrow_mut().apply_members(members);
-                self.refresh_sidebar();
-            }
-            Event::Thread { root, page } => {
-                let _ = self.store.borrow_mut().apply_thread(&page);
-                *self.thread_root.borrow_mut() = Some(root.clone());
-                self.refresh_thread();
-            }
-            Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
-            Event::Avatar { user, image } => self.on_avatar(user, image),
-            Event::File { file, image } => self.on_file(file, image),
-            Event::NameFormat(format) => {
-                self.store.borrow_mut().name_format = format;
-                self.redraw_everything();
-            }
-            Event::Stats(stats) => {
-                let channel = stats.channel_id.clone();
-                self.store.borrow_mut().apply_stats(stats);
-                if self.selected.borrow().as_ref() == Some(&channel) {
-                    self.refresh_heading(&channel);
-                }
-            }
-            Event::Categories(list) => {
-                self.store.borrow_mut().apply_categories(&list);
-                self.refresh_sidebar();
-            }
-            Event::Users(users) => {
-                self.store.borrow_mut().apply_users(users);
-                self.refresh_sidebar();
-                // The roster arrives after the posts that needed it -- the
-                // authors of a page are fetched from the page itself -- so
-                // every row by a newly-known author is still showing a raw
-                // user id until this redraw.
-                if let Some(open) = self.selected.borrow().clone() {
-                    self.refresh_posts(&open);
-                }
             }
             Event::Posts { channel, page } => {
                 self.store
@@ -1396,6 +1432,9 @@ impl Ui {
             }
             Event::Status(text) => self.set_status(&text),
             Event::Failed(text) => self.set_status(&format!("error: {text}")),
+            // Reference data arriving, which only ever means "store it and
+            // redraw what it touches".
+            other => self.on_data(other),
         }
     }
 
@@ -1581,26 +1620,38 @@ impl Ui {
                 .ok();
         }
         let (author, bot) = store.post_author(post);
-        let suffix = if post.is_edited() { " (edited)" } else { "" };
-        let doc = mm_md::parse(&post.message);
-        // Most messages are a single plain paragraph, and for those the
-        // markup round-trip is skipped entirely.
-        let (body, markup) = if let Some(plain) = doc.plain_text() {
-            (format!("{plain}{suffix}"), false)
-        } else {
-            let rendered = render_markup(&doc);
-            (format!("{rendered}{}", mm_md::escape(suffix)), true)
-        };
+        let mut blocks = render_blocks(&mm_md::parse(&post.message));
+        // "(edited)" belongs on the end of the last thing said, not on a
+        // line of its own.
+        if post.is_edited() {
+            match blocks.last_mut() {
+                Some(last) if last.kind != BlockKind::Code => {
+                    if last.markup {
+                        last.text.push_str(&mm_md::escape(" (edited)"));
+                    } else {
+                        last.text.push_str(" (edited)");
+                    }
+                }
+                // After a code block, on its own line: appending it inside
+                // the box would read as part of the code.
+                _ => blocks.push(BlockView {
+                    kind: BlockKind::Text,
+                    text: " (edited)".to_owned(),
+                    markup: false,
+                    quoted: false,
+                }),
+            }
+        }
         let images = self.images_for(post);
         let replies = store.reply_count(&post.id);
         PostRow::new(PostRowFields {
             id: post.id.as_str(),
             author: &author,
-            body: &body,
+            body: "",
+            blocks,
             time: &clock_time(post.create_at.millis()),
             meta: &describe_extras(post),
             flags: crate::row::PostRowFlags {
-                markup,
                 grouped,
                 voice: if post.is_system() {
                     crate::row::Voice::System
@@ -1715,6 +1766,62 @@ impl Ui {
             glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                 view.scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
             });
+        }
+    }
+
+    /// Take in reference data -- teams, channels, members, categories,
+    /// the roster, a thread, a page of history, an image -- and redraw
+    /// whatever it affects.
+    ///
+    /// Split from `on_event` so that function stays about the states a
+    /// window can be in, and this stays about data arriving.
+    fn on_data(&self, event: Event) {
+        match event {
+            Event::Teams(teams) => self.store.borrow_mut().apply_teams(teams),
+            Event::Channels(channels) => {
+                self.store.borrow_mut().apply_channels(channels);
+                self.refresh_sidebar();
+            }
+            Event::Members(members) => {
+                self.store.borrow_mut().apply_members(members);
+                self.refresh_sidebar();
+            }
+            Event::Thread { root, page } => {
+                let _ = self.store.borrow_mut().apply_thread(&page);
+                *self.thread_root.borrow_mut() = Some(root.clone());
+                self.refresh_thread();
+            }
+            Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
+            Event::Avatar { user, image } => self.on_avatar(user, image),
+            Event::File { file, image } => self.on_file(file, image),
+            Event::NameFormat(format) => {
+                self.store.borrow_mut().name_format = format;
+                self.redraw_everything();
+            }
+            Event::Stats(stats) => {
+                let channel = stats.channel_id.clone();
+                self.store.borrow_mut().apply_stats(stats);
+                if self.selected.borrow().as_ref() == Some(&channel) {
+                    self.refresh_heading(&channel);
+                }
+            }
+            Event::Categories(list) => {
+                self.store.borrow_mut().apply_categories(&list);
+                self.refresh_sidebar();
+            }
+            Event::Users(users) => {
+                self.store.borrow_mut().apply_users(users);
+                self.refresh_sidebar();
+                // The roster arrives after the posts that needed it -- the
+                // authors of a page are fetched from the page itself -- so
+                // every row by a newly-known author is still showing a raw
+                // user id until this redraw.
+                if let Some(open) = self.selected.borrow().clone() {
+                    self.refresh_posts(&open);
+                }
+            }
+            // Every other variant has its own arm in `on_event`.
+            _ => {}
         }
     }
 

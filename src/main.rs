@@ -38,6 +38,10 @@ usage:
   mattermost-rs logout
   mattermost-rs --version | --help
 
+Set MMRS_READ_ONLY=1 to read a server without putting anything into it:
+sending and reacting are refused. Marking a channel read is still allowed,
+since that changes only your own unread state.
+
 A personal access token (`token`) is the supported path for SSO users: the
 browser-based SSO flow needs a hand-off this client does not implement yet.
 Passwords are read from an environment variable, never from an argument, so
@@ -204,6 +208,7 @@ async fn history(args: &[String]) -> Result<(), String> {
 /// a real server -- the remove path puts the emoji in the URL, which no unit
 /// test can prove the server accepts.
 async fn react(args: &[String]) -> Result<(), String> {
+    refuse_if_read_only("react")?;
     let post = PostId::new(require(args, "--post")?);
     let emoji = require(args, "--emoji")?;
     let remove = args.iter().any(|a| a == "--remove");
@@ -301,6 +306,21 @@ fn gui() -> Result<(), String> {
 fn flag(args: &[String], name: &str) -> Option<String> {
     let at = args.iter().position(|a| a == name)?;
     args.get(at + 1).cloned()
+}
+
+/// Stop a subcommand that would put something in front of another person.
+///
+/// The window's guard lives in the engine, which the command line does not
+/// go through, so it needs its own. `MMRS_READ_ONLY` has to mean the same
+/// thing for the whole process or it means nothing.
+fn refuse_if_read_only(what: &str) -> Result<(), String> {
+    if std::env::var_os(engine::READ_ONLY).is_some_and(|v| v != "0" && !v.is_empty()) {
+        return Err(format!(
+            "{what} would put something in front of another person, and {} is set",
+            engine::READ_ONLY
+        ));
+    }
+    Ok(())
 }
 
 fn require(args: &[String], name: &str) -> Result<String, String> {
@@ -453,6 +473,7 @@ async fn sync(args: &[String]) -> Result<(), String> {
 
 /// Post a message, so the create-post path is exercisable without the window.
 async fn send(args: &[String]) -> Result<(), String> {
+    refuse_if_read_only("send")?;
     let name = require(args, "--channel")?;
     let text = require(args, "--text")?;
     let (client, saved) = connect()?;

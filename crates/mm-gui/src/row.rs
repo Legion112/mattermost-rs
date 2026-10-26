@@ -8,6 +8,37 @@
 
 use gtk::glib;
 
+/// What kind of widget one block of a message becomes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A paragraph or a heading.
+    #[default]
+    Text,
+    /// A list item, which gets a bullet and an indent.
+    Bullet,
+    /// A fenced or indented code block, which gets a box of its own.
+    Code,
+    /// A horizontal rule.
+    Rule,
+}
+
+/// One block of a message, already rendered to what the row draws.
+///
+/// A message is a sequence of these rather than one string of markup,
+/// because a code block is a *box* and a rule is a line: neither is
+/// expressible as Pango markup, and flattening them into one label is why
+/// code in this client read as ordinary monospace text while every other
+/// client drew it in a panel.
+#[derive(Debug, Clone, Default)]
+pub struct BlockView {
+    pub kind: BlockKind,
+    /// Pango markup, or literal text when `markup` is false.
+    pub text: String,
+    pub markup: bool,
+    /// Inside a block quote, which draws a bar down the left.
+    pub quoted: bool,
+}
+
 /// One Slack-style attachment, already rendered to what the row draws.
 ///
 /// The markup is produced once here rather than in the bind callback,
@@ -21,10 +52,8 @@ pub struct AttachmentView {
     pub title: String,
     /// Where the title points, if anywhere.
     pub title_link: String,
-    /// Pango markup for the body.
-    pub text: String,
-    /// Whether `text` is markup rather than literal text.
-    pub markup: bool,
+    /// The body, a block at a time.
+    pub blocks: Vec<BlockView>,
     pub fields: Vec<(String, String)>,
     pub footer: String,
 }
@@ -51,6 +80,9 @@ mod imp {
         pub id: RefCell<String>,
         pub author: RefCell<String>,
         pub body: RefCell<String>,
+        /// The message body, a block at a time. Empty for a separator,
+        /// whose text lives in `body`.
+        pub blocks: RefCell<Vec<super::BlockView>>,
         pub time: RefCell<String>,
         /// A trailing line for attachments and reply counts; empty hides it.
         pub meta: RefCell<String>,
@@ -64,11 +96,6 @@ mod imp {
         pub grouped: Cell<bool>,
         /// Who the row is from.
         pub voice: Cell<super::Voice>,
-        /// Whether `body` is Pango markup rather than literal text. Most
-        /// messages are plain, and for those the markup round-trip is skipped
-        /// entirely -- that fast path is where the rendering cost goes in a
-        /// busy channel.
-        pub markup: Cell<bool>,
         /// Already grouped and ordered by `mm-core`; the row only draws them.
         pub reactions: RefCell<Vec<mm_core::ReactionSummary>>,
         /// The author's face, once it has been fetched and decoded. `None`
@@ -103,6 +130,7 @@ pub struct PostRowFields<'a> {
     pub id: &'a str,
     pub author: &'a str,
     pub body: &'a str,
+    pub blocks: Vec<BlockView>,
     pub time: &'a str,
     pub meta: &'a str,
     pub flags: PostRowFlags,
@@ -134,8 +162,6 @@ pub enum Voice {
 /// The rest of the yes-or-no facts about a row.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PostRowFlags {
-    /// Whether `body` is Pango markup rather than literal text.
-    pub markup: bool,
     /// The same author is still talking.
     pub grouped: bool,
     pub voice: Voice,
@@ -149,9 +175,9 @@ impl PostRow {
         inner.id.replace(fields.id.to_owned());
         inner.author.replace(fields.author.to_owned());
         inner.body.replace(fields.body.to_owned());
+        inner.blocks.replace(fields.blocks);
         inner.time.replace(fields.time.to_owned());
         inner.meta.replace(fields.meta.to_owned());
-        inner.markup.set(fields.flags.markup);
         inner.voice.set(fields.flags.voice);
         inner.grouped.set(fields.flags.grouped);
         inner.reactions.replace(fields.reactions);
@@ -236,6 +262,11 @@ impl PostRow {
     }
 
     #[must_use]
+    pub fn blocks(&self) -> Vec<BlockView> {
+        self.imp().blocks.borrow().clone()
+    }
+
+    #[must_use]
     pub fn body(&self) -> String {
         self.imp().body.borrow().clone()
     }
@@ -243,11 +274,6 @@ impl PostRow {
     #[must_use]
     pub fn time(&self) -> String {
         self.imp().time.borrow().clone()
-    }
-
-    #[must_use]
-    pub fn is_markup(&self) -> bool {
-        self.imp().markup.get()
     }
 
     #[must_use]

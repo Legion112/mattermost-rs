@@ -99,6 +99,18 @@ fn continues(previous: &Post, post: &Post) -> bool {
     previous.user_id == post.user_id
         && !previous.is_system()
         && !post.is_system()
+        // A webhook is never a continuation, in either direction. One bot
+        // account posts under many names -- "Alertmanager", "Deploys", "CI"
+        // -- so sharing a `user_id` says nothing about sharing an author,
+        // and an alert channel collapsed into one block of a dozen alerts
+        // with a single heading, which is not what any other client shows.
+        && !previous.is_from_webhook()
+        && !post.is_from_webhook()
+        // Replies to different roots are different conversations even when
+        // the same person wrote both. Invisible with collapsed threads,
+        // where replies are not in the channel at all -- and wrong the
+        // moment somebody turns that off.
+        && previous.root_id == post.root_id
         && post.create_at.millis() - previous.create_at.millis() <= GROUP_WINDOW_MILLIS
 }
 

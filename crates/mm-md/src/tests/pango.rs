@@ -66,9 +66,14 @@ fn code_spans_escape_their_contents() {
     assert_eq!(render("`a < b && c`"), "<tt>a &lt; b &amp;&amp; c</tt>");
 }
 
+/// Mattermost renders a newline inside a paragraph as a line break, not as
+/// a space -- a deliberate departure from `CommonMark`. A message typed with
+/// shift-enter, and a webhook alert whose summary sits under its severity,
+/// read as two lines in every other Mattermost client and ran together in
+/// this one.
 #[test]
-fn soft_breaks_become_spaces() {
-    assert_eq!(render("one\ntwo"), "one two");
+fn soft_breaks_become_line_breaks() {
+    assert_eq!(render("one\ntwo"), "one\ntwo");
 }
 
 /// The property the plan asks for: for arbitrary input, including input built
@@ -198,4 +203,15 @@ fn the_balance_checker_itself_rejects_bad_markup() {
 #[test]
 fn an_empty_document_renders_to_nothing() {
     assert_eq!(to_pango(&[]), "");
+}
+
+/// The shape a webhook alert actually arrives in: a severity and a summary
+/// separated by one newline. Running them together is what made this
+/// client's alert channels read differently from every other one.
+#[test]
+fn an_alert_body_keeps_its_two_lines() {
+    assert_eq!(
+        render("**Severity:** Warning\nSummary: it restarts"),
+        "<b>Severity:</b> Warning\nSummary: it restarts"
+    );
 }

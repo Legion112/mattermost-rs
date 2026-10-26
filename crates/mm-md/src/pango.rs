@@ -59,7 +59,7 @@ fn render(inlines: &[Inline], out: &mut String) {
                 out.push_str(&escape(text));
                 out.push_str("</a>");
             }
-            Inline::SoftBreak => out.push(' '),
+            Inline::SoftBreak => out.push('\n'),
         }
     }
 }

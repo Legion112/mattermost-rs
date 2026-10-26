@@ -295,3 +295,61 @@ fn the_line_sits_under_the_date_it_falls_on() {
         ]
     );
 }
+
+fn from_webhook(id: &str, author: &str, created: i64) -> Post {
+    Post {
+        props: serde_json::json!({"from_webhook": "true", "override_username": "Alertmanager"}),
+        ..post(id, author, created)
+    }
+}
+
+/// One bot account posts under many names, so two posts sharing a `user_id`
+/// say nothing about sharing an author. Grouping them collapsed a channel
+/// of alerts into a single block with one heading -- which is why an alert
+/// channel looked nothing like it does in every other client.
+#[test]
+fn webhook_posts_never_group() {
+    let a = from_webhook("p1", "u-bot", NEW_YEAR_2021);
+    let b = from_webhook("p2", "u-bot", NEW_YEAR_2021 + MINUTE);
+    assert_eq!(
+        ids(&project(&[&a, &b], 0, None)),
+        ["--- 2021-01-01", "p1", "p2"]
+    );
+}
+
+/// In either direction: a person's message after an alert is not a
+/// continuation of the alert, and an alert after their message is not a
+/// continuation of them.
+#[test]
+fn a_webhook_breaks_the_block_on_both_sides() {
+    let spoke = post("p1", "u-bot", NEW_YEAR_2021);
+    let alert = from_webhook("p2", "u-bot", NEW_YEAR_2021 + MINUTE);
+    let spoke_again = post("p3", "u-bot", NEW_YEAR_2021 + 2 * MINUTE);
+    assert_eq!(
+        ids(&project(&[&spoke, &alert, &spoke_again], 0, None)),
+        ["--- 2021-01-01", "p1", "p2", "p3"]
+    );
+}
+
+/// Two replies to different roots are two conversations, even from one
+/// person a minute apart. Invisible while collapsed threads hide replies
+/// from the channel, and wrong the moment somebody turns that off.
+#[test]
+fn replies_to_different_roots_do_not_group() {
+    let mut first = post("p1", "alice", NEW_YEAR_2021);
+    first.root_id = PostId::new("root-a");
+    let mut second = post("p2", "alice", NEW_YEAR_2021 + MINUTE);
+    second.root_id = PostId::new("root-b");
+    assert_eq!(
+        ids(&project(&[&first, &second], 0, None)),
+        ["--- 2021-01-01", "p1", "p2"]
+    );
+
+    // Two replies to the *same* root still group.
+    let mut third = post("p3", "alice", NEW_YEAR_2021 + 2 * MINUTE);
+    third.root_id = PostId::new("root-b");
+    assert_eq!(
+        ids(&project(&[&second, &third], 0, None)),
+        ["--- 2021-01-01", "p2", "p3 (grouped)"]
+    );
+}

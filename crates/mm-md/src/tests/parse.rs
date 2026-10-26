@@ -199,8 +199,11 @@ fn to_plain_strips_markup_across_every_block_kind() {
     assert!(!plain.contains("**"), "{plain}");
 }
 
+/// `to_plain` is the one-line summary a notification body and a search
+/// index want, so it collapses a break to a space -- unlike the display
+/// path, which keeps it as a line break the way Mattermost does.
 #[test]
-fn to_plain_renders_links_as_their_label_and_breaks_as_spaces() {
+fn to_plain_renders_links_as_their_label_and_collapses_breaks() {
     assert_eq!(parse("[label](https://x.invalid)").to_plain(), "label");
     assert_eq!(parse("a\nb").to_plain(), "a b");
     assert_eq!(

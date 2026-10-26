@@ -30,6 +30,8 @@ struct Active {
     client: Client,
     session: Session,
     socket: tokio::task::JoinHandle<()>,
+    /// Refuse every command that would change something on the server.
+    read_only: bool,
 }
 
 /// Start the engine on its own thread.
@@ -65,12 +67,54 @@ pub(crate) fn spawn(
     (cmd_tx, evt_rx)
 }
 
+/// Whether this process may post anything to the server.
+///
+/// Set `MMRS_READ_ONLY=1` to read somebody's real server without putting
+/// anything into it. Marking a channel read is deliberately **not** blocked:
+/// it changes only the reader's own unread state, which is what reading a
+/// channel is supposed to do. What is blocked is anything a colleague would
+/// see -- a message, a reply, a reaction.
+///
+/// The guard lives in the engine because that is the one place every
+/// command passes through.
+fn is_read_only() -> bool {
+    std::env::var_os(READ_ONLY).is_some_and(|v| v != "0" && !v.is_empty())
+}
+
+/// The environment variable that turns writing off.
+pub(crate) const READ_ONLY: &str = "MMRS_READ_ONLY";
+
+/// Refuse a command that would put something in front of another person,
+/// when this process is observing rather than participating.
+///
+/// Returns whether the command was refused.
+async fn refused_as_read_only(
+    a: &Active,
+    command: &Command,
+    events: &async_channel::Sender<Event>,
+) -> bool {
+    if !a.read_only {
+        return false;
+    }
+    let refusal = match command {
+        Command::Send { .. } => "read-only: not sending",
+        Command::React { .. } => "read-only: not reacting",
+        _ => return false,
+    };
+    let _ = events.send(Event::Status(refusal.into())).await;
+    true
+}
+
 /// Carry out one command against an established session.
 ///
 /// Split from `run` so the loop above stays about *when* a command may run —
 /// before sign-in, after, at shutdown — and this stays about what each one
 /// does.
 async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Event>) {
+    if refused_as_read_only(a, &command, events).await {
+        return;
+    }
+
     match command {
         Command::Sync => sync(&a.client, &a.session, events).await,
         Command::OpenChannel(channel) => open_channel(&a.client, &channel, events).await,
@@ -377,6 +421,7 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         client,
         session,
         socket,
+        read_only: is_read_only(),
     })
 }
 
