@@ -23,6 +23,9 @@ mod imp {
         pub meta: RefCell<String>,
         /// A day boundary rather than a message. `body` carries the label.
         pub separator: Cell<bool>,
+        /// A separator that marks where the reader left off, drawn in the
+        /// accent colour rather than as a plain rule.
+        pub unread_mark: Cell<bool>,
         /// The same author is still talking, so the author line is redundant
         /// and this row draws tight under the one above it.
         pub grouped: Cell<bool>,
@@ -101,6 +104,19 @@ impl PostRow {
         this.imp().body.replace(label.to_owned());
         this.imp().separator.set(true);
         this
+    }
+
+    /// The "new messages" line: a separator that draws attention.
+    #[must_use]
+    pub fn new_messages() -> Self {
+        let this = Self::separator("New messages");
+        this.imp().unread_mark.set(true);
+        this
+    }
+
+    #[must_use]
+    pub fn is_unread_mark(&self) -> bool {
+        self.imp().unread_mark.get()
     }
 
     #[must_use]

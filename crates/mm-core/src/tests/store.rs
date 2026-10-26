@@ -1361,3 +1361,21 @@ fn a_thread_page_stores_its_posts_without_touching_the_timeline() {
     assert_eq!(store.channel_posts(&channel).len(), timeline_before);
     assert_eq!(store.thread_posts(&PostId::new("p-root")).len(), 2);
 }
+
+/// Opening a channel moves the last-viewed time forward, so the window has
+/// to capture it first -- otherwise the "new messages" line would vanish in
+/// the instant it became useful.
+#[test]
+fn the_last_viewed_time_is_readable_and_moves_on_opening() {
+    let mut store = store();
+    let id = ChannelId::new("c1");
+    assert_eq!(store.last_viewed(&id), None);
+
+    store.apply_channels(vec![channel("c1", 10, 10)]);
+    store.apply_members(vec![member("c1", 3, 3, 0)]);
+    let before = store.last_viewed(&id).expect("a membership was applied");
+
+    store.mark_read_locally(&id);
+    let after = store.last_viewed(&id).expect("still a member");
+    assert!(after >= before, "{after:?} went backwards from {before:?}");
+}

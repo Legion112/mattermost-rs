@@ -163,6 +163,16 @@ impl Store {
         (name, self.stats.get(channel).map(|s| s.member_count))
     }
 
+    /// When the reader last viewed a channel, as the server knows it.
+    ///
+    /// The window captures this the moment a channel is opened, before
+    /// marking it read, because opening it moves this forward and the
+    /// "new messages" line has to remember where the reader actually was.
+    #[must_use]
+    pub fn last_viewed(&self, channel: &ChannelId) -> Option<Timestamp> {
+        self.my_member.get(channel)?.last_viewed_at
+    }
+
     /// Whether the channel's history is fully loaded, so the view can stop
     /// asking for older pages at the top of the scrollback.
     ///

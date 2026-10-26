@@ -77,6 +77,10 @@ struct Ui {
     thread_pane: gtk::Box,
     conversation: gtk::Paned,
     thread_root: Rc<RefCell<Option<PostId>>>,
+    /// Where the reader was when they opened the channel, for the "new
+    /// messages" line. Captured before marking read, because marking read
+    /// moves it.
+    unread_from: Rc<RefCell<Option<mm_types::Timestamp>>>,
     /// One backfill request at a time. The top edge fires repeatedly while
     /// the user sits there, and without this each firing would start another
     /// identical request.
@@ -319,6 +323,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         thread_pane: thread_pane.clone(),
         conversation: conversation.clone(),
         thread_root: Rc::new(RefCell::new(None)),
+        unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
         avatars: Rc::new(RefCell::new(HashMap::new())),
@@ -427,6 +432,50 @@ fn wire_thread(
 ///
 /// Separate from `build` only so neither function grows past the point where
 /// it can be read in one go.
+/// Connect choosing a channel: what it opens, and what it closes.
+fn wire_selection(
+    ui: &Ui,
+    sidebar: &gtk::ListBox,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    let commands = commands.clone();
+    let selected = Rc::clone(&ui.selected);
+    let stick = Rc::clone(&ui.stick_to_bottom);
+    let thread_root = Rc::clone(&ui.thread_root);
+    let thread_posts = ui.thread_posts.clone();
+    let thread_pane = ui.thread_pane.clone();
+    let unread_from = Rc::clone(&ui.unread_from);
+    let store = Rc::clone(&ui.store);
+    sidebar.connect_row_selected(move |_, row| {
+        let Some(row) = row else { return };
+        let id = ChannelId::new(row.widget_name().to_string());
+
+        // `refresh_sidebar` rebuilds every row and re-selects the open
+        // channel, so this handler fires on its own output. Without this
+        // guard each WebSocket event -- including a stranger's `typing` --
+        // re-fetched the whole channel over the network, rebuilt the post
+        // list and wrote a mark-read. Only a real change of channel is a
+        // user action.
+        if selected.borrow().as_ref() == Some(&id) {
+            return;
+        }
+
+        // Opening a channel always starts at the newest message, and
+        // closes whatever thread was open: a thread belongs to the
+        // channel it came from, and leaving it up beside a different one
+        // shows a conversation that is not there.
+        stick.set(true);
+        // Before `MarkRead` below, which moves it.
+        *unread_from.borrow_mut() = store.borrow().last_viewed(&id);
+        *thread_root.borrow_mut() = None;
+        thread_posts.remove_all();
+        thread_pane.set_visible(false);
+        *selected.borrow_mut() = Some(id.clone());
+        commands.send(Command::OpenChannel(id.clone())).ok();
+        commands.send(Command::MarkRead(id)).ok();
+    });
+}
+
 fn wire(
     ui: &Ui,
     refresh: &gtk::Button,
@@ -510,40 +559,8 @@ fn wire(
             _ => {}
         });
     }
-    {
-        let commands = commands.clone();
-        let selected = Rc::clone(&ui.selected);
-        let stick = Rc::clone(&ui.stick_to_bottom);
-        let thread_root = Rc::clone(&ui.thread_root);
-        let thread_posts = ui.thread_posts.clone();
-        let thread_pane = ui.thread_pane.clone();
-        sidebar.connect_row_selected(move |_, row| {
-            let Some(row) = row else { return };
-            let id = ChannelId::new(row.widget_name().to_string());
+    wire_selection(ui, sidebar, commands);
 
-            // `refresh_sidebar` rebuilds every row and re-selects the open
-            // channel, so this handler fires on its own output. Without this
-            // guard each WebSocket event -- including a stranger's `typing` --
-            // re-fetched the whole channel over the network, rebuilt the post
-            // list and wrote a mark-read. Only a real change of channel is a
-            // user action.
-            if selected.borrow().as_ref() == Some(&id) {
-                return;
-            }
-
-            // Opening a channel always starts at the newest message, and
-            // closes whatever thread was open: a thread belongs to the
-            // channel it came from, and leaving it up beside a different one
-            // shows a conversation that is not there.
-            stick.set(true);
-            *thread_root.borrow_mut() = None;
-            thread_posts.remove_all();
-            thread_pane.set_visible(false);
-            *selected.borrow_mut() = Some(id.clone());
-            commands.send(Command::OpenChannel(id.clone())).ok();
-            commands.send(Command::MarkRead(id)).ok();
-        });
-    }
     {
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
@@ -781,6 +798,35 @@ fn setup_post_row(item: &gtk::ListItem) {
 }
 
 /// Fill a recycled row from the model item bound to it.
+/// Draw a row that is a day boundary or the "new messages" line.
+fn bind_separator_row(day: &gtk::Box, line: &gtk::Box, data: &PostRow) {
+    // The "new messages" line is the same rule in the accent colour, so
+    // it reads as a marker rather than as another date.
+    let accent = data.is_unread_mark();
+    for part in [day.first_child(), day.last_child()].into_iter().flatten() {
+        if accent {
+            part.add_css_class("accent");
+        } else {
+            part.remove_css_class("accent");
+        }
+    }
+    if let Some(label) = day
+        .first_child()
+        .and_then(|c| c.next_sibling())
+        .and_downcast::<gtk::Label>()
+    {
+        label.set_text(&data.body());
+        if accent {
+            label.add_css_class("accent");
+            label.remove_css_class("dim-label");
+        } else {
+            label.remove_css_class("accent");
+            label.add_css_class("dim-label");
+        }
+    }
+    line.set_visible(false);
+}
+
 fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
@@ -820,14 +866,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     let is_separator = data.is_separator();
     day.set_visible(is_separator);
     if is_separator {
-        if let Some(label) = day
-            .first_child()
-            .and_then(|c| c.next_sibling())
-            .and_downcast::<gtk::Label>()
-        {
-            label.set_text(&data.body());
-        }
-        line.set_visible(false);
+        bind_separator_row(&day, &line, &data);
         return;
     }
 
@@ -1507,11 +1546,16 @@ impl Ui {
         // comparisons, and both are wrong in ways only a test notices.
         let visible = store.channel_posts(channel);
         let offset = local_utc_offset_secs();
-        for row in mm_core::rows::project(&visible, offset) {
+        let unread_from = *self.unread_from.borrow();
+        for row in mm_core::rows::project(&visible, offset, unread_from) {
             let (id, grouped) = match row {
                 mm_core::Row::Date { at, date } => {
                     self.posts
                         .append(&PostRow::separator(&describe_day(at, &date)));
+                    continue;
+                }
+                mm_core::Row::NewMessages => {
+                    self.posts.append(&PostRow::new_messages());
                     continue;
                 }
                 mm_core::Row::Post { id, grouped } => (id, grouped),

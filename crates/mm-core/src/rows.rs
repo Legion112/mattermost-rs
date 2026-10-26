@@ -32,6 +32,9 @@ pub struct CivilDate {
 /// One line of the post list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
+    /// Where the reader left off. Drawn once, above the first message they
+    /// have not seen.
+    NewMessages,
     /// A day boundary. Carries both the civil date and the timestamp that
     /// produced it: the date is what the caller compares against "today", the
     /// timestamp is what it formats for display.
@@ -44,12 +47,22 @@ pub enum Row {
 /// Project a channel's posts, in ascending order, into display rows.
 ///
 /// `utc_offset_secs` is the reader's offset from UTC, east positive.
+/// `unread_after` is the reader's last-viewed time *as it was when they
+/// opened the channel*: opening marks it read, so taking it live would make
+/// the line vanish in the instant it became useful.
 #[must_use]
-pub fn project(posts: &[&Post], utc_offset_secs: i32) -> Vec<Row> {
-    let mut rows = Vec::with_capacity(posts.len() + 1);
+pub fn project(posts: &[&Post], utc_offset_secs: i32, unread_after: Option<Timestamp>) -> Vec<Row> {
+    let mut rows = Vec::with_capacity(posts.len() + 2);
     let mut previous: Option<(&Post, CivilDate)> = None;
+    let mut marked = false;
 
     for post in posts {
+        // Where the reader left off. Not above the very first message held:
+        // a line saying "new" above everything says nothing, since the whole
+        // list is plainly new.
+        let starts_unread =
+            !marked && previous.is_some() && unread_after.is_some_and(|at| post.create_at > at);
+
         let date = civil_date(post.create_at, utc_offset_secs);
         let same_day = previous.is_some_and(|(_, d)| d == date);
         if !same_day {
@@ -58,9 +71,19 @@ pub fn project(posts: &[&Post], utc_offset_secs: i32) -> Vec<Row> {
                 date,
             });
         }
+        // Under the date, immediately above the message it refers to.
+        if starts_unread {
+            rows.push(Row::NewMessages);
+            marked = true;
+        }
         rows.push(Row::Post {
             id: post.id.clone(),
-            grouped: same_day && previous.is_some_and(|(p, _)| continues(p, post)),
+            // A message directly under the line keeps its author line: the
+            // first thing the reader sees on returning should say who is
+            // talking, even if it is the same person as before.
+            grouped: same_day
+                && !starts_unread
+                && previous.is_some_and(|(p, _)| continues(p, post)),
         });
         previous = Some((post, date));
     }
