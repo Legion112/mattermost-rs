@@ -42,7 +42,90 @@ pub struct Post {
     pub metadata: serde_json::Value,
 }
 
+/// One file attached to a post.
+///
+/// Read out of `metadata.files` rather than modelled as a field, because the
+/// same post arrives with and without its metadata depending on the endpoint,
+/// and a missing `metadata` must mean "not loaded" rather than "no files".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileRef {
+    pub id: FileId,
+    pub name: String,
+    pub extension: String,
+    pub size: i64,
+    pub mime_type: String,
+    /// Zero for anything that is not an image.
+    pub width: i64,
+    pub height: i64,
+}
+
+impl FileRef {
+    #[must_use]
+    pub fn is_image(&self) -> bool {
+        self.mime_type.starts_with("image/") || (self.width > 0 && self.height > 0)
+    }
+
+    /// A size a person can read.
+    #[must_use]
+    pub fn human_size(&self) -> String {
+        const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+        if self.size <= 0 {
+            return String::new();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let mut value = self.size as f64;
+        let mut unit = 0;
+        while value >= 1024.0 && unit + 1 < UNITS.len() {
+            value /= 1024.0;
+            unit += 1;
+        }
+        if unit == 0 {
+            format!("{} {}", self.size, UNITS[0])
+        } else {
+            format!("{value:.1} {}", UNITS[unit])
+        }
+    }
+}
+
 impl Post {
+    /// The files attached to this post.
+    ///
+    /// A post whose only content is an attachment has an empty `message`, so a
+    /// client that ignores this renders an author, a timestamp and nothing —
+    /// which reads as the client being broken rather than as a file.
+    #[must_use]
+    pub fn attachments(&self) -> Vec<FileRef> {
+        let from_metadata = self
+            .metadata
+            .get("files")
+            .and_then(|files| serde_json::from_value::<Vec<FileRef>>(files.clone()).ok());
+        if let Some(files) = from_metadata
+            && !files.is_empty()
+        {
+            return files;
+        }
+        // Metadata was not included by this endpoint. The ids are still known,
+        // which is enough to say "there is a file here" rather than nothing.
+        self.file_ids
+            .iter()
+            .map(|id| FileRef {
+                id: id.clone(),
+                ..FileRef::default()
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn has_attachments(&self) -> bool {
+        !self.file_ids.is_empty()
+            || self
+                .metadata
+                .get("files")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|files| !files.is_empty())
+    }
+
     #[must_use]
     pub fn is_deleted(&self) -> bool {
         !self.delete_at.is_zero()
@@ -216,8 +299,84 @@ mod tests {
         assert!(PostList::default().is_empty());
     }
 
+    /// A post whose only content is a file has an empty message. Ignoring
+    /// metadata.files is what renders those as an author, a timestamp and
+    /// nothing at all.
+    #[test]
+    fn attachments_come_from_metadata() {
+        let p: Post = serde_json::from_str(
+            r#"{"id":"p1","message":"",
+                "metadata":{"files":[{"id":"f1","name":"photo.jpg","extension":"jpg",
+                                      "size":2048,"mime_type":"image/jpeg",
+                                      "width":800,"height":600}]}}"#,
+        )
+        .unwrap();
+        assert!(p.has_attachments());
+        let files = p.attachments();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "photo.jpg");
+        assert!(files[0].is_image());
+        assert_eq!(files[0].human_size(), "2.0 KB");
+    }
+
+    /// Some endpoints omit metadata entirely. The ids alone are still enough
+    /// to say "there is a file here", which beats showing nothing.
+    #[test]
+    fn attachments_fall_back_to_file_ids_when_metadata_is_absent() {
+        let p: Post =
+            serde_json::from_str(r#"{"id":"p1","message":"","file_ids":["f1","f2"]}"#).unwrap();
+        assert!(p.has_attachments());
+        let files = p.attachments();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].id, FileId::new("f1"));
+        assert!(files[0].name.is_empty());
+    }
+
+    #[test]
+    fn a_post_with_no_files_has_no_attachments() {
+        let p = post("p1", "");
+        assert!(!p.has_attachments());
+        assert!(p.attachments().is_empty());
+    }
+
+    #[test]
+    fn a_non_image_file_is_not_an_image() {
+        let doc = FileRef {
+            mime_type: "application/pdf".into(),
+            size: 1_500_000,
+            ..FileRef::default()
+        };
+        assert!(!doc.is_image());
+        assert_eq!(doc.human_size(), "1.4 MB");
+    }
+
+    #[test]
+    fn sizes_render_at_every_scale_and_vanish_when_unknown() {
+        let sized = |size| {
+            FileRef {
+                size,
+                ..FileRef::default()
+            }
+            .human_size()
+        };
+        assert_eq!(sized(0), "", "an unknown size shows nothing, not '0 B'");
+        assert_eq!(sized(-1), "");
+        assert_eq!(sized(512), "512 B");
+        assert_eq!(sized(1024), "1.0 KB");
+        assert_eq!(sized(1_048_576), "1.0 MB");
+        assert_eq!(sized(1_073_741_824), "1.0 GB");
+        // Beyond the largest unit it keeps counting in GB rather than panicking.
+        assert!(sized(1_099_511_627_776).ends_with("GB"));
+    }
+
     #[test]
     fn every_derive_is_exercised() {
+        let f = FileRef::default();
+        assert_eq!(f, f.clone());
+        assert!(!format!("{f:?}").is_empty());
+        let round: FileRef = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert_eq!(round, f);
+
         let p = post("p1", "");
         let l = PostList::default();
         assert_eq!(p, p.clone());

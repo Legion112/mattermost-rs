@@ -263,13 +263,28 @@ impl Builder {
         }
     }
 
-    /// Append an inline to whichever emphasis span is currently open.
+    /// Append an inline to whichever emphasis span is currently open,
+    /// merging it into the previous one when both are plain text.
+    ///
+    /// The merge is not an optimisation. pulldown-cmark splits a run of text
+    /// at characters that *might* have been markup, so
+    /// `https://example.invalid/a_(b)` arrives as three separate Text events:
+    /// `…/a`, `_`, `(b)`. Keeping them separate means anything that looks at a
+    /// text inline as a whole — the autolinker, most obviously — sees only the
+    /// first fragment and silently truncates the URL.
     fn push_inline(&mut self, inline: Inline) {
-        if let Some((_, inner)) = self.emphasis.last_mut() {
-            inner.push(inline);
+        let target = if let Some((_, inner)) = self.emphasis.last_mut() {
+            inner
         } else {
-            self.inlines.push(inline);
+            &mut self.inlines
+        };
+        if let Inline::Text(addition) = &inline
+            && let Some(Inline::Text(existing)) = target.last_mut()
+        {
+            existing.push_str(addition);
+            return;
         }
+        target.push(inline);
     }
 
     /// Blocks go into the open quote if there is one.
@@ -289,9 +304,132 @@ impl Builder {
             self.blocks.push(Block::Quote(inner));
         }
         Document {
-            blocks: self.blocks,
+            blocks: self.blocks.into_iter().map(linkify_block).collect(),
         }
     }
+}
+
+/// Turn bare URLs in text into links.
+///
+/// `CommonMark` only autolinks `<wrapped>` URLs, but Mattermost linkifies plain
+/// ones — and in practice almost every URL anybody posts is plain. Without
+/// this, every link in every channel is dead text.
+///
+/// Applied as a pass over the finished document rather than during parsing so
+/// it cannot reach inside a code block or relabel an explicit `[text](url)`.
+fn linkify_block(block: Block) -> Block {
+    match block {
+        Block::Paragraph(inlines) => Block::Paragraph(linkify_inlines(inlines)),
+        Block::Heading { level, inlines } => Block::Heading {
+            level,
+            inlines: linkify_inlines(inlines),
+        },
+        Block::ListItem(inlines) => Block::ListItem(linkify_inlines(inlines)),
+        Block::Quote(blocks) => Block::Quote(blocks.into_iter().map(linkify_block).collect()),
+        // Code is left exactly as typed; a URL in a code block is text.
+        other @ (Block::Code { .. } | Block::Rule) => other,
+    }
+}
+
+fn linkify_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
+    inlines
+        .into_iter()
+        .flat_map(|inline| match inline {
+            Inline::Text(text) => autolink(&text),
+            Inline::Emphasis(inner) => vec![Inline::Emphasis(linkify_inlines(inner))],
+            Inline::Strong(inner) => vec![Inline::Strong(linkify_inlines(inner))],
+            Inline::Strike(inner) => vec![Inline::Strike(linkify_inlines(inner))],
+            // Code spans and existing links are already decided.
+            other @ (Inline::Code(_) | Inline::Link { .. } | Inline::SoftBreak) => vec![other],
+        })
+        .collect()
+}
+
+/// Where a URL starts, if there is one, at a word boundary.
+///
+/// The boundary check stops `nothttp://x` and `mailto:http://x` from being
+/// treated as links starting mid-token.
+fn find_url(text: &str) -> Option<usize> {
+    let mut from = 0;
+    while from < text.len() {
+        let tail = &text[from..];
+        let at = ["https://", "http://"]
+            .iter()
+            .filter_map(|scheme| tail.find(scheme))
+            .min()?;
+        let absolute = from + at;
+        let preceded_by_word = text[..absolute]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric);
+        if !preceded_by_word {
+            return Some(absolute);
+        }
+        from = absolute + 1;
+    }
+    None
+}
+
+/// Trim punctuation that reads as sentence punctuation rather than URL.
+///
+/// A URL at the end of a sentence is normally followed by a full stop, and a
+/// URL inside parentheses by a closing bracket that belongs to the prose. A
+/// closing bracket is only kept when the URL opened one itself, which is what
+/// makes Wikipedia-style links survive.
+fn trim_url_tail(url: &str) -> &str {
+    let mut end = url.len();
+    // `while let` rather than `while end > 0` plus an unwrap: the loop ends
+    // naturally when nothing is left, so there is no "cannot happen" branch
+    // to leave untested.
+    while let Some(last) = url[..end].chars().next_back() {
+        let candidate = &url[..end];
+        let drop = match last {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' => true,
+            ')' => candidate.matches('(').count() < candidate.matches(')').count(),
+            ']' => candidate.matches('[').count() < candidate.matches(']').count(),
+            _ => false,
+        };
+        if !drop {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    &url[..end]
+}
+
+fn autolink(text: &str) -> Vec<Inline> {
+    if find_url(text).is_none() {
+        return vec![Inline::Text(text.to_owned())];
+    }
+
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = find_url(rest) {
+        if at > 0 {
+            out.push(Inline::Text(rest[..at].to_owned()));
+        }
+        let tail = &rest[at..];
+        let end = tail.find(char::is_whitespace).unwrap_or(tail.len());
+        let url = trim_url_tail(&tail[..end]);
+
+        // A scheme with nothing after it is not a link.
+        let usable = !url.is_empty() && !url.ends_with("//");
+        if usable {
+            out.push(Inline::Link {
+                href: url.to_owned(),
+                text: url.to_owned(),
+            });
+        } else {
+            out.push(Inline::Text(tail[..end].to_owned()));
+        }
+        // Advance past whatever was consumed; anything trimmed off the tail
+        // stays in `rest` and comes back as text.
+        rest = &tail[if usable { url.len() } else { end }..];
+    }
+    if !rest.is_empty() {
+        out.push(Inline::Text(rest.to_owned()));
+    }
+    out
 }
 
 #[cfg(test)]

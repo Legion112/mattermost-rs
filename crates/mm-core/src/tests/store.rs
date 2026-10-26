@@ -779,3 +779,95 @@ fn a_delete_event_that_carries_a_timestamp_keeps_it() {
     );
     assert!(s.channel_posts(&c1).is_empty());
 }
+
+/// Under collapsed reply threads a reply must not appear in the channel. The
+/// server maintains root-only counters precisely so replies do not make a
+/// channel unread, so showing them here makes the message list disagree with
+/// the badge beside it.
+#[test]
+fn collapsed_threading_keeps_replies_out_of_the_channel() {
+    let mut s = seeded();
+    s.threading = Threading::Collapsed;
+    let c1 = ChannelId::new("c1");
+
+    let mut reply = post("p2", "c1", 20);
+    reply.root_id = PostId::new("p1");
+    s.apply_post_list(
+        &c1,
+        &page(vec![post("p1", "c1", 10), reply, post("p3", "c1", 30)]),
+        PageAnchor::Newest,
+    );
+
+    let shown: Vec<&str> = s.channel_posts(&c1).iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(shown, vec!["p1", "p3"], "the reply belongs in its thread");
+}
+
+/// With threads flat, every post belongs in the channel — that is the whole
+/// difference between the two modes.
+#[test]
+fn flat_threading_shows_replies_in_the_channel() {
+    let mut s = seeded();
+    s.threading = Threading::Flat;
+    let c1 = ChannelId::new("c1");
+
+    let mut reply = post("p2", "c1", 20);
+    reply.root_id = PostId::new("p1");
+    s.apply_post_list(
+        &c1,
+        &page(vec![post("p1", "c1", 10), reply]),
+        PageAnchor::Newest,
+    );
+
+    assert_eq!(s.channel_posts(&c1).len(), 2);
+}
+
+/// The server's own count includes replies never fetched, so it wins — but a
+/// thread built up live over the WebSocket has a root whose stated count is
+/// stale, and the local tally covers that.
+#[test]
+fn reply_count_prefers_the_servers_number_but_never_undercounts() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let root = PostId::new("p1");
+
+    let mut stated = post("p1", "c1", 10);
+    stated.reply_count = 9;
+    s.apply_post_list(&c1, &page(vec![stated]), PageAnchor::Newest);
+    assert_eq!(s.reply_count(&root), 9, "the server knows about more");
+
+    // Two replies arrive live onto a root that claims none.
+    let mut bare = post("p5", "c1", 50);
+    bare.reply_count = 0;
+    s.apply_post_list(&c1, &page(vec![bare]), PageAnchor::Newest);
+    for (id, at) in [("p6", 60), ("p7", 70)] {
+        let mut reply = post(id, "c1", at);
+        reply.root_id = PostId::new("p5");
+        s.apply_ws(&WsEvent::Posted {
+            post: reply,
+            channel_display_name: String::new(),
+            sender_name: String::new(),
+            team_id: String::new(),
+            mentions: Vec::new(),
+        });
+    }
+    assert_eq!(s.reply_count(&PostId::new("p5")), 2, "counted locally");
+
+    assert_eq!(s.reply_count(&PostId::new("absent")), 0);
+}
+
+/// A deleted reply must not be counted, or a thread shows replies that are
+/// not there.
+#[test]
+fn reply_count_ignores_deleted_replies() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let mut root = post("p1", "c1", 10);
+    root.reply_count = 0;
+    let mut reply = post("p2", "c1", 20);
+    reply.root_id = PostId::new("p1");
+    s.apply_post_list(&c1, &page(vec![root, reply.clone()]), PageAnchor::Newest);
+    assert_eq!(s.reply_count(&PostId::new("p1")), 1);
+
+    s.apply_ws(&WsEvent::PostDeleted(reply));
+    assert_eq!(s.reply_count(&PostId::new("p1")), 0);
+}

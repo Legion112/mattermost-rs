@@ -356,3 +356,269 @@ fn html_arriving_inside_a_code_block_joins_the_code() {
         }]
     );
 }
+
+// Mattermost linkifies bare URLs; CommonMark only linkifies <wrapped> ones.
+// Without this pass every link in every channel is dead text.
+
+fn inlines_of(source: &str) -> Vec<Inline> {
+    match parse(source).blocks.into_iter().next() {
+        Some(Block::Paragraph(inlines)) => inlines,
+        other => panic!("expected a paragraph, got {other:?}"),
+    }
+}
+
+fn link(url: &str) -> Inline {
+    Inline::Link {
+        href: url.into(),
+        text: url.into(),
+    }
+}
+
+#[test]
+fn a_bare_url_becomes_a_link() {
+    assert_eq!(
+        inlines_of("https://example.invalid/a"),
+        vec![link("https://example.invalid/a")]
+    );
+    assert_eq!(
+        inlines_of("http://example.invalid"),
+        vec![link("http://example.invalid")]
+    );
+}
+
+#[test]
+fn text_around_a_url_is_preserved() {
+    assert_eq!(
+        inlines_of("see https://example.invalid/a now"),
+        vec![
+            Inline::Text("see ".into()),
+            link("https://example.invalid/a"),
+            Inline::Text(" now".into()),
+        ]
+    );
+}
+
+#[test]
+fn several_urls_in_one_line_all_become_links() {
+    let parsed = inlines_of("https://a.invalid and https://b.invalid");
+    assert_eq!(
+        parsed
+            .iter()
+            .filter(|i| matches!(i, Inline::Link { .. }))
+            .count(),
+        2
+    );
+}
+
+/// A URL at the end of a sentence is followed by prose punctuation, which is
+/// not part of the address.
+#[test]
+fn sentence_punctuation_is_not_swallowed_into_the_url() {
+    for (source, url, tail) in [
+        (
+            "see https://example.invalid.",
+            "https://example.invalid",
+            ".",
+        ),
+        (
+            "see https://example.invalid, then",
+            "https://example.invalid",
+            ", then",
+        ),
+        (
+            "see https://example.invalid!",
+            "https://example.invalid",
+            "!",
+        ),
+        (
+            "see https://example.invalid?",
+            "https://example.invalid",
+            "?",
+        ),
+    ] {
+        let parsed = inlines_of(source);
+        assert_eq!(parsed[1], link(url), "{source}");
+        assert_eq!(parsed[2], Inline::Text(tail.into()), "{source}");
+    }
+}
+
+/// A closing bracket is kept only when the URL opened one itself, which is
+/// what makes Wikipedia-style links survive while "(see <https://x>)" does not
+/// eat the bracket.
+#[test]
+fn brackets_are_kept_only_when_the_url_opened_them() {
+    let balanced = inlines_of("https://example.invalid/a_(b)");
+    assert_eq!(balanced[0], link("https://example.invalid/a_(b)"));
+
+    let prose = inlines_of("(see https://example.invalid)");
+    assert_eq!(prose[1], link("https://example.invalid"));
+    assert_eq!(prose[2], Inline::Text(")".into()));
+
+    let square = inlines_of("https://example.invalid/a]");
+    assert_eq!(square[0], link("https://example.invalid/a"));
+}
+
+/// Starting mid-token is not a URL.
+#[test]
+fn a_scheme_inside_a_word_is_not_linked() {
+    let parsed = inlines_of("nothttps://example.invalid");
+    assert!(
+        parsed.iter().all(|i| !matches!(i, Inline::Link { .. })),
+        "{parsed:?}"
+    );
+}
+
+#[test]
+fn a_scheme_with_nothing_after_it_is_not_a_link() {
+    for source in ["https://", "http://", "see https:// here"] {
+        let parsed = inlines_of(source);
+        assert!(
+            parsed.iter().all(|i| !matches!(i, Inline::Link { .. })),
+            "{source}: {parsed:?}"
+        );
+    }
+}
+
+/// An explicit markdown link must keep its own label rather than being
+/// relabelled with its URL.
+#[test]
+fn an_explicit_link_is_left_alone() {
+    assert_eq!(
+        inlines_of("[label](https://example.invalid)"),
+        vec![Inline::Link {
+            href: "https://example.invalid".into(),
+            text: "label".into(),
+        }]
+    );
+}
+
+/// A URL in code is text, not a link.
+#[test]
+fn urls_in_code_are_not_linked() {
+    assert_eq!(
+        inlines_of("`https://example.invalid`"),
+        vec![Inline::Code("https://example.invalid".into())]
+    );
+    assert_eq!(
+        parse("```\nhttps://example.invalid\n```").blocks,
+        vec![Block::Code {
+            lang: None,
+            code: "https://example.invalid\n".into(),
+        }]
+    );
+}
+
+#[test]
+fn urls_are_linked_inside_emphasis_and_other_blocks() {
+    let bold = inlines_of("**https://example.invalid**");
+    assert_eq!(
+        bold,
+        vec![Inline::Strong(vec![link("https://example.invalid")])]
+    );
+
+    let quoted = parse("> https://example.invalid");
+    assert_eq!(
+        quoted.blocks,
+        vec![Block::Quote(vec![Block::Paragraph(vec![link(
+            "https://example.invalid"
+        )])])]
+    );
+
+    let item = parse("- https://example.invalid");
+    assert_eq!(
+        item.blocks,
+        vec![Block::ListItem(vec![link("https://example.invalid")])]
+    );
+
+    let heading = parse("# https://example.invalid");
+    assert_eq!(
+        heading.blocks,
+        vec![Block::Heading {
+            level: 1,
+            inlines: vec![link("https://example.invalid")],
+        }]
+    );
+
+    assert_eq!(parse("---").blocks, vec![Block::Rule]);
+}
+
+#[test]
+fn text_with_no_url_is_untouched() {
+    assert_eq!(
+        inlines_of("just some words"),
+        vec![Inline::Text("just some words".into())]
+    );
+}
+
+/// Linkifying must not panic on anything, and must not split a character.
+#[test]
+fn autolinking_hostile_input_does_not_panic() {
+    for source in [
+        "https://пример.рф/путь",
+        "https://例え.テスト",
+        "https://a.invalid/😀",
+        "http://",
+        "https://)))",
+        "...https://a.invalid...",
+        &format!("https://a.invalid/{}", "x".repeat(2000)),
+    ] {
+        let doc = parse(source);
+        let _ = doc.to_plain();
+    }
+}
+
+/// pulldown-cmark splits a text run at every character that might have been
+/// markup, so a single typed word can arrive as several Text events. Anything
+/// that inspects a text inline as a whole has to see it whole.
+#[test]
+fn adjacent_text_runs_are_merged_into_one_inline() {
+    // `_` and `]` are both split points for the parser.
+    assert_eq!(
+        inlines_of("plain_text_with_underscores"),
+        vec![Inline::Text("plain_text_with_underscores".into())]
+    );
+    assert_eq!(inlines_of("a]b"), vec![Inline::Text("a]b".into())]);
+}
+
+/// The reason the merge matters: without it the autolinker sees only the
+/// fragment before the first split point and truncates the address.
+#[test]
+fn a_url_containing_a_split_point_is_linked_whole() {
+    assert_eq!(
+        inlines_of("https://example.invalid/a_(b)"),
+        vec![link("https://example.invalid/a_(b)")]
+    );
+    assert_eq!(
+        inlines_of("https://example.invalid/path_with_underscores"),
+        vec![link("https://example.invalid/path_with_underscores")]
+    );
+}
+
+/// A soft break is a real inline, so it must still separate the runs either
+/// side of it rather than being swallowed by the merge.
+#[test]
+fn merging_does_not_cross_a_soft_break() {
+    assert_eq!(
+        inlines_of("one\ntwo"),
+        vec![
+            Inline::Text("one".into()),
+            Inline::SoftBreak,
+            Inline::Text("two".into()),
+        ]
+    );
+}
+
+/// Exercised directly because a URL always begins `http`, so the public path
+/// can never trim one away entirely — and a loop that can empty its input
+/// should be known to terminate rather than assumed to.
+#[test]
+fn trimming_a_string_that_is_all_punctuation_leaves_nothing() {
+    assert_eq!(trim_url_tail("..."), "");
+    assert_eq!(trim_url_tail(""), "");
+    assert_eq!(trim_url_tail("https://a.invalid"), "https://a.invalid");
+    assert_eq!(trim_url_tail("https://a.invalid)."), "https://a.invalid");
+    assert_eq!(
+        trim_url_tail("https://a.invalid/(x)"),
+        "https://a.invalid/(x)"
+    );
+}

@@ -53,10 +53,34 @@ problem, so varying them is the whole point.
    append, so a user reading history is left alone for free.
 3. **Stick-to-bottom must therefore be implemented explicitly.** Because (2)
    holds, "follow new messages when I am at the bottom" does not come for
-   free. `list.scroll_to(last, ListScrollFlags::empty(), None)` re-pins
-   reliably. The "newest row still visible" result above is weaker than it
-   looks — the row was only *overlapping* the viewport by a few pixels, in the
-   36px of slack that happened to be there. Treat it as "do not rely on it".
+   free. The "newest row still visible" result above is weaker than it looks —
+   the row was only *overlapping* the viewport by a few pixels, in the 36px of
+   slack that happened to be there. Treat it as "do not rely on it".
+
+### Scrolling to the bottom: what actually works
+
+The spike reported that `scroll_to(last)` "re-pins reliably". That was true of
+what the spike did and **misleading as general advice**, because the spike
+called it from a timer with the list already laid out. Building the real
+window turned up what that hid. Three approaches, in the order they were
+tried:
+
+| Approach | Result |
+|---|---|
+| `scroll_to` immediately after filling the model | **Lands short.** ListView has not measured the rows it was just handed. |
+| `scroll_to` from `glib::idle_add_local_once` | **Also lands short.** An idle runs before the layout pass, not after it. |
+| Pinning `vadjustment` from its own `changed` handler | **Does not take.** Setting an adjustment's value from inside its own `changed` signal is re-entrant and GTK ignores it. |
+| `scroll_to` from `glib::timeout_add_local_once(~120ms)` | **Works.** A timer yields to the layout pass first. |
+
+So: scrolling to the end needs a layout pass to have happened, and the only
+one of these that guarantees it is a timer. That is unsatisfying — it is a
+delay chosen to be "long enough" — but it is what was measured, and the
+alternatives were measured not to work.
+
+The adjustment handlers are still worth having for messages arriving *later*,
+when the list is already measured. **That path is not yet verified**: it needs
+a message to arrive while the window sits settled at the bottom, which was not
+reproducible by screenshot while the desktop was in use.
 
 ### The trap: `vadjustment.upper()` is an estimate, not a measurement
 

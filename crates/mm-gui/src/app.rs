@@ -21,7 +21,7 @@
 
 use crate::bridge::{Command, Event};
 use crate::login::LoginPage;
-use crate::row::PostRow;
+use crate::row::{PostRow, PostRowFields};
 // adw::prelude re-exports gtk::prelude, so this one import covers both.
 use adw::prelude::*;
 use gtk::gio;
@@ -32,6 +32,18 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 const APP_ID: &str = "dev.legion.mattermost_rs";
+
+/// Overrides the application id, which is what GTK keys single-instance on.
+///
+/// Launching a second time normally hands off to the running window and
+/// exits — correct behaviour, and what makes `mattermost://` links open in the
+/// window you already have. It also makes it impossible to run a second
+/// instance against a different server, which is exactly what you want while
+/// developing or when testing a change without disturbing a live session.
+/// Pair it with `XDG_STATE_HOME`, which separates the stored session.
+///
+/// The Electron client has the same affordance under the name `--dataDir`.
+const APP_ID_OVERRIDE: &str = "MMRS_APP_ID";
 
 /// Everything the window needs to talk to the outside world.
 #[derive(Debug)]
@@ -54,6 +66,12 @@ struct Ui {
     posts: gio::ListStore,
     post_view: gtk::ListView,
     scroller: gtk::ScrolledWindow,
+    /// Whether the view should follow new messages.
+    ///
+    /// Set when a channel is opened, and cleared as soon as the reader
+    /// scrolls away from the bottom. Without it, following would yank the
+    /// view down while somebody is reading history.
+    stick_to_bottom: Rc<std::cell::Cell<bool>>,
     status: gtk::Label,
     title: adw::WindowTitle,
     composer: gtk::Entry,
@@ -62,7 +80,8 @@ struct Ui {
 /// Build the window and run the GTK main loop.
 #[must_use]
 pub fn run(wiring: Wiring) -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(APP_ID).build();
+    let app_id = std::env::var(APP_ID_OVERRIDE).unwrap_or_else(|_| APP_ID.to_owned());
+    let app = adw::Application::builder().application_id(app_id).build();
     let wiring = Rc::new(RefCell::new(Some(wiring)));
 
     app.connect_activate(move |app| {
@@ -167,6 +186,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         posts,
         post_view,
         scroller,
+        stick_to_bottom: Rc::new(std::cell::Cell::new(true)),
         status,
         title,
         composer: composer.clone(),
@@ -224,6 +244,9 @@ fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSend
 ///
 /// Separate from `build` only so neither function grows past the point where
 /// it can be read in one go.
+/// How close to the end still counts as "at the bottom".
+const STICK_SLACK: f64 = 48.0;
+
 fn wire(
     ui: &Ui,
     refresh: &gtk::Button,
@@ -238,9 +261,38 @@ fn wire(
         });
     }
     {
+        // Following new messages, done the only way that is reliable here.
+        //
+        // `changed` fires whenever the content height or page size moves,
+        // which with variable-height rows happens repeatedly as GTK realizes
+        // them and refines its estimate. Re-pinning on each one converges on
+        // the true bottom; a single scroll never does. `value-changed` is how
+        // the reader opts out: scrolling away from the end clears the flag, so
+        // history is never yanked out from under them.
+        let adjustment = ui.scroller.vadjustment();
+        {
+            let stick = Rc::clone(&ui.stick_to_bottom);
+            adjustment.connect_value_changed(move |adj| {
+                let at_end = adj.value() + adj.page_size() >= adj.upper() - STICK_SLACK;
+                stick.set(at_end);
+            });
+        }
+        {
+            let stick = Rc::clone(&ui.stick_to_bottom);
+            adjustment.connect_changed(move |adj| {
+                if stick.get() {
+                    adj.set_value(adj.upper() - adj.page_size());
+                }
+            });
+        }
+    }
+    {
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
+        let stick = Rc::clone(&ui.stick_to_bottom);
         sidebar.connect_row_selected(move |_, row| {
+            // Opening a channel always starts at the newest message.
+            stick.set(true);
             let Some(row) = row else { return };
             let id = ChannelId::new(row.widget_name().to_string());
             *selected.borrow_mut() = Some(id.clone());
@@ -303,6 +355,37 @@ fn render_markup(doc: &mm_md::Document) -> String {
     out
 }
 
+/// The trailing line: what is attached, and how many replies there are.
+///
+/// Without this a post whose only content is a file renders as an author, a
+/// timestamp and nothing at all, which reads as the client being broken.
+fn describe_extras(post: &mm_types::Post, replies: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for file in post.attachments() {
+        let icon = if file.is_image() { "🖼" } else { "📎" };
+        let name = if file.name.is_empty() {
+            // Some endpoints omit metadata, leaving only the id. Saying a file
+            // is there beats showing nothing.
+            "attachment".to_owned()
+        } else {
+            file.name.clone()
+        };
+        let size = file.human_size();
+        if size.is_empty() {
+            parts.push(format!("{icon} {name}"));
+        } else {
+            parts.push(format!("{icon} {name} ({size})"));
+        }
+    }
+    if replies > 0 {
+        parts.push(format!(
+            "💬 {replies} {}",
+            if replies == 1 { "reply" } else { "replies" }
+        ));
+    }
+    parts.join("   ")
+}
+
 /// `HH:MM` in local time.
 fn clock_time(millis: i64) -> String {
     use chrono::{Local, TimeZone};
@@ -348,8 +431,16 @@ fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
             .wrap(true)
             .selectable(true)
             .build();
+        // Attachments and "N replies" -- the line that keeps a post whose
+        // only content is a file from rendering as an author and nothing.
+        let meta = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .css_classes(["dim-label", "caption"])
+            .build();
         row.append(&header);
         row.append(&body);
+        row.append(&meta);
         item.downcast_ref::<gtk::ListItem>()
             .expect("a list item")
             .set_child(Some(&row));
@@ -362,23 +453,47 @@ fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
         let Some(row) = item.child().and_downcast::<gtk::Box>() else {
             return;
         };
-        if let Some(header) = row.first_child().and_downcast::<gtk::Box>() {
-            if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
-                author.set_text(&data.author());
-            }
-            if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
-                time.set_text(&data.time());
-            }
+        // Walk the children by position rather than first/last: there are
+        // three now, and last_child() silently became the wrong one when the
+        // meta line was added.
+        let Some(header) = row.first_child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(meta) = body.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+
+        let system = data.is_system();
+        if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
+            // A join/leave notice is not somebody speaking, so it gets no
+            // author line.
+            let name = data.author();
+            author.set_text(if system { "" } else { name.as_str() });
         }
-        if let Some(body) = row.last_child().and_downcast::<gtk::Label>() {
-            // set_markup on text that is not markup would make GTK log an
-            // error and drop the message, so the flag decides.
-            if data.is_markup() {
-                body.set_markup(&data.body());
-            } else {
-                body.set_text(&data.body());
-            }
+        if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
+            time.set_text(&data.time());
         }
+
+        // set_markup on text that is not markup would make GTK log an error
+        // and drop the message, so the flag decides.
+        if data.is_markup() {
+            body.set_markup(&data.body());
+        } else {
+            body.set_text(&data.body());
+        }
+        if system {
+            body.add_css_class("dim-label");
+        } else {
+            body.remove_css_class("dim-label");
+        }
+        body.set_visible(!data.body().is_empty());
+
+        let extra = data.meta();
+        meta.set_text(&extra);
+        meta.set_visible(!extra.is_empty());
     });
 
     let post_view = gtk::ListView::builder()
@@ -603,13 +718,7 @@ impl Ui {
         // model, not of the scroll adjustment: `upper` is an estimate GTK
         // revises as rows are realized, and it was observed moving 20% in both
         // directions inside one run. See docs/gtk-notes.md.
-        let was_at_end = {
-            let n = self.posts.n_items();
-            n == 0 || {
-                let adj = self.scroller.vadjustment();
-                adj.value() + adj.page_size() >= adj.upper() - 1.0
-            }
-        };
+        let was_at_end = self.posts.n_items() == 0 || self.stick_to_bottom.get();
 
         let store = self.store.borrow();
         self.posts.remove_all();
@@ -628,23 +737,39 @@ impl Ui {
                 let rendered = render_markup(&doc);
                 (format!("{rendered}{}", mm_md::escape(suffix)), true)
             };
-            self.posts.append(&PostRow::new(
-                post.id.as_str(),
-                &author,
-                &body,
-                &clock_time(post.create_at.millis()),
+            self.posts.append(&PostRow::new(PostRowFields {
+                id: post.id.as_str(),
+                author: &author,
+                body: &body,
+                time: &clock_time(post.create_at.millis()),
+                meta: &describe_extras(post, store.reply_count(&post.id)),
                 markup,
-            ));
+                system: post.is_system(),
+            }));
         }
         self.composer.set_sensitive(true);
 
         if was_at_end {
+            self.stick_to_bottom.set(true);
             let n = self.posts.n_items();
             if n > 0 {
-                // scroll_to is the widget's own API. Adjustment arithmetic is
-                // not reliable here, for the reason above.
-                self.post_view
-                    .scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
+                // A timer, not an idle, and not adjustment arithmetic.
+                //
+                // Both of those were tried and neither worked: ListView has
+                // not measured the rows it was just handed, so an immediate or
+                // idle `scroll_to` lands short, and pinning the adjustment
+                // from its own `changed` handler does not take. What the
+                // week-one spike actually measured was that `scroll_to`
+                // succeeds once a layout pass has happened, and its pass came
+                // from a timer. See docs/gtk-notes.md.
+                //
+                // The adjustment handlers in `wire` still earn their place:
+                // they follow messages arriving *later*, when the list is
+                // already measured.
+                let view = self.post_view.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+                    view.scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
+                });
             }
         }
     }

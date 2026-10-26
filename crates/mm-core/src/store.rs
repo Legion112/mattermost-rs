@@ -426,15 +426,41 @@ impl Store {
     }
 
     /// A channel's posts, oldest first, skipping tombstones.
+    ///
+    /// **Under collapsed reply threads, replies are excluded.** That is not a
+    /// display preference — it is what CRT means. The server maintains
+    /// root-only counters precisely so a reply does not make a channel unread,
+    /// so showing replies in the channel makes the message list disagree with
+    /// the unread badge beside it, and turns a threaded conversation into a
+    /// flat firehose.
     #[must_use]
     pub fn channel_posts(&self, channel: &ChannelId) -> Vec<&Post> {
+        let collapsed = self.threading == Threading::Collapsed;
         self.timelines
             .get(channel)
             .into_iter()
             .flat_map(Timeline::keys)
             .filter_map(|key: &PostKey| self.posts.get(&key.id))
             .filter(|p| !p.is_deleted())
+            .filter(|p| !collapsed || !p.is_reply())
             .collect()
+    }
+
+    /// How many replies a root post has, counting what is actually held.
+    ///
+    /// The server's own `reply_count` is preferred when it is set, because it
+    /// counts replies this client has never fetched. Falling back to a local
+    /// count keeps the number right for a thread built up live over the
+    /// WebSocket, where the root post was fetched before the replies existed.
+    #[must_use]
+    pub fn reply_count(&self, root: &PostId) -> i64 {
+        let stated = self.posts.get(root).map_or(0, |p| p.reply_count);
+        let held = self
+            .posts
+            .values()
+            .filter(|p| !p.is_deleted() && p.root_id == *root)
+            .count();
+        stated.max(i64::try_from(held).unwrap_or(i64::MAX))
     }
 }
 

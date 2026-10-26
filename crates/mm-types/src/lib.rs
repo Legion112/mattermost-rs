@@ -33,7 +33,7 @@ pub mod wire;
 
 pub use channel::{Channel, ChannelMember, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION};
 pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
-pub use post::{Post, PostList};
+pub use post::{FileRef, Post, PostList};
 pub use prefs::{NameFormat, Preference, is_true, keys};
 pub use time::Timestamp;
 pub use user::{Presence, Team, User};
