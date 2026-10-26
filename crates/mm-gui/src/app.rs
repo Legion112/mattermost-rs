@@ -514,6 +514,9 @@ fn wire(
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
         let stick = Rc::clone(&ui.stick_to_bottom);
+        let thread_root = Rc::clone(&ui.thread_root);
+        let thread_posts = ui.thread_posts.clone();
+        let thread_pane = ui.thread_pane.clone();
         sidebar.connect_row_selected(move |_, row| {
             let Some(row) = row else { return };
             let id = ChannelId::new(row.widget_name().to_string());
@@ -528,8 +531,14 @@ fn wire(
                 return;
             }
 
-            // Opening a channel always starts at the newest message.
+            // Opening a channel always starts at the newest message, and
+            // closes whatever thread was open: a thread belongs to the
+            // channel it came from, and leaving it up beside a different one
+            // shows a conversation that is not there.
             stick.set(true);
+            *thread_root.borrow_mut() = None;
+            thread_posts.remove_all();
+            thread_pane.set_visible(false);
             *selected.borrow_mut() = Some(id.clone());
             commands.send(Command::OpenChannel(id.clone())).ok();
             commands.send(Command::MarkRead(id)).ok();
@@ -1028,6 +1037,10 @@ impl Ui {
                 self.login
                     .show_hint("Your password is sent to your server and never stored.");
                 self.identity.set_text("not signed in");
+                // The title bar still said "connecting…" over a sign-in
+                // form, which is a window telling the user something that is
+                // not true.
+                self.title.set_subtitle("");
             }
             Event::LoginFailed { message, needs_mfa } => {
                 self.login.set_busy(false);
