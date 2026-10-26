@@ -179,6 +179,24 @@ impl Store {
             .map_or_else(|| user.to_string(), |u| u.name_as(self.name_format))
     }
 
+    /// Whether a name after an `@` is somebody, and whether it is the
+    /// reader -- the roster `mm-md` needs to mark mentions.
+    ///
+    /// `@all`, `@channel` and `@here` are not users and are always
+    /// mentions; Mattermost highlights them the same way.
+    #[must_use]
+    pub fn mentioned(&self, name: &str) -> Option<mm_md::Mentioned> {
+        if matches!(name, "all" | "channel" | "here") {
+            return Some(mm_md::Mentioned::Someone);
+        }
+        let user = self.users.values().find(|u| u.username == name)?;
+        Some(if user.id == self.me {
+            mm_md::Mentioned::Me
+        } else {
+            mm_md::Mentioned::Someone
+        })
+    }
+
     /// What to put on a post's author line, and whether to mark it a bot.
     ///
     /// A webhook's chosen name wins over its account's: one bot account

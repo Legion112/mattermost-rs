@@ -59,6 +59,22 @@ fn render(inlines: &[Inline], out: &mut String) {
                 out.push_str(&escape(text));
                 out.push_str("</a>");
             }
+            Inline::Mention { name, is_me } => {
+                // Mattermost's own colours rather than the GTK accent, so a
+                // mention reads the same here as in every other client the
+                // reader has open. The highlight on their own mention is the
+                // one piece of colour a chat window must not get wrong.
+                if *is_me {
+                    out.push_str(
+                        "<span background=\"#ffd470\" foreground=\"#1a1a1a\" weight=\"bold\">",
+                    );
+                } else {
+                    out.push_str("<span foreground=\"#5d89ea\" weight=\"bold\">");
+                }
+                out.push('@');
+                out.push_str(&escape(name));
+                out.push_str("</span>");
+            }
             Inline::SoftBreak => out.push('\n'),
         }
     }

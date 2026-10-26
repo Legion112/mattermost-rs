@@ -1305,6 +1305,7 @@ name = "mm-core"
 version = "0.1.0"
 dependencies = [
  "mm-api",
+ "mm-md",
  "mm-types",
  "serde_json",
 ]

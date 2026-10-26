@@ -10,6 +10,7 @@ repository.workspace   = true
 
 [dependencies]
 mm-api   = { path = "../mm-api" }
+mm-md    = { path = "../mm-md" }
 mm-types = { path = "../mm-types" }
 
 [dev-dependencies]

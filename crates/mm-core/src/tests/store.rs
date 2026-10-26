@@ -1450,3 +1450,19 @@ fn a_bot_account_is_marked_and_a_person_is_not() {
     from_person.user_id = UserId::new("u-her");
     assert_eq!(store.post_author(&from_person), ("jane".to_owned(), false));
 }
+
+/// The roster behind mention highlighting: only real usernames light up,
+/// the reader's own is marked apart, and the three group names are always
+/// mentions even though nobody is called that.
+#[test]
+fn mentions_resolve_against_the_roster() {
+    let mut store = store();
+    store.apply_users(vec![person(ME, "legion", ""), person("u-2", "alukard", "")]);
+
+    assert_eq!(store.mentioned("legion"), Some(mm_md::Mentioned::Me));
+    assert_eq!(store.mentioned("alukard"), Some(mm_md::Mentioned::Someone));
+    assert_eq!(store.mentioned("nobody"), None);
+    for group in ["all", "channel", "here"] {
+        assert_eq!(store.mentioned(group), Some(mm_md::Mentioned::Someone));
+    }
+}

@@ -232,7 +232,26 @@ fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::Box) {
     (sidebar, identity, sidebar_pane)
 }
 
+/// Styling this window needs that the theme does not provide.
+///
+/// Only links: GTK paints them in the desktop's accent colour, which on
+/// Ubuntu is orange, and a chat client showing orange links beside a
+/// Mattermost client showing blue ones reads as a different application.
+/// The colour is Mattermost's own, and it is legible on both themes.
+fn install_styles() {
+    let css = gtk::CssProvider::new();
+    css.load_from_string("link { color: #5d89ea; } link:hover { color: #86a9f2; }");
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &css,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
+    install_styles();
     let (sidebar, identity, sidebar_pane) = build_sidebar();
 
     let (posts, post_view, scroller) = build_post_list(commands);
@@ -885,12 +904,12 @@ fn bind_separator_row(day: &gtk::Box, line: &gtk::Box, data: &PostRow) {
 /// Fill a row's image strip. Rebuilt rather than recycled: a reused row can
 /// go from no images to three.
 /// Put the author's name on a row, and mark it when a bot wrote it.
-fn bind_author(author: &gtk::Label, data: &PostRow, system: bool) {
-    // A join/leave notice is not somebody speaking, so it gets no author.
-    let name = data.author();
-    author.set_text(if system { "" } else { name.as_str() });
+fn bind_author(author: &gtk::Label, data: &PostRow) {
+    // A system notice is named "System", the way Mattermost names it --
+    // not blank, which read as a message from nobody.
+    author.set_text(&data.author());
     if let Some(tag) = author.next_sibling() {
-        tag.set_visible(!system && data.is_bot());
+        tag.set_visible(data.is_bot());
     }
 }
 
@@ -1147,7 +1166,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
         // A join/leave notice is not somebody speaking, so it gets no
         // author line.
-        bind_author(&author, &data, system);
+        bind_author(&author, &data);
     }
     if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
         time.set_text(&data.time());
@@ -1213,9 +1232,14 @@ const IMAGE_MAX_HEIGHT: i64 = 320;
 /// The markdown is rendered here, once per refresh, rather than in the bind
 /// callback -- bind runs on every scroll, and a channel of alerts would
 /// re-parse every one of them each time it moved.
-fn render_card(attachment: &mm_types::MessageAttachment) -> crate::row::AttachmentView {
+fn render_card(
+    attachment: &mm_types::MessageAttachment,
+    store: &Store,
+) -> crate::row::AttachmentView {
+    let mut doc = mm_md::parse(&attachment.text);
+    mm_md::mark_mentions(&mut doc, &|name| store.mentioned(name));
     crate::row::AttachmentView {
-        blocks: render_blocks(&mm_md::parse(&attachment.text)),
+        blocks: render_blocks(&doc),
         rgb: attachment.rgb(),
         pretext: attachment.pretext.clone(),
         title: attachment.title.clone(),
@@ -1395,8 +1419,14 @@ impl Ui {
                 } else {
                     ""
                 };
+                // Without the scheme: it is the same for every server and
+                // it was pushing the read-only marker off the end.
+                let host = server
+                    .trim_end_matches('/')
+                    .rsplit_once("//")
+                    .map_or(server.as_str(), |(_, host)| host);
                 self.identity
-                    .set_text(&format!("{username} · {server}{mode}"));
+                    .set_text(&format!("{username} · {host}{mode}"));
                 self.set_status("connected");
             }
             Event::Threading(threading) => {
@@ -1598,7 +1628,10 @@ impl Ui {
         // A webhook posting under its own name must not borrow the face of
         // the account it posts through: an alert from "Alertmanager" showing
         // your own photograph is worse than showing an initial.
-        let overridden = post.override_username().is_some();
+        // A join notice is the server talking, not the person it is about,
+        // so it borrows nobody's face.
+        let system = post.is_system();
+        let overridden = post.override_username().is_some() || system;
         let avatar = if overridden {
             None
         } else {
@@ -1619,8 +1652,15 @@ impl Ui {
                 })
                 .ok();
         }
-        let (author, bot) = store.post_author(post);
-        let mut blocks = render_blocks(&mm_md::parse(&post.message));
+        let (mut author, bot) = store.post_author(post);
+        // Mattermost names a system notice "System" rather than leaving it
+        // blank, which read as a message from nobody.
+        if system {
+            "System".clone_into(&mut author);
+        }
+        let mut doc = mm_md::parse(&post.message);
+        mm_md::mark_mentions(&mut doc, &|name| store.mentioned(name));
+        let mut blocks = render_blocks(&doc);
         // "(edited)" belongs on the end of the last thing said, not on a
         // line of its own.
         if post.is_edited() {
@@ -1653,7 +1693,7 @@ impl Ui {
             meta: &describe_extras(post),
             flags: crate::row::PostRowFlags {
                 grouped,
-                voice: if post.is_system() {
+                voice: if system {
                     crate::row::Voice::System
                 } else if bot {
                     crate::row::Voice::Bot
@@ -1664,7 +1704,11 @@ impl Ui {
             reactions: store.reactions_for(&post.id),
             avatar,
             images,
-            cards: post.message_attachments().iter().map(render_card).collect(),
+            cards: post
+                .message_attachments()
+                .iter()
+                .map(|a| render_card(a, store))
+                .collect(),
             // A reply never opens a thread of its own: in Mattermost the
             // whole conversation hangs off the root, and offering "2
             // replies" on a reply would open its parent under a different

@@ -61,6 +61,10 @@ fn push_plain(out: &mut String, inlines: &[Inline]) {
     for inline in inlines {
         match inline {
             Inline::Text(t) | Inline::Code(t) => out.push_str(t),
+            Inline::Mention { name, .. } => {
+                out.push('@');
+                out.push_str(name);
+            }
             Inline::Emphasis(inner) | Inline::Strong(inner) | Inline::Strike(inner) => {
                 push_plain(out, inner);
             }
@@ -103,6 +107,12 @@ pub enum Inline {
     Link {
         href: String,
         text: String,
+    },
+    /// An `@mention`. `is_me` marks the reader's own, which Mattermost
+    /// highlights more loudly than everyone else's.
+    Mention {
+        name: String,
+        is_me: bool,
     },
     /// A newline inside a paragraph.
     ///
@@ -361,7 +371,10 @@ fn linkify_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
             Inline::Strong(inner) => vec![Inline::Strong(linkify_inlines(inner))],
             Inline::Strike(inner) => vec![Inline::Strike(linkify_inlines(inner))],
             // Code spans and existing links are already decided.
-            other @ (Inline::Code(_) | Inline::Link { .. } | Inline::SoftBreak) => vec![other],
+            other @ (Inline::Code(_)
+            | Inline::Link { .. }
+            | Inline::Mention { .. }
+            | Inline::SoftBreak) => vec![other],
         })
         .collect()
 }
@@ -456,3 +469,115 @@ fn autolink(text: &str) -> Vec<Inline> {
 #[cfg(test)]
 #[path = "tests/parse.rs"]
 mod tests;
+
+/// Whether a name after an `@` is somebody, and whether it is the reader.
+///
+/// `None` means it is not a user at all, and the text stays as it was: only
+/// real usernames highlight, which is what every other Mattermost client
+/// does. An address like `support@example.com` would otherwise light up.
+pub type Roster<'a> = dyn Fn(&str) -> Option<Mentioned> + 'a;
+
+/// What a resolved mention refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mentioned {
+    /// Somebody else, or a group like `@channel`.
+    Someone,
+    /// The reader.
+    Me,
+}
+
+/// Mark the `@mentions` in a parsed message.
+///
+/// Separate from `parse` because it needs the roster, which `mm-md` has no
+/// business holding. The caller passes a closure over the store.
+pub fn mark_mentions(doc: &mut Document, roster: &Roster<'_>) {
+    for block in &mut doc.blocks {
+        mark_block(block, roster);
+    }
+}
+
+fn mark_block(block: &mut Block, roster: &Roster<'_>) {
+    match block {
+        Block::Paragraph(inlines) | Block::Heading { inlines, .. } | Block::ListItem(inlines) => {
+            let taken = std::mem::take(inlines);
+            *inlines = mark_inlines(taken, roster);
+        }
+        Block::Quote(blocks) => {
+            for inner in blocks {
+                mark_block(inner, roster);
+            }
+        }
+        // Code is literal, and a rule has no text.
+        Block::Code { .. } | Block::Rule => {}
+    }
+}
+
+fn mark_inlines(inlines: Vec<Inline>, roster: &Roster<'_>) -> Vec<Inline> {
+    inlines
+        .into_iter()
+        .flat_map(|inline| match inline {
+            Inline::Text(text) => split_mentions(&text, roster),
+            Inline::Emphasis(inner) => vec![Inline::Emphasis(mark_inlines(inner, roster))],
+            Inline::Strong(inner) => vec![Inline::Strong(mark_inlines(inner, roster))],
+            Inline::Strike(inner) => vec![Inline::Strike(mark_inlines(inner, roster))],
+            other => vec![other],
+        })
+        .collect()
+}
+
+/// The characters a username may contain. Mattermost's own rule.
+fn is_username_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')
+}
+
+fn split_mentions(text: &str, roster: &Roster<'_>) -> Vec<Inline> {
+    if !text.contains('@') {
+        return vec![Inline::Text(text.to_owned())];
+    }
+    let mut out: Vec<Inline> = Vec::new();
+    let mut plain = String::new();
+    let mut rest = text;
+
+    while let Some(at) = rest.find('@') {
+        // An `@` with a word character before it is part of something else
+        // -- an email address, a handle inside a word.
+        let attached = rest[..at].chars().next_back().is_some_and(is_username_char);
+        plain.push_str(&rest[..=at]);
+        rest = &rest[at + 1..];
+        if attached {
+            continue;
+        }
+
+        let len = rest
+            .char_indices()
+            .find(|(_, c)| !is_username_char(*c))
+            .map_or(rest.len(), |(i, _)| i);
+        // Trailing punctuation is usually the sentence's, not the name's, so
+        // try progressively shorter candidates -- "@alex." is a mention of
+        // "alex" far more often than of "alex.".
+        let Some((name, who)) = (0..=len)
+            .rev()
+            .map(|end| &rest[..end])
+            .filter(|candidate| !candidate.is_empty())
+            .find_map(|candidate| roster(candidate).map(|who| (candidate, who)))
+        else {
+            continue;
+        };
+
+        plain.pop();
+        if !plain.is_empty() {
+            out.push(Inline::Text(std::mem::take(&mut plain)));
+        }
+        out.push(Inline::Mention {
+            name: name.to_owned(),
+            is_me: who == Mentioned::Me,
+        });
+        rest = &rest[name.len()..];
+    }
+
+    plain.push_str(rest);
+    if !plain.is_empty() {
+        out.push(Inline::Text(plain));
+    }
+    out
+}

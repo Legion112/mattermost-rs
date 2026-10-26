@@ -649,3 +649,151 @@ fn a_url_is_not_rewritten_by_the_emoji_pass() {
     let doc = parse("see https://example.com/a:tada:b now");
     assert_eq!(doc.to_plain(), "see https://example.com/a:tada:b now");
 }
+
+/// Only real usernames highlight, which is what every other Mattermost
+/// client does. Without the roster, `support@example.com` would light up.
+#[test]
+fn only_a_known_name_becomes_a_mention() {
+    let roster = |name: &str| match name {
+        "alukard" => Some(Mentioned::Someone),
+        "legion" => Some(Mentioned::Me),
+        _ => None,
+    };
+    let mut doc = parse("@alukard take a look, @nobody");
+    mark_mentions(&mut doc, &roster);
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(
+        inlines[0],
+        Inline::Mention {
+            name: "alukard".into(),
+            is_me: false
+        }
+    );
+    assert_eq!(
+        inlines[1],
+        Inline::Text(" take a look, @nobody".into()),
+        "an unknown name stays as it was typed"
+    );
+}
+
+/// The reader's own mention is marked apart from everyone else's.
+#[test]
+fn my_own_mention_is_marked_as_mine() {
+    let roster = |name: &str| (name == "legion").then_some(Mentioned::Me);
+    let mut doc = parse("@legion");
+    mark_mentions(&mut doc, &roster);
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(
+        inlines[0],
+        Inline::Mention {
+            name: "legion".into(),
+            is_me: true
+        }
+    );
+}
+
+/// Trailing punctuation belongs to the sentence, not the name: "@alex." is
+/// a mention of alex far more often than of a user called "alex.".
+#[test]
+fn trailing_punctuation_is_not_part_of_the_name() {
+    let roster = |name: &str| (name == "alex").then_some(Mentioned::Someone);
+    let mut doc = parse("ask @alex.");
+    mark_mentions(&mut doc, &roster);
+    assert_eq!(doc.to_plain(), "ask @alex.");
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert!(
+        matches!(&inlines[1], Inline::Mention { name, .. } if name == "alex"),
+        "{inlines:?}"
+    );
+    assert_eq!(inlines[2], Inline::Text(".".into()));
+}
+
+/// An `@` attached to a word is part of that word -- an email address is
+/// the case that matters.
+#[test]
+fn an_at_inside_a_word_is_not_a_mention() {
+    let roster = |name: &str| (name == "example").then_some(Mentioned::Someone);
+    let mut doc = parse("write to support@example.com");
+    mark_mentions(&mut doc, &roster);
+    assert_eq!(doc.blocks.len(), 1);
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert_eq!(inlines.len(), 1, "no mention was split out: {inlines:?}");
+}
+
+/// Code is literal: a mention inside it is text, like a URL inside it.
+#[test]
+fn a_mention_inside_code_is_left_alone() {
+    let roster = |_: &str| Some(Mentioned::Someone);
+    let mut doc = parse("`@alex`");
+    mark_mentions(&mut doc, &roster);
+    assert_eq!(doc.to_plain(), "@alex");
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert!(matches!(&inlines[0], Inline::Code(_)), "{inlines:?}");
+}
+
+/// Mentions survive inside emphasis, and several in one line all resolve.
+#[test]
+fn several_mentions_in_one_line_all_resolve() {
+    let roster = |name: &str| matches!(name, "a" | "b").then_some(Mentioned::Someone);
+    let mut doc = parse("**@a** and @b");
+    mark_mentions(&mut doc, &roster);
+    assert_eq!(doc.to_plain(), "@a and @b");
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    let Inline::Strong(inner) = &inlines[0] else {
+        panic!("expected strong, got {inlines:?}");
+    };
+    assert!(matches!(&inner[0], Inline::Mention { name, .. } if name == "a"));
+}
+
+/// A mention inside strikethrough, and a line with no `@` at all -- the
+/// early return that keeps the scan off every ordinary message.
+#[test]
+fn mentions_are_found_under_every_kind_of_emphasis() {
+    let roster = |name: &str| (name == "a").then_some(Mentioned::Someone);
+
+    let mut struck = parse("~~@a~~");
+    mark_mentions(&mut struck, &roster);
+    let Some(Block::Paragraph(inlines)) = struck.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    let Inline::Strike(inner) = &inlines[0] else {
+        panic!("expected strikethrough, got {inlines:?}");
+    };
+    assert!(matches!(&inner[0], Inline::Mention { name, .. } if name == "a"));
+
+    let mut emphasised = parse("*@a*");
+    mark_mentions(&mut emphasised, &roster);
+    assert_eq!(emphasised.to_plain(), "@a");
+
+    // And a message with no `@` comes through untouched.
+    let mut plain = parse("nothing to see");
+    mark_mentions(&mut plain, &roster);
+    assert_eq!(plain.to_plain(), "nothing to see");
+}
+
+/// Quotes and list items carry mentions too, and a rule has no text to
+/// carry any.
+#[test]
+fn mentions_are_found_in_quotes_and_lists() {
+    let roster = |name: &str| (name == "a").then_some(Mentioned::Someone);
+
+    let mut quoted = parse("> ask @a");
+    mark_mentions(&mut quoted, &roster);
+    assert_eq!(quoted.to_plain(), "ask @a");
+
+    let mut listed = parse("- ask @a\n\n---");
+    mark_mentions(&mut listed, &roster);
+    assert!(listed.to_plain().contains("@a"));
+}

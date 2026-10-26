@@ -215,3 +215,26 @@ fn an_alert_body_keeps_its_two_lines() {
         "<b>Severity:</b> Warning\nSummary: it restarts"
     );
 }
+
+/// A mention is drawn in Mattermost's own colours rather than the desktop's
+/// accent, so it reads the same here as in every other client the reader
+/// has open -- and their own mention louder than everyone else's.
+#[test]
+fn mentions_carry_their_own_colour() {
+    let roster = |name: &str| match name {
+        "alukard" => Some(crate::Mentioned::Someone),
+        "legion" => Some(crate::Mentioned::Me),
+        _ => None,
+    };
+    let mut doc = crate::parse("@alukard and @legion");
+    crate::mark_mentions(&mut doc, &roster);
+    let Some(crate::Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    let markup = to_pango(inlines);
+    assert!(markup.contains("#5d89ea"), "{markup}");
+    assert!(markup.contains("@alukard"), "{markup}");
+    // Their own mention gets a background, not just a colour.
+    assert!(markup.contains("background="), "{markup}");
+    assert!(markup.contains("@legion"), "{markup}");
+}
