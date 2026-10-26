@@ -101,11 +101,25 @@ check-deps: ## Assert every member is classified and no gated crate can reach I/
 	$(XTASK) check-deps
 
 .PHONY: check
-check: fmt-check clippy test check-deps cover-gate ## Everything CI's check job runs
+check: fmt-check clippy test check-deps cover-gate ## Fast local checks (no network)
+
+.PHONY: ci
+ci: check audit ## Exactly what CI runs — use this before pushing
+	@# `check` deliberately leaves `audit` out: it needs the network and a
+	@# tool that is not part of the toolchain, so `make check` still works on
+	@# a train. But that split is a trap as well as a convenience -- a green
+	@# `check` does not mean a green CI, which is exactly how an
+	@# unmaintained-dependency advisory landed on main.
+	@echo "ci: everything CI runs has passed"
 
 .PHONY: audit
 audit: ## Check dependencies for advisories (needs cargo-audit)
-	$(CARGO) audit
+	@# --deny warnings on purpose: a new advisory anywhere in the tree should
+	@# turn the build red while somebody decides. Assessed ones are recorded
+	@# in .cargo/audit.toml with the reasoning, rather than weakening this.
+	@command -v cargo-audit >/dev/null 2>&1 \
+		|| { echo "cargo-audit is not installed: cargo install cargo-audit"; exit 1; }
+	$(CARGO) audit --deny warnings
 
 .PHONY: version-check
 version-check: ## Assert TAG=vX.Y.Z matches the version in Cargo.toml

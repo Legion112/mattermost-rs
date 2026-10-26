@@ -1,0 +1,26 @@
+# cargo-audit configuration.
+#
+# `cargo audit --deny warnings` is deliberately strict: a new advisory against
+# anything in the tree should turn the build red while somebody decides what to
+# do about it. That only works if assessed advisories are recorded here with
+# the reasoning, rather than the strictness being dropped the first time it
+# fires.
+
+[advisories]
+ignore = [
+  # zvariant, zbus_names and zvariant_derive marked unmaintained on
+  # 2026-10-16. These are "unmaintained" notices, not vulnerabilities: no CVE,
+  # no known exploit, nothing to patch to.
+  #
+  # They reach us only through notify-rust -> zbus, which is used for desktop
+  # notifications in mm-desktop-xdg. zbus itself (5.19.0) is NOT flagged, so
+  # this looks like the zbus project restructuring its sub-crates rather than
+  # the stack being abandoned.
+  #
+  # Revisit when zbus publishes a release that drops these, or if any of them
+  # gains an actual vulnerability advisory -- which would come through with a
+  # different ID and would NOT be silenced by these entries.
+  "RUSTSEC-2026-0370", # zvariant unmaintained
+  "RUSTSEC-2026-0371", # zbus_names unmaintained
+  "RUSTSEC-2026-0372", # zvariant_derive unmaintained
+]

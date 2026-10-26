@@ -93,7 +93,9 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-audit }
-      - run: cargo audit --deny warnings
+      # Assessed advisories live in .cargo/audit.toml with their reasoning;
+      # `make audit` is the same command a developer runs locally.
+      - run: make audit
 
   build:
     name: build release binary

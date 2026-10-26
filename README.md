@@ -108,6 +108,7 @@ admin. Remove it with `docker rm -f mmrs-lab`.
 make apt-deps     # system build dependencies (needs sudo)
 make doctor       # check the environment, especially which GTK pkg-config finds
 make check        # fmt, clippy, tests, dependency invariant, the 100% gate
+make ci           # exactly what CI runs — `check` plus `cargo audit`
 make release
 ```
 
