@@ -52,6 +52,7 @@ struct Ui {
 }
 
 /// Build the window and run the GTK main loop.
+#[must_use]
 pub fn run(wiring: Wiring) -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     let wiring = Rc::new(RefCell::new(Some(wiring)));
@@ -65,7 +66,7 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
             }
             return;
         };
-        let ui = Rc::new(build(app, commands));
+        let ui = Rc::new(build(app, &commands));
         ui.commands.send(Command::Sync).ok();
 
         // THE one bridge. Children never spawn; they send commands.
@@ -81,7 +82,7 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
-fn build(app: &adw::Application, commands: tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
+fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
     let sidebar = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .css_classes(["navigation-sidebar"])
@@ -92,56 +93,7 @@ fn build(app: &adw::Application, commands: tokio::sync::mpsc::UnboundedSender<Co
         .width_request(260)
         .build();
 
-    let posts = gio::ListStore::new::<PostRow>();
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        row.set_margin_top(4);
-        row.set_margin_bottom(4);
-        let author = gtk::Label::builder()
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .build();
-        // A non-editable TextView rather than a Label: selection across the
-        // whole message, and the inline paintables custom emoji will need.
-        let body = gtk::Label::builder()
-            .xalign(0.0)
-            .wrap(true)
-            .selectable(true)
-            .build();
-        row.append(&author);
-        row.append(&body);
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("a list item")
-            .set_child(Some(&row));
-    });
-    factory.connect_bind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("a list item");
-        let Some(data) = item.item().and_downcast::<PostRow>() else {
-            return;
-        };
-        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
-            return;
-        };
-        if let Some(author) = row.first_child().and_downcast::<gtk::Label>() {
-            author.set_text(&data.author());
-        }
-        if let Some(body) = row.last_child().and_downcast::<gtk::Label>() {
-            body.set_text(&data.body());
-        }
-    });
-
-    let post_view = gtk::ListView::builder()
-        .model(&gtk::NoSelection::new(Some(posts.clone())))
-        .factory(&factory)
-        .single_click_activate(false)
-        .build();
-    let scroller = gtk::ScrolledWindow::builder()
-        .child(&post_view)
-        .vexpand(true)
-        .build();
+    let (posts, post_view, scroller) = build_post_list();
 
     let composer = gtk::Entry::builder()
         .placeholder_text("Write a message…")
@@ -204,6 +156,21 @@ fn build(app: &adw::Application, commands: tokio::sync::mpsc::UnboundedSender<Co
         composer: composer.clone(),
     };
 
+    wire(&ui, &refresh, &sidebar, &composer, commands);
+    ui
+}
+
+/// Connect the widgets to the command channel.
+///
+/// Separate from `build` only so neither function grows past the point where
+/// it can be read in one go.
+fn wire(
+    ui: &Ui,
+    refresh: &gtk::Button,
+    sidebar: &gtk::ListBox,
+    composer: &gtk::Entry,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
     {
         let commands = commands.clone();
         refresh.connect_clicked(move |_| {
@@ -236,8 +203,67 @@ fn build(app: &adw::Application, commands: tokio::sync::mpsc::UnboundedSender<Co
             entry.set_text("");
         });
     }
+}
 
-    ui
+/// The message list: a `ListView` over a model of ids, with one recycled
+/// widget set per visible row.
+///
+/// Not a per-post widget: a factory that materializes one widget set per item
+/// means a hundred-thousand-post channel never opens. That is measured, not
+/// assumed -- see `docs/gtk-notes.md`.
+fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
+    let posts = gio::ListStore::new::<PostRow>();
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        row.set_margin_start(12);
+        row.set_margin_end(12);
+        row.set_margin_top(4);
+        row.set_margin_bottom(4);
+        let author = gtk::Label::builder()
+            .xalign(0.0)
+            .css_classes(["heading"])
+            .build();
+        // A non-editable TextView rather than a Label: selection across the
+        // whole message, and the inline paintables custom emoji will need.
+        let body = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .selectable(true)
+            .build();
+        row.append(&author);
+        row.append(&body);
+        item.downcast_ref::<gtk::ListItem>()
+            .expect("a list item")
+            .set_child(Some(&row));
+    });
+    factory.connect_bind(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("a list item");
+        let Some(data) = item.item().and_downcast::<PostRow>() else {
+            return;
+        };
+        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        if let Some(author) = row.first_child().and_downcast::<gtk::Label>() {
+            author.set_text(&data.author());
+        }
+        if let Some(body) = row.last_child().and_downcast::<gtk::Label>() {
+            body.set_text(&data.body());
+        }
+    });
+
+    let post_view = gtk::ListView::builder()
+        .model(&gtk::NoSelection::new(Some(posts.clone())))
+        .factory(&factory)
+        .single_click_activate(false)
+        .build();
+    let scroller = gtk::ScrolledWindow::builder()
+        .child(&post_view)
+        .vexpand(true)
+        .build();
+
+    (posts, post_view, scroller)
 }
 
 impl Ui {

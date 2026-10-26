@@ -281,7 +281,10 @@ async fn socket_loop(client: Client, token: String, events: async_channel::Sende
 
         // Full-jitter backoff, with the jitter supplied as a number so the
         // schedule stays a pure function in mm-api.
-        let jitter = (now_millis() % 1_000) as f64 / 1_000.0;
+        // Through u32 and `f64::from` rather than a cast: the value is already
+        // bounded below 1000, so the conversion is lossless and the compiler
+        // can see that it is.
+        let jitter = f64::from(u32::try_from(now_millis() % 1_000).unwrap_or(0)) / 1_000.0;
         let wait = mm_api::ws::next_delay_secs(attempt, jitter);
         attempt = attempt.saturating_add(1);
         let _ = events

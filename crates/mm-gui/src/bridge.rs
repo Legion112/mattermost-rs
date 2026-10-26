@@ -29,10 +29,16 @@ pub enum Command {
 
 /// Engine to GUI.
 ///
+/// The size spread between a `Vec` of channels and a `Status(String)` is real,
+/// but an event is produced, sent once through the channel and consumed by the
+/// reducer. Boxing would add a pointer chase to every field access to save
+/// nothing that is ever held in bulk.
+///
 /// Deliberately raw: these are server payloads, not conclusions. A variant
 /// like `Event::ChannelBecameUnread` would mean the engine had started
 /// deciding things, and then there would be two places that know what unread
 /// means.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum Event {
     /// Session established.
