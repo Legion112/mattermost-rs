@@ -9,9 +9,16 @@ on:
 # A push that lands while an earlier run is still going makes that run's result
 # meaningless, so cancel it. main is exempt: cancelling a main build loses the
 # artifact for a commit that is already merged.
+# A push to a branch supersedes the one before it; a push to main does not.
+# Expressed through the *group* rather than through `cancel-in-progress`,
+# because that input takes the expression's result as a string and a
+# non-empty string is truthy -- so `${{ github.ref != 'refs/heads/main' }}`
+# cancelled main's runs too, and every commit but the newest went unchecked.
+# Giving each main commit a group of its own means there is never an
+# in-progress run to cancel.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'branch' }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
