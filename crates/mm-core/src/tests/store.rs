@@ -871,3 +871,74 @@ fn reply_count_ignores_deleted_replies() {
     s.apply_ws(&WsEvent::PostDeleted(reply));
     assert_eq!(s.reply_count(&PostId::new("p1")), 0);
 }
+
+fn category_list(pairs: &[(&str, &str, &[&str])]) -> mm_types::CategoryList {
+    mm_types::CategoryList {
+        order: pairs.iter().map(|(id, _, _)| (*id).to_owned()).collect(),
+        // Deliberately built in the reverse of `order`: the server does not
+        // promise the array is in stacking order, and reading it as if it
+        // were is the bug this guards.
+        categories: pairs
+            .iter()
+            .rev()
+            .map(|(id, name, channels)| mm_types::ChannelCategory {
+                id: (*id).to_owned(),
+                display_name: (*name).to_owned(),
+                channel_ids: channels.iter().map(|c| ChannelId::new(*c)).collect(),
+                ..mm_types::ChannelCategory::default()
+            })
+            .collect(),
+    }
+}
+
+/// The server sends the whole category list every time, in `order`, and the
+/// store keeps it in that order so the view does not have to re-derive it.
+#[test]
+fn categories_are_stored_in_the_servers_stacking_order() {
+    let mut store = store();
+    let list = category_list(&[("fav", "Favorites", &["c2"]), ("ch", "Channels", &["c1"])]);
+    assert_eq!(store.apply_categories(&list), vec![Change::Sidebar]);
+    let stacked: Vec<&str> = store
+        .categories
+        .iter()
+        .map(|c| c.display_name.as_str())
+        .collect();
+    assert_eq!(stacked, ["Favorites", "Channels"]);
+
+    // A later fetch replaces the list outright: a category the user deleted
+    // has to disappear, and there is no version on it to join against.
+    store.apply_categories(&category_list(&[("ch", "Channels", &["c1"])]));
+    assert_eq!(store.categories.len(), 1);
+}
+
+/// The sections projection reads the store's own channels and membership,
+/// so the view asks one question and gets the finished sidebar.
+#[test]
+fn the_sidebar_projects_into_the_servers_sections() {
+    let mut store = store();
+    store.apply_channels(vec![channel("c1", 0, 0), channel("c2", 0, 0)]);
+    store.apply_members(vec![member("c1", 0, 0, 0), member("c2", 0, 0, 0)]);
+    store.apply_categories(&category_list(&[
+        ("fav", "Favorites", &["c2"]),
+        ("ch", "Channels", &["c1"]),
+    ]));
+
+    let sections = store.sidebar_sections();
+    assert_eq!(sections.len(), 2);
+    assert_eq!(sections[0].display_name, "Favorites");
+    assert_eq!(sections[0].rows[0].channel, ChannelId::new("c2"));
+    assert_eq!(sections[1].rows[0].channel, ChannelId::new("c1"));
+}
+
+/// Before the first sync there are no categories, and the sidebar still has
+/// to draw: an empty window on every start would be worse than an ungrouped
+/// list for the second it takes to arrive.
+#[test]
+fn the_sidebar_still_draws_before_any_categories_arrive() {
+    let mut store = store();
+    store.apply_channels(vec![channel("c1", 0, 0)]);
+    store.apply_members(vec![member("c1", 0, 0, 0)]);
+    let sections = store.sidebar_sections();
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].rows.len(), 1);
+}

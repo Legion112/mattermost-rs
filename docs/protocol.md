@@ -329,3 +329,29 @@ Deterministic seeding: `mmctl --local sampledata --seed 42 --bulk out.jsonl`
 (`cmd/mmctl/commands/sampledata.go:57`). **Commit the generated JSONL rather
 than re-running the generator** — seed stability across server versions is
 unconfirmed, and a committed fixture is byte-stable by construction.
+
+## Sidebar categories
+
+`GET /users/{user_id}/teams/{team_id}/channels/categories` returns
+`{categories: [...], order: [...]}`. Verified against 12.0.1 on 2026-10-26.
+
+- **It is addressed by explicit user id.** There is no `/users/me/` form, so a
+  client has to know who it is before it can draw a sidebar.
+- **`order` is authoritative.** The `categories` array came back as
+  favorites, channels, direct_messages on a fresh account, but nothing
+  promises that, and the user can reorder categories.
+- **`sorting` is the empty string for a category the user has never
+  reordered** — observed on both Favorites and Channels. It appears in no
+  documentation. The other values are `alpha`, `recent` and `manual`.
+  `direct_messages` came back as `recent`.
+- **Built-in category ids are not 26-character ids.** They are
+  `favorites_{user}_{team}`, `channels_{user}_{team}`,
+  `direct_messages_{user}_{team}`, so the id field is a plain `String`.
+- `channel_ids` is in the user's manual order and is empty for a category
+  with nothing in it.
+
+**Inferred, not verified:** that an empty `sorting` should be drawn
+alphabetically. It is what the web app shows for an untouched Channels
+category, but it was not read out of the server or the webapp source. An
+empty category being hidden rather than drawn as a bare heading is the same
+kind of inference.

@@ -614,6 +614,41 @@ fn bind_post_row(item: &gtk::ListItem) {
     meta.set_visible(!extra.is_empty());
 }
 
+/// A category heading: not selectable, so arrow keys and the first-channel
+/// fallback walk straight past it.
+fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    line.set_margin_top(10);
+    line.set_margin_bottom(2);
+    let name = gtk::Label::builder()
+        .label(section.display_name.to_uppercase())
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["dim-label", "caption-heading"])
+        .build();
+    line.append(&name);
+
+    // A folded category shows what is inside it the only way it can.
+    let mentions = section.mentions();
+    if section.collapsed && mentions > 0 {
+        line.append(
+            &gtk::Label::builder()
+                .label(mentions.to_string())
+                .css_classes(["accent", "caption-heading"])
+                .build(),
+        );
+    }
+
+    let row = gtk::ListBoxRow::builder()
+        .child(&line)
+        .selectable(false)
+        .activatable(false)
+        .build();
+    row.add_css_class("mmrs-section");
+    row
+}
+
 fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
@@ -691,6 +726,10 @@ impl Ui {
             }
             Event::Members(members) => {
                 self.store.borrow_mut().apply_members(members);
+                self.refresh_sidebar();
+            }
+            Event::Categories(list) => {
+                self.store.borrow_mut().apply_categories(&list);
                 self.refresh_sidebar();
             }
             Event::Users(users) => {
@@ -792,7 +831,7 @@ impl Ui {
     }
 
     fn refresh_sidebar(&self) {
-        let rows = self.store.borrow().sidebar();
+        let sections = self.store.borrow().sidebar_sections();
         let keep = self.selected.borrow().clone();
 
         while let Some(child) = self.sidebar.first_child() {
@@ -800,45 +839,48 @@ impl Ui {
         }
 
         let mut to_select = None;
-        for row in &rows {
-            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            let name = gtk::Label::builder()
-                .label(&row.display_name)
-                .xalign(0.0)
-                .hexpand(true)
-                .ellipsize(gtk::pango::EllipsizeMode::End)
-                .build();
-            if row.is_unread() {
-                name.add_css_class("heading");
-            } else {
-                name.add_css_class("dim-label");
-            }
-            line.append(&name);
-
-            if row.unread.mentions > 0 {
-                let badge = gtk::Label::builder()
-                    .label(row.unread.mentions.to_string())
-                    .css_classes(["accent", "caption-heading"])
+        for section in &sections {
+            self.sidebar.append(&section_header(section));
+            for row in &section.rows {
+                let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                let name = gtk::Label::builder()
+                    .label(&row.display_name)
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
                     .build();
-                line.append(&badge);
-            } else if row.is_unread() && row.unread.messages > 0 {
-                let dot = gtk::Label::builder()
-                    .label("●")
-                    .css_classes(["dim-label", "caption"])
-                    .build();
-                line.append(&dot);
-            }
-            if row.muted {
-                line.append(&gtk::Image::from_icon_name("audio-volume-muted-symbolic"));
-            }
+                if row.is_unread() {
+                    name.add_css_class("heading");
+                } else {
+                    name.add_css_class("dim-label");
+                }
+                line.append(&name);
 
-            let list_row = gtk::ListBoxRow::builder().child(&line).build();
-            // The channel id travels on the widget name, so selection does not
-            // need a parallel index that could drift from the sidebar.
-            list_row.set_widget_name(row.channel.as_str());
-            self.sidebar.append(&list_row);
-            if keep.as_ref() == Some(&row.channel) {
-                to_select = Some(list_row);
+                if row.unread.mentions > 0 {
+                    let badge = gtk::Label::builder()
+                        .label(row.unread.mentions.to_string())
+                        .css_classes(["accent", "caption-heading"])
+                        .build();
+                    line.append(&badge);
+                } else if row.is_unread() && row.unread.messages > 0 {
+                    let dot = gtk::Label::builder()
+                        .label("●")
+                        .css_classes(["dim-label", "caption"])
+                        .build();
+                    line.append(&dot);
+                }
+                if row.muted {
+                    line.append(&gtk::Image::from_icon_name("audio-volume-muted-symbolic"));
+                }
+
+                let list_row = gtk::ListBoxRow::builder().child(&line).build();
+                // The channel id travels on the widget name, so selection does not
+                // need a parallel index that could drift from the sidebar.
+                list_row.set_widget_name(row.channel.as_str());
+                self.sidebar.append(&list_row);
+                if keep.as_ref() == Some(&row.channel) {
+                    to_select = Some(list_row);
+                }
             }
         }
         match to_select {
@@ -847,7 +889,12 @@ impl Ui {
             // leaving the message pane blank. The sidebar is sorted unread
             // first, so this lands on whatever most wants attention.
             None if keep.is_none() => {
-                if let Some(first) = self.sidebar.row_at_index(0) {
+                // Row 0 is a section heading now, and headings are not
+                // selectable: walk to the first row that is.
+                let first = (0..)
+                    .map_while(|i| self.sidebar.row_at_index(i))
+                    .find(gtk::ListBoxRow::is_selectable);
+                if let Some(first) = first {
                     self.sidebar.select_row(Some(&first));
                 }
             }

@@ -9,12 +9,13 @@
 //! "assign the newer value" is wrong and "assign whichever arrived last" is
 //! worse.
 
+use crate::sections::{SidebarSection, group};
 use crate::timeline::{Merge, PageAnchor, PostKey, Timeline};
 use crate::unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread};
 use mm_api::ws::WsEvent;
 use mm_types::{
-    Channel, ChannelId, ChannelMember, ChannelType, Post, PostId, PostList, Team, Timestamp, User,
-    UserId,
+    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelType, Post, PostId,
+    PostList, Team, Timestamp, User, UserId,
 };
 use std::collections::HashMap;
 
@@ -71,6 +72,9 @@ pub struct Store {
     pub my_member: HashMap<ChannelId, ChannelMember>,
     pub posts: HashMap<PostId, Post>,
     pub timelines: HashMap<ChannelId, Timeline>,
+    /// The server's grouping of the sidebar, already in stacking order.
+    /// Empty until the first sync, which is why `sidebar` still exists.
+    pub categories: Vec<ChannelCategory>,
 }
 
 impl Store {
@@ -87,6 +91,32 @@ impl Store {
 
     pub fn apply_teams(&mut self, teams: Vec<Team>) {
         self.teams = teams;
+    }
+
+    /// Replace the sidebar grouping, in the server's stacking order.
+    ///
+    /// A blind replace rather than the monotonic join the rest of the store
+    /// uses: the server sends the whole list every time and carries no
+    /// version on it, so there is nothing to compare and a removed category
+    /// has to actually disappear.
+    pub fn apply_categories(&mut self, list: &CategoryList) -> Vec<Change> {
+        self.categories = list.in_order().into_iter().cloned().collect();
+        vec![Change::Sidebar]
+    }
+
+    /// The sidebar as sections, if the server has told us how it is grouped.
+    ///
+    /// Empty before the first sync completes, and the caller falls back to
+    /// the flat `sidebar` then -- a sidebar that renders nothing until a
+    /// second request returns would show an empty window on every start.
+    #[must_use]
+    pub fn sidebar_sections(&self) -> Vec<SidebarSection> {
+        let recency: HashMap<ChannelId, i64> = self
+            .channels
+            .iter()
+            .map(|(id, c)| (id.clone(), c.last_post_at.millis()))
+            .collect();
+        group(self.sidebar(), &self.categories, &recency)
     }
 
     pub fn apply_users(&mut self, users: Vec<User>) -> Vec<Change> {

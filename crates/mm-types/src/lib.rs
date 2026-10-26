@@ -23,6 +23,7 @@
 //! base32 string, so passing a `ChannelId` where a `PostId` belongs type-checks
 //! unless the types say otherwise.
 
+mod category;
 mod channel;
 mod ids;
 mod post;
@@ -31,6 +32,7 @@ mod time;
 mod user;
 pub mod wire;
 
+pub use category::{CategoryKind, CategoryList, CategorySorting, ChannelCategory};
 pub use channel::{Channel, ChannelMember, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION};
 pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
 pub use post::{FileRef, Post, PostList};

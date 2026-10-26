@@ -157,6 +157,27 @@ fn team_and_channel_paths_interpolate_the_ids() {
     );
 }
 
+/// The categories endpoint is addressed by explicit user id -- there is no
+/// `/users/me/` form for it, and assuming there was returns a 404 that looks
+/// like the user having no categories.
+#[test]
+fn the_categories_path_carries_the_user_id_not_me() {
+    let user = UserId::new("u1");
+    let team = TeamId::new("t1");
+    assert_eq!(
+        my_categories(&user, &team).path,
+        "/api/v4/users/u1/teams/t1/channels/categories"
+    );
+    let list = parse_categories(&ok(
+        r#"{"categories":[{"id":"channels_u1_t1","type":"channels","sorting":"",
+            "display_name":"Channels","channel_ids":["c1"]}],
+            "order":["channels_u1_t1"]}"#,
+    ))
+    .unwrap();
+    assert_eq!(list.categories.len(), 1);
+    assert_eq!(list.order, ["channels_u1_t1"]);
+}
+
 /// An empty channel id is a legal, meaningful body meaning "focus loss".
 #[test]
 fn view_channel_allows_an_empty_channel_for_focus_loss() {
@@ -375,6 +396,10 @@ fn every_parser_propagates_a_server_error() {
         Err(ApiError::Forbidden(_))
     ));
     assert!(matches!(parse_ping(&err), Err(ApiError::Forbidden(_))));
+    assert!(matches!(
+        parse_categories(&err),
+        Err(ApiError::Forbidden(_))
+    ));
     assert!(matches!(
         parse_client_config(&err),
         Err(ApiError::Forbidden(_))

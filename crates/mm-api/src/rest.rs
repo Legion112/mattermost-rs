@@ -5,7 +5,10 @@
 
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
-use mm_types::{Channel, ChannelId, ChannelMember, Post, PostList, Preference, Team, TeamId, User};
+use mm_types::{
+    CategoryList, Channel, ChannelId, ChannelMember, Post, PostList, Preference, Team, TeamId,
+    User, UserId,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -192,6 +195,22 @@ pub fn my_channel_members(team: &TeamId) -> HttpRequest {
 
 pub fn parse_channel_members(resp: &HttpResponse) -> Result<Vec<ChannelMember>, ApiError> {
     parse_json(resp, "GET /users/me/teams/{team}/channels/members")
+}
+
+/// The user's sidebar categories for a team.
+///
+/// Unlike most of the channel endpoints this one is addressed by explicit
+/// user id -- there is no `/users/me/` form -- so the caller has to know who
+/// it is before it can draw a sidebar.
+#[must_use]
+pub fn my_categories(user: &UserId, team: &TeamId) -> HttpRequest {
+    HttpRequest::get(format!(
+        "{API}/users/{user}/teams/{team}/channels/categories"
+    ))
+}
+
+pub fn parse_categories(resp: &HttpResponse) -> Result<CategoryList, ApiError> {
+    parse_json(resp, "GET /users/{user}/teams/{team}/channels/categories")
 }
 
 /// Mark a channel read.

@@ -330,6 +330,27 @@ async fn sync(client: &Client, session: &Session, events: &async_channel::Sender
                     }
                 }
                 let _ = events.send(Event::Channels(channels)).await;
+                // The grouping the user set up, so the sidebar matches the
+                // one they see in every other Mattermost client. Addressed
+                // by explicit user id: there is no `/users/me/` form.
+                let user = UserId::new(&session.user_id);
+                match fetch(
+                    client,
+                    &rest::my_categories(&user, &team.id),
+                    rest::parse_categories,
+                )
+                .await
+                {
+                    Ok(list) => {
+                        let _ = events.send(Event::Categories(list)).await;
+                    }
+                    // A sidebar grouped the server's way is better than one
+                    // grouped ours, but one grouped ours is much better than
+                    // none: the store falls back to a flat list.
+                    Err(e) => {
+                        let _ = events.send(Event::Status(format!("categories: {e}"))).await;
+                    }
+                }
             }
             Err(e) => {
                 let _ = events.send(Event::Failed(e)).await;

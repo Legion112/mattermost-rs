@@ -14,11 +14,13 @@
 //! value" is wrong and "take whatever arrived last" is worse.
 
 pub mod rows;
+pub mod sections;
 pub mod store;
 pub mod timeline;
 pub mod unread;
 
 pub use rows::{CivilDate, Row};
+pub use sections::SidebarSection;
 pub use store::{Change, SidebarRow, Store};
 pub use timeline::{Merge, PageAnchor, PostKey, Timeline};
 pub use unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread, unread};
