@@ -2,12 +2,38 @@
 //!
 //! **Outside the coverage gate.** serde derives generate per-field branches
 //! attributed to the `#[derive]` line, so a 100% line gate here would mean
-//! hand-writing malformed JSON for every field of every type. The control
-//! that replaces it is stronger: every public type needs a
-//! captured-from-server golden fixture, and `cargo xtask fixtures` fails CI
-//! when one is missing. That catches upstream field renames, which is the
-//! actual risk.
+//! hand-writing malformed JSON for every field of every type. The control that
+//! replaces it is a round-trip and tolerance test per type, which catches the
+//! thing that actually goes wrong — an upstream field rename — in a way line
+//! coverage never would.
 //!
-//! Ids are newtypes, never bare `String`: Mattermost ids are all 26-char
-//! base32, so a `ChannelId` passed where a `PostId` belongs is a silent bug
-//! that the type system should have caught.
+//! Two rules hold throughout, and both exist because the server grows fields
+//! between releases:
+//!
+//! - **`#[serde(default)]` on every struct.** The same model arrives with
+//!   different fields populated depending on the endpoint, and a missing field
+//!   must never be an error.
+//! - **Never `deny_unknown_fields` in production.** A client that refused to
+//!   parse a payload because the server added a field would break on the next
+//!   minor release. (The drift suite in `mm-lab` does the opposite
+//!   deliberately, with mirror structs, so that a shape change is still
+//!   noticed.)
+//!
+//! Ids are newtypes rather than `String`: every Mattermost id is a 26-char
+//! base32 string, so passing a `ChannelId` where a `PostId` belongs type-checks
+//! unless the types say otherwise.
+
+mod channel;
+mod ids;
+mod post;
+mod prefs;
+mod time;
+mod user;
+pub mod wire;
+
+pub use channel::{Channel, ChannelMember, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION};
+pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
+pub use post::{Post, PostList};
+pub use prefs::{NameFormat, Preference, is_true, keys};
+pub use time::Timestamp;
+pub use user::{Presence, Team, User};

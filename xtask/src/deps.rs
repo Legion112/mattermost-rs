@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::process::Command;
 
 /// Crates inside the 100% line-coverage gate. Pure logic, no I/O.
-const GATED: &[&str] = &["mm-api", "mm-core", "mm-md", "mm-config", "mm-desktop"];
+pub(crate) const GATED: &[&str] = &["mm-api", "mm-core", "mm-md", "mm-config", "mm-desktop"];
 
 /// Crates deliberately outside it, each for a reason stated in its `lib.rs`.
 const UNGATED: &[&str] = &[

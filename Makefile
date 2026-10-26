@@ -114,29 +114,16 @@ version-check: ## Assert TAG=vX.Y.Z matches the version in Cargo.toml
 # ---------------------------------------------------------------- coverage
 
 .PHONY: cover-gate
-cover-gate: ## 100% line coverage on the gated crates, or fail
-	@# A stale .profraw set from a differently-configured run both inflates and
-	@# corrupts the merge. This is where go-tun's `-count=1` paranoia belongs in
-	@# Rust: cargo does not cache test results, but it does keep profile data.
-	$(CARGO) llvm-cov clean --workspace
-	@# Gated on LINES, deliberately, and on nothing else:
-	@#
-	@#   --fail-under-regions  cannot reach 100%. A region is also emitted for
-	@#     code that only runs when an assertion fails, so the format argument
-	@#     in `assert_eq!(a, b, "{raw}")` is a permanently-missed region. The
-	@#     price of 100% regions is assertions with no failure messages.
-	@#   --fail-under-file-lines  is broken in cargo-llvm-cov 0.9.1. It exits 1
-	@#     even when every file in the report is at 100.00% lines -- verified
-	@#     against a single-file report -- and it prints nothing when it does.
-	@#     Re-test it on a later version before reaching for it again; the
-	@#     attraction was that it names the offending file.
-	@#
-	@# --show-missing-lines covers that need instead: it prints the uncovered
-	@# line numbers, so a red gate is actionable from the job log alone.
-	$(CARGO) llvm-cov --locked --all-features $(GATED) \
-		--ignore-filename-regex $(COV_IGNORE) \
-		--show-missing-lines \
-		--fail-under-lines 100
+cover-gate: ## 100% line coverage on the gated crates, or name the gaps
+	@# The verdict comes from cargo-llvm-cov's JSON export, computed in xtask,
+	@# NOT from its --fail-under-* flags. Two accounting bugs in 0.9.1 forced
+	@# that: --fail-under-file-lines exits 1 even when every file reports
+	@# 100.00%, and the summary table claimed a missed line in a file whose
+	@# JSON export and generated per-line HTML both showed fully covered.
+	@# The JSON is the data the HTML renders from, so reading it is reading the
+	@# measurement rather than a derived summary -- and it lets the gate print
+	@# the offending file, line and source text, which no flag does.
+	$(XTASK) coverage
 
 .PHONY: cover-report
 cover-report: ## HTML coverage for the whole workspace (informational, never gates)

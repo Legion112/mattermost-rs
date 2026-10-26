@@ -126,3 +126,24 @@ than it does:
 ## Licence
 
 MIT.
+
+## Where the unit tests live
+
+Gated crates keep their unit tests in `src/tests/<module>.rs`, wired up as:
+
+```rust
+#[cfg(test)]
+#[path = "tests/ws.rs"]
+mod tests;
+```
+
+They are still child modules, so `use super::*` reaches private items — but
+they sit under a path the coverage gate's ignore regex matches. That matters:
+coverage should answer "is the production code exercised?", and a test's own
+unexecuted `panic!("unexpected: …")` arm is not a gap in production code.
+Before this split, 29 of 30 reported-uncovered lines were assertion messages
+and unreachable match arms inside test modules.
+
+`cargo xtask coverage` computes the verdict from cargo-llvm-cov's JSON export
+rather than its `--fail-under-*` flags, which have two accounting bugs in
+0.9.1 — see the comment on `cover-gate` in the Makefile.

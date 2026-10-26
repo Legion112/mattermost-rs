@@ -7,6 +7,7 @@
 //! this binary, and CI calls it directly.
 
 mod aptdeps;
+mod coverage;
 mod deps;
 mod doctor;
 mod package;
@@ -17,6 +18,7 @@ use std::process::ExitCode;
 const USAGE: &str = "\
 usage: cargo xtask <task> [args]
 
+  coverage                100% line coverage on the gated crates, or name the gaps
   check-deps              every member is classified, and no gated crate can
                           reach an I/O crate
   doctor                  check the build environment, especially which GTK
@@ -38,6 +40,7 @@ fn main() -> ExitCode {
 
     let result = match task.as_str() {
         "check-deps" => deps::run(),
+        "coverage" => coverage::run(rest),
         "doctor" => doctor::run(),
         "apt-deps" => aptdeps::run(),
         "package" => package::run(rest),
