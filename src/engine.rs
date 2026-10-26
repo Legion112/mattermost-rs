@@ -21,7 +21,7 @@ use mm_api::{ApiError, HttpRequest, HttpResponse};
 use mm_core::Threading;
 use mm_gui::{Command, Event};
 use mm_http::Client;
-use mm_types::{ChannelId, UserId};
+use mm_types::{ChannelId, PostId, UserId};
 
 use crate::session::Session;
 
@@ -63,6 +63,109 @@ pub(crate) fn spawn(
         .expect("the engine thread could not be started");
 
     (cmd_tx, evt_rx)
+}
+
+/// Carry out one command against an established session.
+///
+/// Split from `run` so the loop above stays about *when* a command may run —
+/// before sign-in, after, at shutdown — and this stays about what each one
+/// does.
+async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Event>) {
+    match command {
+        Command::Sync => sync(&a.client, &a.session, events).await,
+        Command::OpenChannel(channel) => open_channel(&a.client, &channel, events).await,
+        Command::OpenThread(root) => {
+            match fetch(
+                &a.client,
+                &rest::post_thread(root.as_str()),
+                rest::parse_post_list,
+            )
+            .await
+            {
+                Ok(page) => {
+                    let _ = events.send(Event::Thread { root, page }).await;
+                }
+                Err(e) => {
+                    let _ = events.send(Event::Failed(e)).await;
+                }
+            }
+        }
+        Command::LoadOlder { channel, before } => {
+            let query = PostQuery::Before {
+                post: before.to_string(),
+                per_page: rest::DEFAULT_PER_PAGE,
+            };
+            match fetch(
+                &a.client,
+                &rest::posts_for_channel(&channel, &query),
+                rest::parse_post_list,
+            )
+            .await
+            {
+                Ok(page) => {
+                    let _ = events.send(Event::OlderPosts { channel, page }).await;
+                }
+                Err(e) => {
+                    let _ = events.send(Event::Failed(e)).await;
+                }
+            }
+        }
+        Command::FetchAvatar { user, version } => {
+            // The cache first, so a relaunch draws faces without a
+            // single request.
+            if let Some(image) = crate::avatars::load(&user, version) {
+                let _ = events.send(Event::Avatar { user, image }).await;
+            } else if let Ok(image) =
+                fetch(&a.client, &rest::profile_image(&user), rest::parse_image).await
+            {
+                crate::avatars::store(&user, version, &image);
+                let _ = events.send(Event::Avatar { user, image }).await;
+            }
+        }
+        Command::React { post, emoji, add } => {
+            // Best effort, like MarkRead: the `reaction_added` event
+            // comes back over the WebSocket and is what actually updates
+            // the store, so a failure here simply leaves the chip as it
+            // was rather than needing to be undone.
+            let user = UserId::new(&a.session.user_id);
+            let request = if add {
+                rest::add_reaction(&user, &post, &emoji)
+            } else {
+                rest::remove_reaction(&user, &post, &emoji)
+            };
+            let _ = a.client.send(&request).await;
+        }
+        Command::MarkRead(channel) => {
+            // Best effort: the GUI has already updated optimistically, and
+            // the store's monotonic joins mean a failure here cannot
+            // corrupt anything -- the next fetch corrects it.
+            let request = rest::view_channel(Some(&channel), None, true);
+            let _ = a.client.send(&request).await;
+        }
+        Command::Send {
+            channel,
+            text,
+            root,
+        } => {
+            let pending = format!("mmrs-{}", now_millis());
+            let request =
+                rest::create_post(&channel, &text, root.as_ref().map(PostId::as_str), &pending);
+            // The `posted` event arrives over the WebSocket carrying the
+            // same post, so nothing is applied here: letting one path own
+            // it keeps the optimistic-post race out of this code entirely.
+            if let Err(e) = fetch(&a.client, &request, rest::parse_post).await {
+                let _ = events.send(Event::Failed(e)).await;
+            }
+        }
+        Command::Notify(notification) => {
+            // A missing notification daemon is a normal state on a minimal
+            // desktop, and not a reason for a chat client to stop working.
+            if let Err(e) = mm_desktop_xdg::show(&notification) {
+                let _ = events.send(Event::Status(e)).await;
+            }
+        }
+        Command::LogIn { .. } | Command::Quit => unreachable!("handled above"),
+    }
 }
 
 async fn run(
@@ -113,82 +216,8 @@ async fn run(
             continue;
         };
 
-        match command {
-            Command::Sync => sync(&a.client, &a.session, &events).await,
-            Command::OpenChannel(channel) => open_channel(&a.client, &channel, &events).await,
-            Command::LoadOlder { channel, before } => {
-                let query = PostQuery::Before {
-                    post: before.to_string(),
-                    per_page: rest::DEFAULT_PER_PAGE,
-                };
-                match fetch(
-                    &a.client,
-                    &rest::posts_for_channel(&channel, &query),
-                    rest::parse_post_list,
-                )
-                .await
-                {
-                    Ok(page) => {
-                        let _ = events.send(Event::OlderPosts { channel, page }).await;
-                    }
-                    Err(e) => {
-                        let _ = events.send(Event::Failed(e)).await;
-                    }
-                }
-            }
-            Command::FetchAvatar { user, version } => {
-                // The cache first, so a relaunch draws faces without a
-                // single request.
-                if let Some(image) = crate::avatars::load(&user, version) {
-                    let _ = events.send(Event::Avatar { user, image }).await;
-                } else if let Ok(image) =
-                    fetch(&a.client, &rest::profile_image(&user), rest::parse_image).await
-                {
-                    crate::avatars::store(&user, version, &image);
-                    let _ = events.send(Event::Avatar { user, image }).await;
-                }
-            }
-            Command::React { post, emoji, add } => {
-                // Best effort, like MarkRead: the `reaction_added` event
-                // comes back over the WebSocket and is what actually updates
-                // the store, so a failure here simply leaves the chip as it
-                // was rather than needing to be undone.
-                let user = UserId::new(&a.session.user_id);
-                let request = if add {
-                    rest::add_reaction(&user, &post, &emoji)
-                } else {
-                    rest::remove_reaction(&user, &post, &emoji)
-                };
-                let _ = a.client.send(&request).await;
-            }
-            Command::MarkRead(channel) => {
-                // Best effort: the GUI has already updated optimistically, and
-                // the store's monotonic joins mean a failure here cannot
-                // corrupt anything -- the next fetch corrects it.
-                let request = rest::view_channel(Some(&channel), None, true);
-                let _ = a.client.send(&request).await;
-            }
-            Command::Send { channel, text } => {
-                let pending = format!("mmrs-{}", now_millis());
-                let request = rest::create_post(&channel, &text, None, &pending);
-                // The `posted` event arrives over the WebSocket carrying the
-                // same post, so nothing is applied here: letting one path own
-                // it keeps the optimistic-post race out of this code entirely.
-                if let Err(e) = fetch(&a.client, &request, rest::parse_post).await {
-                    let _ = events.send(Event::Failed(e)).await;
-                }
-            }
-            Command::Notify(notification) => {
-                // A missing notification daemon is a normal state on a minimal
-                // desktop, and not a reason for a chat client to stop working.
-                if let Err(e) = mm_desktop_xdg::show(&notification) {
-                    let _ = events.send(Event::Status(e)).await;
-                }
-            }
-            Command::LogIn { .. } | Command::Quit => unreachable!("handled above"),
-        }
+        handle(a, command, &events).await;
     }
-
     if let Some(a) = active {
         a.socket.abort();
     }

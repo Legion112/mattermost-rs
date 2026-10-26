@@ -70,6 +70,13 @@ struct Ui {
     /// built on this thread, so the engine sends bytes and the decode
     /// happens here.
     avatars: Rc<RefCell<HashMap<UserId, gdk::Texture>>>,
+    /// The thread pane: its model, its view, the panel itself and which
+    /// root it is showing.
+    thread_posts: gio::ListStore,
+    thread_view: gtk::ListView,
+    thread_pane: gtk::Box,
+    conversation: gtk::Paned,
+    thread_root: Rc<RefCell<Option<PostId>>>,
     /// One backfill request at a time. The top edge fires repeatedly while
     /// the user sits there, and without this each firing would start another
     /// identical request.
@@ -127,7 +134,65 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
-fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
+/// The thread panel: a post list, a heading with a close button, and a
+/// composer that replies into the open thread.
+///
+/// Hidden until a thread is opened — an empty panel permanently taking a
+/// third of the window would be worse than no panel.
+fn build_thread_pane(
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) -> (
+    gio::ListStore,
+    gtk::ListView,
+    gtk::Box,
+    gtk::Button,
+    gtk::Entry,
+) {
+    let (thread_posts, thread_view, thread_scroller) = build_post_list(commands);
+    let thread_title = gtk::Label::builder()
+        .label("Thread")
+        .xalign(0.0)
+        .hexpand(true)
+        .css_classes(["heading"])
+        .build();
+    let thread_close = gtk::Button::from_icon_name("window-close-symbolic");
+    thread_close.add_css_class("flat");
+    thread_close.set_tooltip_text(Some("Close thread"));
+    let thread_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    thread_header.set_margin_start(12);
+    thread_header.set_margin_end(6);
+    thread_header.set_margin_top(8);
+    thread_header.set_margin_bottom(4);
+    thread_header.append(&thread_title);
+    thread_header.append(&thread_close);
+    let thread_composer = gtk::Entry::builder()
+        .placeholder_text("Reply…")
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(12)
+        .build();
+    let thread_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    thread_pane.append(&thread_header);
+    thread_pane.append(&thread_scroller);
+    thread_pane.append(&thread_composer);
+    thread_pane.set_visible(false);
+
+    // Wide enough to read a reply in. Without this the Paned hands the
+    // hidden child its minimum, and opening a thread produced a column
+    // about one word wide.
+    thread_pane.set_size_request(THREAD_PANE_WIDTH, -1);
+    (
+        thread_posts,
+        thread_view,
+        thread_pane,
+        thread_close,
+        thread_composer,
+    )
+}
+
+/// The channel list, under a line naming the account this window shows.
+fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::Box) {
     let sidebar = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .css_classes(["navigation-sidebar"])
@@ -154,6 +219,11 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     sidebar_pane.set_size_request(260, -1);
     sidebar_pane.append(&identity);
     sidebar_pane.append(&sidebar_scroll);
+    (sidebar, identity, sidebar_pane)
+}
+
+fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
+    let (sidebar, identity, sidebar_pane) = build_sidebar();
 
     let (posts, post_view, scroller) = build_post_list(commands);
 
@@ -179,10 +249,21 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     content.append(&status);
     content.append(&composer);
 
+    let (thread_posts, thread_view, thread_pane, thread_close, thread_composer) =
+        build_thread_pane(commands);
+
+    let conversation = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&content)
+        .end_child(&thread_pane)
+        .resize_end_child(false)
+        .shrink_end_child(false)
+        .build();
+
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
         .start_child(&sidebar_pane)
-        .end_child(&content)
+        .end_child(&conversation)
         .resize_start_child(false)
         .position(260)
         .build();
@@ -233,6 +314,11 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         selected: Rc::new(RefCell::new(None)),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
+        thread_posts: thread_posts.clone(),
+        thread_view: thread_view.clone(),
+        thread_pane: thread_pane.clone(),
+        conversation: conversation.clone(),
+        thread_root: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
         avatars: Rc::new(RefCell::new(HashMap::new())),
@@ -249,6 +335,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     };
 
     wire(&ui, &refresh, &sidebar, &composer, commands);
+    wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
     ui
 }
@@ -292,6 +379,48 @@ fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSend
         let submit = submit.clone();
         login.password.connect_entry_activated(move |_| submit());
     }
+}
+
+/// Connect the thread pane: closing it, and replying into it.
+fn wire_thread(
+    ui: &Ui,
+    close: &gtk::Button,
+    composer: &gtk::Entry,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    {
+        let root = Rc::clone(&ui.thread_root);
+        let pane = ui.thread_pane.clone();
+        let posts = ui.thread_posts.clone();
+        close.connect_clicked(move |_| {
+            *root.borrow_mut() = None;
+            posts.remove_all();
+            pane.set_visible(false);
+        });
+    }
+
+    let commands = commands.clone();
+    let root = Rc::clone(&ui.thread_root);
+    let selected = Rc::clone(&ui.selected);
+    composer.connect_activate(move |entry| {
+        let text = entry.text().to_string();
+        if text.trim().is_empty() {
+            return;
+        }
+        // Both are needed: a reply carries the thread it belongs to *and*
+        // the channel it is posted in.
+        let (Some(channel), Some(root)) = (selected.borrow().clone(), root.borrow().clone()) else {
+            return;
+        };
+        commands
+            .send(Command::Send {
+                channel,
+                text,
+                root: Some(root),
+            })
+            .ok();
+        entry.set_text("");
+    });
 }
 
 /// Connect the widgets to the command channel.
@@ -417,7 +546,13 @@ fn wire(
             let Some(channel) = selected.borrow().clone() else {
                 return;
             };
-            commands.send(Command::Send { channel, text }).ok();
+            commands
+                .send(Command::Send {
+                    channel,
+                    text,
+                    root: None,
+                })
+                .ok();
             entry.set_text("");
         });
     }
@@ -465,7 +600,13 @@ fn render_markup(doc: &mm_md::Document) -> String {
 ///
 /// Without this a post whose only content is a file renders as an author, a
 /// timestamp and nothing at all, which reads as the client being broken.
-fn describe_extras(post: &mm_types::Post, replies: i64) -> String {
+/// The line under a message for anything that is not the message: files,
+/// and nothing else.
+///
+/// Replies used to be listed here too, which meant a post with a thread
+/// said "3 replies" twice -- once as text and once as the button that
+/// actually opens it.
+fn describe_extras(post: &mm_types::Post) -> String {
     let mut parts: Vec<String> = Vec::new();
     for file in post.attachments() {
         let icon = if file.is_image() { "🖼" } else { "📎" };
@@ -482,12 +623,6 @@ fn describe_extras(post: &mm_types::Post, replies: i64) -> String {
         } else {
             parts.push(format!("{icon} {name} ({size})"));
         }
-    }
-    if replies > 0 {
-        parts.push(format!(
-            "💬 {replies} {}",
-            if replies == 1 { "reply" } else { "replies" }
-        ));
     }
     parts.join("   ")
 }
@@ -738,7 +873,28 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         reactions.remove(&chip);
     }
     let chips = data.reactions();
-    reactions.set_visible(!chips.is_empty());
+    let replies = data.replies();
+    reactions.set_visible(replies > 0 || !chips.is_empty());
+    // With collapsed threads on -- the server default since 12.1 -- replies
+    // are not in the channel at all, so this button is the only way to read
+    // them. It comes before the reactions because it is the one that leads
+    // somewhere.
+    if replies > 0 {
+        let open = gtk::Button::builder()
+            .label(if replies == 1 {
+                "1 reply".to_owned()
+            } else {
+                format!("{replies} replies")
+            })
+            .css_classes(["flat", "caption"])
+            .build();
+        let commands = commands.clone();
+        let post = PostId::new(data.id());
+        open.connect_clicked(move |_| {
+            commands.send(Command::OpenThread(post.clone())).ok();
+        });
+        reactions.append(&open);
+    }
     for chip in chips {
         reactions.append(&reaction_chip(&data.id(), &chip, commands));
     }
@@ -748,6 +904,9 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
 /// avatar and borrows this as a left margin, so its text stays in line with
 /// the message that named its author.
 const AVATAR_GUTTER: i32 = 32 + 8;
+
+/// How much of the window a thread takes when it is open.
+const THREAD_PANE_WIDTH: i32 = 380;
 
 /// Past this many rows the post list stops bottom-aligning. See
 /// `refresh_posts` for why.
@@ -904,6 +1063,11 @@ impl Ui {
                 self.store.borrow_mut().apply_members(members);
                 self.refresh_sidebar();
             }
+            Event::Thread { root, page } => {
+                let _ = self.store.borrow_mut().apply_thread(&page);
+                *self.thread_root.borrow_mut() = Some(root.clone());
+                self.refresh_thread();
+            }
             Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
             Event::Avatar { user, image } => self.on_avatar(user, image),
             Event::Stats(stats) => {
@@ -946,6 +1110,11 @@ impl Ui {
                 if let Some(open) = self.selected.borrow().clone() {
                     self.refresh_posts(&open);
                 }
+                // A reply to the open thread arrives as an ordinary posted
+                // event, and with collapsed threads it is in no channel
+                // timeline -- so the thread pane is the only place it can
+                // appear at all.
+                self.refresh_thread();
             }
             Event::ResyncRequired(why) => {
                 self.set_status(&format!("reconnected: {why}"));
@@ -1111,6 +1280,106 @@ impl Ui {
         }
     }
 
+    /// Turn one post into the row the list draws, for either list.
+    ///
+    /// Shared so the thread pane and the channel cannot drift into
+    /// rendering the same message two different ways.
+    fn row_for(&self, store: &Store, post: &mm_types::Post, grouped: bool) -> PostRow {
+        // Ask for this author's face once, the first time they appear.
+        let avatar = self.avatars.borrow().get(&post.user_id).cloned();
+        if avatar.is_none()
+            && !post.user_id.as_str().is_empty()
+            && self.asked.borrow_mut().insert(post.user_id.clone())
+        {
+            self.commands
+                .send(Command::FetchAvatar {
+                    user: post.user_id.clone(),
+                    version: store
+                        .users
+                        .get(&post.user_id)
+                        .map_or(mm_types::Timestamp::ZERO, |u| u.last_picture_update),
+                })
+                .ok();
+        }
+        let author = store
+            .users
+            .get(&post.user_id)
+            .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned());
+        let suffix = if post.is_edited() { " (edited)" } else { "" };
+        let doc = mm_md::parse(&post.message);
+        // Most messages are a single plain paragraph, and for those the
+        // markup round-trip is skipped entirely.
+        let (body, markup) = if let Some(plain) = doc.plain_text() {
+            (format!("{plain}{suffix}"), false)
+        } else {
+            let rendered = render_markup(&doc);
+            (format!("{rendered}{}", mm_md::escape(suffix)), true)
+        };
+        let replies = store.reply_count(&post.id);
+        PostRow::new(PostRowFields {
+            id: post.id.as_str(),
+            author: &author,
+            body: &body,
+            time: &clock_time(post.create_at.millis()),
+            meta: &describe_extras(post),
+            markup,
+            system: post.is_system(),
+            grouped,
+            reactions: store.reactions_for(&post.id),
+            avatar,
+            // A reply never opens a thread of its own: in Mattermost the
+            // whole conversation hangs off the root, and offering "2
+            // replies" on a reply would open its parent under a different
+            // name.
+            replies: if post.is_reply() { 0 } else { replies },
+        })
+    }
+
+    /// Draw the open thread, or hide the panel when there is none.
+    fn refresh_thread(&self) {
+        let Some(root) = self.thread_root.borrow().clone() else {
+            self.thread_pane.set_visible(false);
+            return;
+        };
+        let store = self.store.borrow();
+        self.thread_posts.remove_all();
+        // No date separators here: a thread is one conversation and the
+        // separators would say the same day over and over. Grouping still
+        // applies, so a burst of replies from one person reads as one.
+        let posts = store.thread_posts(&root);
+        let mut previous: Option<&mm_types::Post> = None;
+        for post in &posts {
+            let grouped = previous.is_some_and(|p| {
+                p.user_id == post.user_id
+                    && !p.is_system()
+                    && !post.is_system()
+                    && post.create_at.millis() - p.create_at.millis() <= 5 * 60 * 1000
+            });
+            self.thread_posts
+                .append(&self.row_for(&store, post, grouped));
+            previous = Some(post);
+        }
+        drop(store);
+
+        // Place the divider the first time the pane appears, and leave it
+        // alone afterwards: once the reader has dragged it, it is theirs.
+        if !self.thread_pane.is_visible() {
+            self.thread_pane.set_visible(true);
+            let available = self.conversation.width();
+            if available > THREAD_PANE_WIDTH {
+                self.conversation
+                    .set_position(available - THREAD_PANE_WIDTH);
+            }
+        }
+        let n = self.thread_posts.n_items();
+        if n > 0 {
+            let view = self.thread_view.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
+                view.scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
+            });
+        }
+    }
+
     /// Merge a page of history fetched because the reader reached the top.
     fn on_older_posts(&self, channel: &ChannelId, page: &mm_types::PostList) {
         self.loading_older.set(false);
@@ -1237,48 +1506,7 @@ impl Ui {
             let Some(post) = store.posts.get(&id) else {
                 continue;
             };
-            // Ask for this author's face once, the first time they appear.
-            let avatar = self.avatars.borrow().get(&post.user_id).cloned();
-            if avatar.is_none()
-                && !post.user_id.as_str().is_empty()
-                && self.asked.borrow_mut().insert(post.user_id.clone())
-            {
-                self.commands
-                    .send(Command::FetchAvatar {
-                        user: post.user_id.clone(),
-                        version: store
-                            .users
-                            .get(&post.user_id)
-                            .map_or(mm_types::Timestamp::ZERO, |u| u.last_picture_update),
-                    })
-                    .ok();
-            }
-            let author = store
-                .users
-                .get(&post.user_id)
-                .map_or_else(|| post.user_id.to_string(), |u| u.display_name().to_owned());
-            let suffix = if post.is_edited() { " (edited)" } else { "" };
-            let doc = mm_md::parse(&post.message);
-            // Most messages are a single plain paragraph, and for those the
-            // markup round-trip is skipped entirely.
-            let (body, markup) = if let Some(plain) = doc.plain_text() {
-                (format!("{plain}{suffix}"), false)
-            } else {
-                let rendered = render_markup(&doc);
-                (format!("{rendered}{}", mm_md::escape(suffix)), true)
-            };
-            self.posts.append(&PostRow::new(PostRowFields {
-                id: post.id.as_str(),
-                author: &author,
-                body: &body,
-                time: &clock_time(post.create_at.millis()),
-                meta: &describe_extras(post, store.reply_count(&post.id)),
-                markup,
-                system: post.is_system(),
-                grouped,
-                reactions: store.reactions_for(&post.id),
-                avatar,
-            }));
+            self.posts.append(&self.row_for(&store, post, grouped));
         }
         self.composer.set_sensitive(true);
 

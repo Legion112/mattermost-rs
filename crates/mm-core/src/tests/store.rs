@@ -1256,3 +1256,108 @@ fn a_channel_reports_whether_its_history_is_complete() {
     store.apply_post_list(&id, &page, PageAnchor::Newest);
     assert!(store.older_complete(&id));
 }
+
+/// A thread reads as its root followed by the replies, oldest first --
+/// which is not the order a `HashMap` would hand them over in.
+#[test]
+fn a_thread_is_its_root_then_its_replies_in_order() {
+    let mut store = store();
+    let root = post("p-root", "c1", 10);
+    let mut later = post("p-late", "c1", 30);
+    later.root_id = PostId::new("p-root");
+    let mut earlier = post("p-early", "c1", 20);
+    earlier.root_id = PostId::new("p-root");
+    // A reply to something else entirely, which must not be swept in.
+    let mut elsewhere = post("p-other", "c1", 25);
+    elsewhere.root_id = PostId::new("p-different");
+
+    let mut page = PostList::default();
+    for p in [root, later, earlier, elsewhere] {
+        page.order.push(p.id.clone());
+        page.posts.insert(p.id.clone(), p);
+    }
+    store.apply_post_list(&ChannelId::new("c1"), &page, PageAnchor::Newest);
+
+    let ids: Vec<&str> = store
+        .thread_posts(&PostId::new("p-root"))
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    assert_eq!(ids, ["p-root", "p-early", "p-late"]);
+}
+
+/// A deleted reply disappears; a deleted root does not take its thread with
+/// it, because the replies are still worth reading.
+#[test]
+fn a_deleted_reply_goes_but_a_deleted_root_keeps_its_thread() {
+    let mut store = store();
+    let mut root = post("p-root", "c1", 10);
+    root.delete_at = Timestamp(50);
+    let mut gone = post("p-gone", "c1", 20);
+    gone.root_id = PostId::new("p-root");
+    gone.delete_at = Timestamp(40);
+    let mut kept = post("p-kept", "c1", 30);
+    kept.root_id = PostId::new("p-root");
+
+    let mut page = PostList::default();
+    for p in [root, gone, kept] {
+        page.order.push(p.id.clone());
+        page.posts.insert(p.id.clone(), p);
+    }
+    store.apply_post_list(&ChannelId::new("c1"), &page, PageAnchor::Newest);
+
+    let ids: Vec<&str> = store
+        .thread_posts(&PostId::new("p-root"))
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    assert_eq!(ids, ["p-root", "p-kept"]);
+}
+
+/// A post nobody replied to is a thread of one, and an unknown root is
+/// nothing at all rather than a panic.
+#[test]
+fn a_thread_of_one_and_a_thread_of_none() {
+    let mut store = store();
+    let mut page = PostList::default();
+    let only = post("p1", "c1", 10);
+    page.order.push(only.id.clone());
+    page.posts.insert(only.id.clone(), only);
+    store.apply_post_list(&ChannelId::new("c1"), &page, PageAnchor::Newest);
+
+    assert_eq!(store.thread_posts(&PostId::new("p1")).len(), 1);
+    assert!(store.thread_posts(&PostId::new("p-nothing")).is_empty());
+}
+
+/// A thread page is not a page of a channel: with collapsed threads its
+/// replies are in no channel timeline at all, so merging it as one would
+/// claim an adjacency the server never stated. The posts land, the timeline
+/// does not move.
+#[test]
+fn a_thread_page_stores_its_posts_without_touching_the_timeline() {
+    let mut store = store();
+    let channel = ChannelId::new("c1");
+
+    let mut first = PostList::default();
+    let root = post("p-root", "c1", 10);
+    first.order.push(root.id.clone());
+    first.posts.insert(root.id.clone(), root);
+    store.apply_post_list(&channel, &first, PageAnchor::Newest);
+    let timeline_before = store.channel_posts(&channel).len();
+
+    let mut thread = PostList::default();
+    let root_again = post("p-root", "c1", 10);
+    let mut reply = post("p-reply", "c1", 20);
+    reply.root_id = PostId::new("p-root");
+    for p in [root_again, reply] {
+        thread.order.push(p.id.clone());
+        thread.posts.insert(p.id.clone(), p);
+    }
+    let changes = store.apply_thread(&thread);
+
+    // The reply is new, so it is reported; the root is unchanged, so it is
+    // not. And the channel is exactly as it was.
+    assert_eq!(changes, vec![Change::Post(PostId::new("p-reply"))]);
+    assert_eq!(store.channel_posts(&channel).len(), timeline_before);
+    assert_eq!(store.thread_posts(&PostId::new("p-root")).len(), 2);
+}

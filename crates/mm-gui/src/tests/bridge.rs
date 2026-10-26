@@ -34,6 +34,7 @@ fn commands_round_trip_through_debug_and_clone() {
         Command::Sync,
         Command::OpenChannel(ChannelId::new("c1")),
         Command::Send {
+            root: None,
             channel: ChannelId::new("c1"),
             text: "hello".into(),
         },

@@ -670,6 +670,42 @@ impl Store {
     /// count keeps the number right for a thread built up live over the
     /// WebSocket, where the root post was fetched before the replies existed.
     #[must_use]
+    /// Take in a thread's posts without touching any channel timeline.
+    ///
+    /// A thread page is not a page of a channel: with collapsed threads its
+    /// replies are not in the channel at all, and merging it as one would
+    /// claim an adjacency the server never stated. The posts are stored, the
+    /// timeline is left alone, and `thread_posts` reads them back.
+    pub fn apply_thread(&mut self, page: &PostList) -> Vec<Change> {
+        page.posts
+            .values()
+            .filter(|post| self.store_post((*post).clone()))
+            .map(|post| Change::Post(post.id.clone()))
+            .collect()
+    }
+
+    /// A thread: its root, then every reply held, oldest first.
+    ///
+    /// Ordered by `(create_at, id)` like every other timeline here, because
+    /// `create_at` alone collides in bulk imports and webhook bursts.
+    /// Deleted posts are left out but a deleted *root* is not: a thread
+    /// whose root was removed still has readable replies, and dropping the
+    /// root would orphan them.
+    #[must_use]
+    pub fn thread_posts(&self, root: &PostId) -> Vec<&Post> {
+        let mut replies: Vec<&Post> = self
+            .posts
+            .values()
+            .filter(|p| p.root_id == *root && !p.is_deleted())
+            .collect();
+        replies.sort_by(|a, b| a.create_at.cmp(&b.create_at).then_with(|| a.id.cmp(&b.id)));
+        let mut out = Vec::with_capacity(replies.len() + 1);
+        out.extend(self.posts.get(root));
+        out.extend(replies);
+        out
+    }
+
+    #[must_use]
     pub fn reply_count(&self, root: &PostId) -> i64 {
         let stated = self.posts.get(root).map_or(0, |p| p.reply_count);
         let held = self

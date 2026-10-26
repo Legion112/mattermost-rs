@@ -34,8 +34,14 @@ pub enum Command {
     Sync,
     /// Fetch the newest page of a channel.
     OpenChannel(ChannelId),
-    /// Post a message.
-    Send { channel: ChannelId, text: String },
+    /// Post a message, or a reply when `root` is set.
+    Send {
+        channel: ChannelId,
+        text: String,
+        root: Option<PostId>,
+    },
+    /// Load a thread so it can be read beside the channel.
+    OpenThread(PostId),
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
     /// Fetch the page of history immediately before `before`, which is the
@@ -117,6 +123,11 @@ pub enum Event {
     Users(Vec<User>),
     Posts {
         channel: ChannelId,
+        page: PostList,
+    },
+    /// A thread's root and replies.
+    Thread {
+        root: PostId,
         page: PostList,
     },
     /// A page of history older than what was held. Separate from `Posts`
