@@ -250,6 +250,28 @@ pub fn remove_reaction(user: &UserId, post: &PostId, emoji: &str) -> HttpRequest
     HttpRequest::delete(format!("{API}/users/{user}/posts/{post}/reactions/{emoji}"))
 }
 
+/// A user's avatar, as image bytes.
+///
+/// Every user has one whether or not they uploaded anything: the server
+/// draws initials on a coloured square for those who did not, so there is no
+/// "no avatar" case to handle.
+#[must_use]
+pub fn profile_image(user: &UserId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/users/{user}/image"))
+}
+
+/// An image response, which is bytes rather than JSON.
+///
+/// Separate from `parse_json` only in what it does on success; the error
+/// path is identical, because an image endpoint still answers with a JSON
+/// error document when it fails.
+pub fn parse_image(resp: &HttpResponse) -> Result<Vec<u8>, ApiError> {
+    if !resp.is_success() {
+        return Err(ApiError::from_response(resp));
+    }
+    Ok(resp.body.clone())
+}
+
 /// Mark a channel read.
 ///
 /// An **empty** `channel` is legal and means focus loss, which is how the web

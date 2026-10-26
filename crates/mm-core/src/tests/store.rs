@@ -1,5 +1,5 @@
 use super::*;
-use mm_types::{ChannelType, PostList};
+use mm_types::{ChannelType, PostList, TeamId};
 use std::collections::BTreeMap;
 
 const ME: &str = "u-me";
@@ -1091,4 +1091,144 @@ fn emoji_keep_the_order_they_first_appeared_in() {
 fn a_post_with_no_reactions_has_none() {
     let store = store();
     assert!(store.reactions_for(&PostId::new("p-nothing")).is_empty());
+}
+
+fn dm_channel(id: &str, other: &str) -> Channel {
+    Channel {
+        id: ChannelId::new(id),
+        kind: ChannelType::Direct,
+        name: format!("{ME}__{other}"),
+        ..Channel::default()
+    }
+}
+
+fn person(id: &str, username: &str, nickname: &str) -> User {
+    User {
+        id: UserId::new(id),
+        username: username.to_owned(),
+        nickname: nickname.to_owned(),
+        ..User::default()
+    }
+}
+
+/// Two colleagues who both go by "Alex" are two identical rows, and an
+/// unread badge on one of them tells the user nothing.
+#[test]
+fn two_people_with_the_same_display_name_are_told_apart_by_username() {
+    let mut store = store();
+    store.apply_users(vec![
+        person("u-1", "alex.m", "Alex"),
+        person("u-2", "alex.t", "Alex"),
+        person("u-3", "sam.q", "Sam"),
+    ]);
+    store.apply_channels(vec![
+        dm_channel("d1", "u-1"),
+        dm_channel("d2", "u-2"),
+        // Sam is in the same sidebar and must come through untouched: only
+        // the names that actually collide are tagged.
+        dm_channel("d3", "u-3"),
+    ]);
+    store.apply_members(vec![
+        member("d1", 0, 0, 0),
+        member("d2", 0, 0, 0),
+        member("d3", 0, 0, 0),
+    ]);
+
+    let names: Vec<String> = store
+        .sidebar()
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    assert_eq!(names, ["Alex (@alex.m)", "Alex (@alex.t)", "Sam"]);
+}
+
+/// Only the duplicates are touched. Tagging every DM with a username is
+/// noise on the rows that were never ambiguous.
+#[test]
+fn an_unambiguous_name_is_left_alone() {
+    let mut store = store();
+    store.apply_users(vec![
+        person("u-1", "alex.m", "Alex"),
+        person("u-2", "sam.t", "Sam"),
+    ]);
+    store.apply_channels(vec![dm_channel("d1", "u-1"), dm_channel("d2", "u-2")]);
+    store.apply_members(vec![member("d1", 0, 0, 0), member("d2", 0, 0, 0)]);
+
+    let names: Vec<String> = store
+        .sidebar()
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    assert_eq!(names, ["Alex", "Sam"]);
+}
+
+/// The same channel name in two teams is the same problem with a different
+/// answer: the team is what tells them apart, not a username.
+#[test]
+fn a_channel_name_shared_across_teams_is_told_apart_by_team() {
+    let mut store = store();
+    store.apply_teams(vec![
+        Team {
+            id: TeamId::new("t1"),
+            display_name: "Platform".into(),
+            ..Team::default()
+        },
+        Team {
+            id: TeamId::new("t2"),
+            display_name: "Support".into(),
+            ..Team::default()
+        },
+    ]);
+    let mut a = channel("c1", 0, 0);
+    a.display_name = "General".into();
+    a.team_id = TeamId::new("t1");
+    let mut b = channel("c2", 0, 0);
+    b.display_name = "General".into();
+    b.team_id = TeamId::new("t2");
+    store.apply_channels(vec![a, b]);
+    store.apply_members(vec![member("c1", 0, 0, 0), member("c2", 0, 0, 0)]);
+
+    let names: Vec<String> = store
+        .sidebar()
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    assert_eq!(names, ["General (Platform)", "General (Support)"]);
+}
+
+/// With nothing to tell them apart -- an unknown team, a roster that has not
+/// loaded -- the rows stay as they were rather than growing an empty suffix.
+#[test]
+fn a_duplicate_with_nothing_to_distinguish_it_is_left_as_it_is() {
+    let mut store = store();
+    let mut a = channel("c1", 0, 0);
+    a.display_name = "General".into();
+    a.team_id = TeamId::new("t-unknown");
+    let mut b = channel("c2", 0, 0);
+    b.display_name = "General".into();
+    b.team_id = TeamId::new("t-unknown");
+    store.apply_channels(vec![a, b]);
+    store.apply_members(vec![member("c1", 0, 0, 0), member("c2", 0, 0, 0)]);
+
+    let names: Vec<String> = store
+        .sidebar()
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    assert_eq!(names, ["General", "General"]);
+}
+
+/// A one-to-one DM names the person on the other end, so the sidebar can
+/// draw their face. Everything else has no single other person.
+#[test]
+fn a_dm_row_names_the_other_party() {
+    let mut store = store();
+    store.apply_channels(vec![dm_channel("d1", "u-1"), channel("c1", 0, 0)]);
+    store.apply_members(vec![member("d1", 0, 0, 0), member("c1", 0, 0, 0)]);
+
+    let rows = store.sidebar();
+    let dm = rows.iter().find(|r| r.channel.as_str() == "d1").unwrap();
+    assert_eq!(dm.avatar_user, Some(UserId::new("u-1")));
+    let open = rows.iter().find(|r| r.channel.as_str() == "c1").unwrap();
+    assert_eq!(open.avatar_user, None);
 }

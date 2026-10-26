@@ -17,7 +17,7 @@ use mm_types::{
     CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, ChannelType,
     Post, PostId, PostList, Team, Timestamp, User, UserId,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// What changed, so a GUI can invalidate only what it must.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -54,6 +54,10 @@ pub struct SidebarRow {
     pub channel: ChannelId,
     pub display_name: String,
     pub kind: ChannelType,
+    /// For a one-to-one DM, the person on the other end: the sidebar draws
+    /// their face where a channel would draw an icon. `None` for anything
+    /// else, including a group DM, which has no single other person.
+    pub avatar_user: Option<UserId>,
     pub unread: Unread,
     pub muted: bool,
 }
@@ -534,6 +538,70 @@ impl Store {
             .map_or_else(|| other.to_owned(), |u| u.display_name().to_owned())
     }
 
+    /// Tell apart two rows that would otherwise read identically.
+    ///
+    /// Two colleagues called "Alex" are two rows called "Alex", and an
+    /// unread badge on one of them tells the user nothing. Mattermost
+    /// appends the username; a channel of the same name in two teams is the
+    /// same problem with a different answer, so it gets the team.
+    ///
+    /// Only duplicates are touched. Adding "@alex" to every DM would be
+    /// noise on the ninety-nine rows that were already unambiguous.
+    fn disambiguate(&self, rows: &mut [SidebarRow]) {
+        let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+        for row in rows.iter() {
+            *seen.entry(row.display_name.as_str()).or_default() += 1;
+        }
+        let duplicated: BTreeSet<String> = seen
+            .into_iter()
+            .filter(|(_, n)| *n > 1)
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        if duplicated.is_empty() {
+            return;
+        }
+        for row in rows.iter_mut() {
+            if !duplicated.contains(&row.display_name) {
+                continue;
+            }
+            if let Some(detail) = self.distinguishing_detail(&row.channel) {
+                row.display_name = format!("{} ({detail})", row.display_name);
+            }
+        }
+    }
+
+    /// The other person in a one-to-one DM.
+    fn other_party(&self, channel: &Channel) -> Option<UserId> {
+        if channel.kind != ChannelType::Direct {
+            return None;
+        }
+        channel
+            .name
+            .split("__")
+            .find(|part| *part != self.me.as_str())
+            .map(UserId::new)
+    }
+
+    /// What separates this channel from another of the same name: the other
+    /// person's username for a DM, the team for anything else.
+    fn distinguishing_detail(&self, channel: &ChannelId) -> Option<String> {
+        let channel = self.channels.get(channel)?;
+        if channel.kind == ChannelType::Direct {
+            let other = channel
+                .name
+                .split("__")
+                .find(|part| *part != self.me.as_str())?;
+            let user = self.users.get(&UserId::new(other))?;
+            // A username is unique on a server by construction, so this
+            // cannot itself collide.
+            return Some(format!("@{}", user.username));
+        }
+        let team = self.teams.iter().find(|t| t.id == channel.team_id)?;
+        // A group DM has no team, and two of them with the same set of
+        // display names are genuinely indistinguishable by name alone.
+        (!team.display_name.is_empty()).then(|| team.display_name.clone())
+    }
+
     /// The channel list, deterministically ordered: unread first, then by
     /// label. Iteration order of a `HashMap` must never reach the UI.
     #[must_use]
@@ -547,10 +615,12 @@ impl Store {
                 channel: c.id.clone(),
                 display_name: self.channel_label(c),
                 kind: c.kind.clone(),
+                avatar_user: self.other_party(c),
                 unread: self.unread(&c.id),
                 muted: self.is_muted(&c.id),
             })
             .collect();
+        self.disambiguate(&mut rows);
         rows.sort_by(|a, b| {
             b.is_unread()
                 .cmp(&a.is_unread())

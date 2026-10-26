@@ -489,3 +489,19 @@ fn reactions_are_added_by_body_and_removed_by_path() {
     let parsed = parse_reaction(&ok(r#"{"emoji_name":"tada","user_id":"u1"}"#)).unwrap();
     assert_eq!(parsed.emoji_name, "tada");
 }
+
+/// Avatars come back as bytes, not JSON, but a failure still comes back as a
+/// JSON error document and has to be read as one.
+#[test]
+fn a_profile_image_is_bytes_on_success_and_an_api_error_on_failure() {
+    let user = UserId::new("u1");
+    assert_eq!(profile_image(&user).path, "/api/v4/users/u1/image");
+
+    let png = [0x89, b'P', b'N', b'G', 0x0d];
+    assert_eq!(
+        parse_image(&HttpResponse::new(200, png.to_vec())).unwrap(),
+        png
+    );
+    let err = HttpResponse::new(404, r#"{"id":"api.user.no","message":"gone"}"#);
+    assert!(matches!(parse_image(&err), Err(ApiError::NotFound(_))));
+}

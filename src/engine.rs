@@ -116,6 +116,18 @@ async fn run(
         match command {
             Command::Sync => sync(&a.client, &a.session, &events).await,
             Command::OpenChannel(channel) => open_channel(&a.client, &channel, &events).await,
+            Command::FetchAvatar { user, version } => {
+                // The cache first, so a relaunch draws faces without a
+                // single request.
+                if let Some(image) = crate::avatars::load(&user, version) {
+                    let _ = events.send(Event::Avatar { user, image }).await;
+                } else if let Ok(image) =
+                    fetch(&a.client, &rest::profile_image(&user), rest::parse_image).await
+                {
+                    crate::avatars::store(&user, version, &image);
+                    let _ = events.send(Event::Avatar { user, image }).await;
+                }
+            }
             Command::React { post, emoji, add } => {
                 // Best effort, like MarkRead: the `reaction_added` event
                 // comes back over the WebSocket and is what actually updates

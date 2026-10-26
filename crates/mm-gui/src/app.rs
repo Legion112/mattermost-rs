@@ -24,11 +24,13 @@ use crate::login::LoginPage;
 use crate::row::{PostRow, PostRowFields};
 // adw::prelude re-exports gtk::prelude, so this one import covers both.
 use adw::prelude::*;
+use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use mm_core::{PageAnchor, Store, Threading};
 use mm_types::{ChannelId, PostId, UserId};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 const APP_ID: &str = "dev.legion.mattermost_rs";
@@ -64,6 +66,13 @@ struct Ui {
     selected: Rc<RefCell<Option<ChannelId>>>,
     sidebar: gtk::ListBox,
     identity: gtk::Label,
+    /// Decoded avatars, by user. A texture is a GPU-side object and must be
+    /// built on this thread, so the engine sends bytes and the decode
+    /// happens here.
+    avatars: Rc<RefCell<HashMap<UserId, gdk::Texture>>>,
+    /// Who has already been asked for. Without this, every redraw of a
+    /// channel would re-request every face in it.
+    asked: Rc<RefCell<HashSet<UserId>>>,
     posts: gio::ListStore,
     post_view: gtk::ListView,
     scroller: gtk::ScrolledWindow,
@@ -216,6 +225,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         selected: Rc::new(RefCell::new(None)),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
+        avatars: Rc::new(RefCell::new(HashMap::new())),
+        asked: Rc::new(RefCell::new(HashSet::new())),
         posts,
         post_view,
         scroller,
@@ -553,11 +564,28 @@ fn setup_post_row(item: &gtk::ListItem) {
     let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     reactions.set_margin_top(2);
 
+    // The message itself sits beside a fixed gutter holding the author's
+    // face, so grouped messages line up under the one that named them.
+    // `adw::Avatar` draws initials when there is no picture, which means a
+    // row never has to wait on the network to look finished.
+    let face = adw::Avatar::builder()
+        .size(32)
+        .show_initials(true)
+        .valign(gtk::Align::Start)
+        .build();
+    let main = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    main.set_hexpand(true);
+    main.append(&header);
+    main.append(&body);
+    main.append(&meta);
+    main.append(&reactions);
+
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.append(&face);
+    line.append(&main);
+
     row.append(&day);
-    row.append(&header);
-    row.append(&body);
-    row.append(&meta);
-    row.append(&reactions);
+    row.append(&line);
     item.set_child(Some(&row));
 }
 
@@ -575,7 +603,16 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     let Some(day) = row.first_child().and_downcast::<gtk::Box>() else {
         return;
     };
-    let Some(header) = day.next_sibling().and_downcast::<gtk::Box>() else {
+    let Some(line) = day.next_sibling().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(face) = line.first_child().and_downcast::<adw::Avatar>() else {
+        return;
+    };
+    let Some(main) = face.next_sibling().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(header) = main.first_child().and_downcast::<gtk::Box>() else {
         return;
     };
     let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
@@ -599,21 +636,29 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         {
             label.set_text(&data.body());
         }
-        header.set_visible(false);
-        body.set_visible(false);
-        meta.set_visible(false);
-        reactions.set_visible(false);
+        line.set_visible(false);
         return;
     }
 
+    line.set_visible(true);
     // A grouped message sits tight under the one above it, which is what
     // makes a block read as one utterance rather than three.
-    row.set_margin_top(if data.is_grouped() { 0 } else { 6 });
+    let grouped = data.is_grouped();
+    row.set_margin_top(if grouped { 0 } else { 6 });
+
+    // The face belongs to the message that names its author. A grouped
+    // message keeps the *alignment* but not the gutter widget: an avatar
+    // hidden with opacity still claims its 32 pixels of height, which pushed
+    // every line of a block a row apart and undid the grouping entirely.
+    face.set_visible(!grouped);
+    main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
+    face.set_text(Some(&data.author()));
+    face.set_custom_image(data.avatar().as_ref());
 
     let system = data.is_system();
     // Still the same person talking: the author line would just repeat
     // itself, so the message tucks under the one above.
-    header.set_visible(!data.is_grouped());
+    header.set_visible(!grouped);
     if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
         // A join/leave notice is not somebody speaking, so it gets no
         // author line.
@@ -651,6 +696,11 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         reactions.append(&reaction_chip(&data.id(), &chip, commands));
     }
 }
+
+/// The avatar's width plus the gap after it. A grouped message has no
+/// avatar and borrows this as a left margin, so its text stays in line with
+/// the message that named its author.
+const AVATAR_GUTTER: i32 = 32 + 8;
 
 /// A category heading: not selectable, so arrow keys and the first-channel
 /// fallback walk straight past it.
@@ -806,6 +856,21 @@ impl Ui {
                 self.store.borrow_mut().apply_members(members);
                 self.refresh_sidebar();
             }
+            Event::Avatar { user, image } => {
+                // `Texture::from_bytes` decodes on this thread. The plan
+                // puts image decode on the engine, and for message images it
+                // will stay there -- an avatar is at most 128px and decodes
+                // in well under a millisecond, which is cheaper than the
+                // round trip that moving it would cost.
+                let bytes = glib::Bytes::from_owned(image);
+                if let Ok(texture) = gdk::Texture::from_bytes(&bytes) {
+                    self.avatars.borrow_mut().insert(user, texture);
+                    self.refresh_sidebar();
+                    if let Some(open) = self.selected.borrow().clone() {
+                        self.refresh_posts(&open);
+                    }
+                }
+            }
             Event::Stats(stats) => {
                 let channel = stats.channel_id.clone();
                 self.store.borrow_mut().apply_stats(stats);
@@ -917,6 +982,29 @@ impl Ui {
 
     fn refresh_sidebar(&self) {
         let sections = self.store.borrow().sidebar_sections();
+        // The faces the sidebar needs are not necessarily the ones the open
+        // channel needed, so ask here too -- once per person, as ever.
+        for row in sections.iter().flat_map(|s| &s.rows) {
+            let Some(user) = &row.avatar_user else {
+                continue;
+            };
+            if !self.avatars.borrow().contains_key(user)
+                && self.asked.borrow_mut().insert(user.clone())
+            {
+                let version = self
+                    .store
+                    .borrow()
+                    .users
+                    .get(user)
+                    .map_or(mm_types::Timestamp::ZERO, |u| u.last_picture_update);
+                self.commands
+                    .send(Command::FetchAvatar {
+                        user: user.clone(),
+                        version,
+                    })
+                    .ok();
+            }
+        }
         let keep = self.selected.borrow().clone();
 
         while let Some(child) = self.sidebar.first_child() {
@@ -928,6 +1016,7 @@ impl Ui {
             self.sidebar.append(&section_header(section));
             for row in &section.rows {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                line.append(&self.channel_mark(row));
                 let name = gtk::Label::builder()
                     .label(&row.display_name)
                     .xalign(0.0)
@@ -999,6 +1088,50 @@ impl Ui {
         self.status.set_visible(!QUIET.contains(&text));
     }
 
+    /// What a sidebar row shows to its left: the other person's face for a
+    /// DM, and the symbol for the channel's kind otherwise.
+    ///
+    /// Mattermost marks public channels with a hash and private ones with a
+    /// padlock, and that distinction matters -- it is the difference between
+    /// writing in front of the company and writing in front of six people.
+    fn channel_mark(&self, row: &mm_core::SidebarRow) -> gtk::Widget {
+        if let Some(user) = &row.avatar_user {
+            let face = adw::Avatar::builder()
+                .size(20)
+                .show_initials(true)
+                .text(&row.display_name)
+                .build();
+            face.set_custom_image(self.avatars.borrow().get(user));
+            return face.upcast();
+        }
+        // Icon names are not checked at build time: a name the theme does
+        // not have renders as a broken-image placeholder, which is how the
+        // first attempt here -- Mattermost's own `channel-public-symbolic`
+        // -- looked. These three are in Adwaita on this machine. A public
+        // channel is a hash rather than an icon because that is the symbol
+        // Mattermost uses and there is no Adwaita equivalent worth the
+        // approximation.
+        match row.kind {
+            mm_types::ChannelType::Private => gtk::Image::builder()
+                .icon_name("changes-prevent-symbolic")
+                .css_classes(["dim-label"])
+                .build()
+                .upcast(),
+            // A group DM is a conversation, not a channel.
+            mm_types::ChannelType::Group => gtk::Image::builder()
+                .icon_name("system-users-symbolic")
+                .css_classes(["dim-label"])
+                .build()
+                .upcast(),
+            _ => gtk::Label::builder()
+                .label("#")
+                .width_request(16)
+                .css_classes(["dim-label"])
+                .build()
+                .upcast(),
+        }
+    }
+
     /// Put the open channel's name, and how many people are in it, in the
     /// window's title bar.
     fn refresh_heading(&self, channel: &ChannelId) {
@@ -1040,6 +1173,22 @@ impl Ui {
             let Some(post) = store.posts.get(&id) else {
                 continue;
             };
+            // Ask for this author's face once, the first time they appear.
+            let avatar = self.avatars.borrow().get(&post.user_id).cloned();
+            if avatar.is_none()
+                && !post.user_id.as_str().is_empty()
+                && self.asked.borrow_mut().insert(post.user_id.clone())
+            {
+                self.commands
+                    .send(Command::FetchAvatar {
+                        user: post.user_id.clone(),
+                        version: store
+                            .users
+                            .get(&post.user_id)
+                            .map_or(mm_types::Timestamp::ZERO, |u| u.last_picture_update),
+                    })
+                    .ok();
+            }
             let author = store
                 .users
                 .get(&post.user_id)
@@ -1064,6 +1213,7 @@ impl Ui {
                 system: post.is_system(),
                 grouped,
                 reactions: store.reactions_for(&post.id),
+                avatar,
             }));
         }
         self.composer.set_sensitive(true);

@@ -9,6 +9,7 @@
 //! `mm-core` than any mock, because the server is the thing whose behaviour
 //! the store is modelling.
 
+mod avatars;
 mod engine;
 mod session;
 

@@ -9,6 +9,7 @@ fn row(id: &str, name: &str) -> SidebarRow {
         kind: ChannelType::Open,
         unread: Unread::default(),
         muted: false,
+        avatar_user: None,
     }
 }
 

@@ -11,8 +11,8 @@
 use mm_api::ws::WsEvent;
 use mm_core::Threading;
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, PostId, PostList, Team, User,
-    UserId,
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, PostId, PostList, Team,
+    Timestamp, User, UserId,
 };
 
 /// GUI to engine.
@@ -38,6 +38,14 @@ pub enum Command {
     Send { channel: ChannelId, text: String },
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
+    /// Fetch one person's avatar. The window asks per author it has not
+    /// drawn yet, and asks once: the engine answers with bytes either from
+    /// its file cache or from the server.
+    FetchAvatar {
+        user: UserId,
+        /// `last_picture_update`, which is the cache key.
+        version: Timestamp,
+    },
     /// Add or take back a reaction. `add` is decided by the window, which
     /// knows whether the signed-in user is already among them.
     React {
@@ -98,6 +106,11 @@ pub enum Event {
     Categories(CategoryList),
     /// A channel's member count, for its header.
     Stats(ChannelStats),
+    /// One person's avatar, as encoded image bytes.
+    Avatar {
+        user: UserId,
+        image: Vec<u8>,
+    },
     Users(Vec<User>),
     Posts {
         channel: ChannelId,

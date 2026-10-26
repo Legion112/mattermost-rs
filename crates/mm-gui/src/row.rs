@@ -36,6 +36,9 @@ mod imp {
         pub markup: Cell<bool>,
         /// Already grouped and ordered by `mm-core`; the row only draws them.
         pub reactions: RefCell<Vec<mm_core::ReactionSummary>>,
+        /// The author's face, once it has been fetched and decoded. `None`
+        /// draws initials instead, so a row never waits on the network.
+        pub avatar: RefCell<Option<gtk::gdk::Texture>>,
     }
 
     #[glib::object_subclass]
@@ -64,6 +67,7 @@ pub struct PostRowFields<'a> {
     pub system: bool,
     pub grouped: bool,
     pub reactions: Vec<mm_core::ReactionSummary>,
+    pub avatar: Option<gtk::gdk::Texture>,
 }
 
 impl PostRow {
@@ -80,6 +84,7 @@ impl PostRow {
         inner.system.set(fields.system);
         inner.grouped.set(fields.grouped);
         inner.reactions.replace(fields.reactions);
+        inner.avatar.replace(fields.avatar);
         this
     }
 
@@ -96,6 +101,11 @@ impl PostRow {
     #[must_use]
     pub fn is_separator(&self) -> bool {
         self.imp().separator.get()
+    }
+
+    #[must_use]
+    pub fn avatar(&self) -> Option<gtk::gdk::Texture> {
+        self.imp().avatar.borrow().clone()
     }
 
     #[must_use]

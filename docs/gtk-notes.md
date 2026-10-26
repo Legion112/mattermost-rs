@@ -157,3 +157,23 @@ screen's worth either way. **That measurement proves the common path and not
 the virtualization.** When backfill lands, measure this again with tens of
 thousands of rows in the model before trusting it; if it does fall over, the
 fix is to drop the alignment, not to work around it.
+
+## Two things about avatars that cost a screenshot each
+
+**A hidden widget still claims its height.** Grouped messages keep the
+avatar gutter so their text stays in line with the message that named the
+author. Hiding the avatar with `set_opacity(0.0)` leaves a 32-pixel-tall
+widget in the row, which pushed every line of a block a row apart and undid
+the grouping it was meant to preserve. `set_visible(false)` plus a left
+margin on the text column is what actually works.
+
+**Icon names are not checked at build time.** `gtk::Image::from_icon_name`
+with a name the theme does not have renders a broken-image placeholder and
+logs nothing at the default level. Mattermost's own `channel-public-symbolic`
+and `channel-private-symbolic` are not Adwaita names. Verified against
+`/usr/share/icons/Adwaita` before using one; a public channel is a `#` label
+because Adwaita has no hash icon worth approximating.
+
+`adw::Avatar` is the right widget for a face: it draws initials from a name
+when it has no image, so a row looks finished before the network answers,
+and it crops whatever it is given to a circle.
