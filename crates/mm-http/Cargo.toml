@@ -11,13 +11,19 @@ repository.workspace   = true
 [dependencies]
 mm-api = { path = "../mm-api" }
 
-# rustls rather than native-tls throughout: it drops a C dependency, keeps the
-# .deb's dependency list shorter, and is what makes a static musl build of
-# mm-headless possible for the Docker lab.
+# rustls rather than native-tls: it drops a C dependency, keeps the .deb's
+# dependency list shorter, and is what makes a static musl build of mm-headless
+# possible for the Docker lab.
+#
+# But with the SYSTEM trust store, not rustls's bundled webpki roots. A desktop
+# client has to trust what the desktop trusts: a self-hosted Mattermost behind
+# a corporate or internal CA is entirely normal, and bundled roots would reject
+# a certificate the user's browser accepts without complaint -- which looks
+# like the client being broken rather than a trust decision.
 futures-util      = { version = "0.3", default-features = false, features = ["sink"] }
-reqwest           = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
+reqwest           = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "multipart"] }
 tokio             = { version = "1", features = ["net", "time", "rt"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
 url               = "2"
 
 [lints]
