@@ -1,0 +1,7 @@
+# Pinned so the local toolchain cannot drift from CI's. llvm-tools-preview is
+# what cargo-llvm-cov needs; it is a stable component, which is why the 100%
+# coverage gate does not require nightly.
+[toolchain]
+channel    = "1.92.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]
+targets    = ["x86_64-unknown-linux-musl"]

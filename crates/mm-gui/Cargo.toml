@@ -1,0 +1,14 @@
+[package]
+name        = "mm-gui"
+description = "GTK4 and relm4 shell"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[dependencies]
+
+[lints]
+workspace = true

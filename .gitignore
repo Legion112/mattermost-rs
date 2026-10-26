@@ -1,0 +1,7 @@
+/target/
+/dist/
+*.profraw
+# insta writes these next to the snapshot it could not match.
+*.snap.new
+# Lab scratch: logs, container dumps, downloaded side-effect files.
+/target/lab/

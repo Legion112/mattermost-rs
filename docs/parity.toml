@@ -1,0 +1,93 @@
+# The parity matrix: what this client does, what it will do, and what it will
+# never do. `docs/parity.md` is generated from this file.
+#
+# A client with no webview has a ceiling that is not about effort: Playbooks,
+# Boards, the interactive Apps framework and every third-party plugin ship as
+# web app code served by the server. This file is where that ceiling is stated
+# out loud instead of being discovered.
+#
+# status:
+#   done                  implemented and verified against a live server
+#   partial               implemented, with the gap named in `notes`
+#   planned               in scope, not built yet
+#   wontfix               in scope for upstream, deliberately not for us
+#   blocked-no-webview    impossible without a renderer we do not have
+#
+# A `done` row whose endpoints are not all present in mm_api::ROUTES fails CI.
+# A `wontfix` or `blocked-no-webview` row without both `reason` and `fallback`
+# fails CI. `verified_against` empty means NOT YET CONFIRMED against a real
+# server, and the count of those is printed on every run.
+
+[[feature]]
+id       = "unread.channel_counts"
+area     = "unread"
+upstream = "server-api"
+status   = "partial"
+endpoints = [
+  "GET /api/v4/users/me/teams/{team_id}/channels/members",
+  "POST /api/v4/channels/members/{user_id}/view",
+]
+ws_events        = ["channel_member_updated", "multiple_channels_viewed"]
+verified_against = ""
+notes = """
+The arithmetic is implemented in mm-core::unread from the server's own SQL \
+(GetChannelUnread): total_msg_count - msg_count, the _root variants under CRT, \
+mention counts read off the member row, clamped at zero because \
+UpdateLastViewedAt assigns greatest(). What is NOT yet verified is the policy \
+at the edges: a muted channel holding a direct mention, DM channels, and the \
+interaction with ignore_channel_mentions. That policy lives in the webapp's \
+TypeScript selectors, so it needs a recorded trace against a live server \
+rather than more reading."""
+
+[[feature]]
+id       = "calls"
+area     = "desktop"
+upstream = "webapp"
+status   = "blocked-no-webview"
+reason   = "Ships as webapp code and WebRTC; requires a renderer we do not have."
+fallback = "OpenInBrowser({server}/{team}/channels/{channel})"
+
+[[feature]]
+id       = "plugins"
+area     = "desktop"
+upstream = "webapp"
+status   = "blocked-no-webview"
+reason   = "Plugin UI is server-served web app code, by design."
+fallback = "OpenInBrowser({server}/{team}/channels/{channel})"
+
+[[feature]]
+id       = "boards"
+area     = "desktop"
+upstream = "webapp"
+status   = "blocked-no-webview"
+reason   = "Focalboard ships as a webapp plugin."
+fallback = "OpenInBrowser({server}/boards)"
+
+[[feature]]
+id       = "playbooks"
+area     = "desktop"
+upstream = "webapp"
+status   = "blocked-no-webview"
+reason   = "Playbooks ships as a webapp plugin."
+fallback = "OpenInBrowser({server}/playbooks)"
+
+[[feature]]
+id       = "apps_framework"
+area     = "posts"
+upstream = "webapp"
+status   = "blocked-no-webview"
+reason   = "Interactive message buttons and modals are rendered by the web app."
+fallback = "OpenInBrowser permalink to the post"
+
+[[feature]]
+id       = "desktop.tray"
+area     = "desktop"
+upstream = "desktop"
+status   = "planned"
+verified_against = "GNOME Shell 46.0 / Ubuntu 24.04 / X11"
+notes = """
+De-risked ahead of P3: ubuntu-appindicators is enabled by default, the \
+StatusNotifierWatcher is present with a registered host, and a real ksni item \
+registers successfully. See docs/gtk-notes.md. Depends on that GNOME \
+extension, so the implementation must detect an absent watcher and say so \
+rather than publishing into the void."""

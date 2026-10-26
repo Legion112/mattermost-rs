@@ -1,0 +1,95 @@
+# GTK findings
+
+Measured on this machine, not inferred: Ubuntu 24.04, X11, GNOME Shell 46.0,
+GTK **4.14.5** and libadwaita **1.5.0** from apt (Homebrew's 4.22.4 excluded
+via `PKG_CONFIG_LIBDIR` — see `scripts/doctor.sh`).
+
+These were the two risks the plan called most likely to blow the schedule.
+Both are retired. The spike sources are throwaway and live outside the repo.
+
+## The tray works, with a caveat worth stating
+
+The plan assumed this might be undeliverable, because GNOME dropped
+StatusNotifierItem support. On **Ubuntu** GNOME it is fine:
+
+- `ubuntu-appindicators@ubuntu.com` is installed **and enabled by default**.
+- `org.kde.StatusNotifierWatcher` is present on the session bus and
+  `IsStatusNotifierHostRegistered` is `true`.
+- A real `ksni` 0.3.7 item registered successfully and appeared in the
+  watcher's `RegisteredStatusNotifierItems`, alongside other applications
+  already using it.
+
+So **tray stays in v1 parity.** The caveat: it depends on that extension. On
+vanilla GNOME, or if the user disables it, the watcher is simply absent.
+`mm-desktop-xdg` must therefore **check for the watcher and degrade visibly**
+— if there is no host, say so once rather than publishing an item into the
+void and leaving the user wondering where the icon went.
+
+Note for the dependency invariant: `ksni` pulls in **tokio and zbus 5.19**, so
+it belongs in `mm-desktop-xdg` (ungated). `cargo xtask check-deps` rejects it
+in `mm-desktop`, which is correct — the tray *model* is pure, the registration
+is not. (`ksni` does offer a `blocking` feature if avoiding tokio ever
+matters; `mm-http` brings tokio anyway, so it does not today.)
+
+## `gtk::ListView` handles a chat scrollback correctly
+
+Tested with **variable-height rows** (1–4 wrapped lines, cycling), 400 rows,
+a 520×420 window. Uniform rows let ListView take a fast path that hides the
+problem, so varying them is the whole point.
+
+| Question | Result |
+|---|---|
+| Prepend 50 rows **above** the viewport | **Viewport preserved.** Δvalue 3764px vs Δupper 3728px — they track within less than one row's height. |
+| Append while sitting at the bottom | The newest row stays *at least partially* visible, but see below. |
+| Append while **scrolled up** reading history | **Zero drift.** value 9312 → 9312 while upper grew 17800 → 18000. |
+
+**What this means for `PostList`:**
+
+1. **Backfilling older messages needs no scroll-anchor fixup.** This was the
+   plan's single riskiest GTK unknown — the fear was having to capture the top
+   visible row's id and y-offset before a splice and restore it in an idle
+   callback. Not needed: ListView already does the right thing.
+2. **There is no yank bug to defend against.** ListView never auto-scrolls on
+   append, so a user reading history is left alone for free.
+3. **Stick-to-bottom must therefore be implemented explicitly.** Because (2)
+   holds, "follow new messages when I am at the bottom" does not come for
+   free. `list.scroll_to(last, ListScrollFlags::empty(), None)` re-pins
+   reliably. The "newest row still visible" result above is weaker than it
+   looks — the row was only *overlapping* the viewport by a few pixels, in the
+   36px of slack that happened to be there. Treat it as "do not rely on it".
+
+### The trap: `vadjustment.upper()` is an estimate, not a measurement
+
+This is the finding worth the most. With variable-height rows, ListView
+*estimates* the total height and revises it as rows are realized. Observed
+within single three-second runs:
+
+```
+17818 -> 21346                    (converged after scroll_to, then stable)
+37350 -> 46674 -> 37474           (a 20% revision, in both directions)
+```
+
+So **never compute "am I at the bottom?" as `value ≈ upper - page_size`.** It
+is arithmetic against a moving number, and it will be flaky in exactly the way
+that gets a test muted rather than fixed. My own first attempt at the
+stick-to-bottom spike did this and produced a confident, wrong answer.
+
+Ask a stable question instead: is the last row realized and inside the
+viewport (walk `ListView`'s realized children and use `compute_bounds`), or
+simply track the user's own scroll intent and use `scroll_to`.
+
+A second-order consequence: `upper` only converges once rows near the
+viewport have been realized, so any measurement taken immediately after a
+splice or a `scroll_to` is premature. Wait a tick.
+
+## Still untested
+
+- Prepending while at the **very top** (offset 0), where there is no room
+  above to absorb the insertion.
+- 100k rows. These spikes used 400; the estimate revisions above will be
+  proportionally larger, which matters for the `upper` trap but not for the
+  viewport-preservation result.
+- `TextView`-based rows. All three spikes used `gtk::Label`, which is the fast
+  path `mm-md::is_plain()` will emit. Rows containing a `TextView` with inline
+  custom emoji are heavier and need their own measurement before P2.
+- Wayland. X11 only so far.

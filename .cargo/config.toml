@@ -1,0 +1,13 @@
+# Homebrew installs 403 .pc files into /home/linuxbrew/.linuxbrew/lib/pkgconfig
+# and they shadow the system ones: pkg-config there reports GTK 4.22.4 and
+# libadwaita 1.9.3, while the apt packages this machine actually runs are GTK
+# 4.14.5 and libadwaita 1.5.0 -- which is also what a GitHub ubuntu-24.04
+# runner has. Building against Homebrew's headers produces a binary that links
+# /home/linuxbrew/.linuxbrew/lib/libgtk-4.so and matches neither CI nor the
+# .deb. Forcing PKG_CONFIG_LIBDIR makes pkg-config ignore Homebrew entirely.
+#
+# The Makefile exports the same values, so `make` and a bare `cargo build`
+# behave identically. `make doctor` asserts the result.
+[env]
+PKG_CONFIG_LIBDIR = "/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig"
+PKG_CONFIG_PATH   = ""

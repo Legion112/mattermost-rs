@@ -1,0 +1,61 @@
+# mattermost-rs — a native Linux Mattermost client.
+#
+# The workspace is split along one axis that matters more than any other: which
+# crates are inside the 100% line-coverage gate. A gated crate is pure logic --
+# no sockets, no GTK, no filesystem except through a trait. That is what makes
+# an honest 100% reachable, and `cargo xtask check-deps` enforces it.
+#
+#   GATED    mm-api mm-core mm-md mm-config mm-desktop
+#   ungated  mm-types mm-http mm-desktop-xdg mm-gui mm-headless mm-lab
+#            xtask mattermost-rs
+#
+# mm-types is ungated on purpose: serde derives generate per-field branches
+# attributed to the `#[derive]` line, so a 100% gate there would mean
+# hand-writing malformed JSON for every field of every type. It is covered by a
+# stronger control instead -- every public type needs a captured-from-server
+# golden fixture, and `cargo xtask fixtures` fails CI if one is missing.
+
+[workspace]
+resolver = "3"
+members  = ["crates/*", "xtask"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.92"
+license      = "MIT"
+authors      = ["legion112 <ageev.maks2014@gmail.com>"]
+repository   = "https://github.com/Legion112/mattermost-rs"
+
+[workspace.lints.rust]
+unsafe_code                   = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub               = "warn"
+
+[workspace.lints.clippy]
+# priority = -1 so the specific allows below win over the group.
+pedantic         = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc      = "allow"
+missing_panics_doc      = "allow"
+
+[package]
+name        = "mattermost-rs"
+description = "Native Linux Mattermost client"
+readme      = "README.md"
+keywords    = ["mattermost", "chat", "gtk4", "linux"]
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+authors.workspace      = true
+repository.workspace   = true
+
+[[bin]]
+name = "mattermost-rs"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
