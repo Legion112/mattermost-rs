@@ -8,6 +8,27 @@
 
 use gtk::glib;
 
+/// One Slack-style attachment, already rendered to what the row draws.
+///
+/// The markup is produced once here rather than in the bind callback,
+/// because bind runs on every scroll and parsing markdown there would make
+/// a channel of alerts crawl.
+#[derive(Debug, Clone, Default)]
+pub struct AttachmentView {
+    /// The bar down the left, when the attachment states a colour.
+    pub rgb: Option<(u8, u8, u8)>,
+    pub pretext: String,
+    pub title: String,
+    /// Where the title points, if anywhere.
+    pub title_link: String,
+    /// Pango markup for the body.
+    pub text: String,
+    /// Whether `text` is markup rather than literal text.
+    pub markup: bool,
+    pub fields: Vec<(String, String)>,
+    pub footer: String,
+}
+
 /// One image attached to a message, at the size it will be drawn.
 ///
 /// The texture is optional: a file whose thumbnail could not be decoded and
@@ -41,9 +62,8 @@ mod imp {
         /// The same author is still talking, so the author line is redundant
         /// and this row draws tight under the one above it.
         pub grouped: Cell<bool>,
-        /// Join/leave notices and the like, which Mattermost renders muted
-        /// and without an author rather than as somebody speaking.
-        pub system: Cell<bool>,
+        /// Who the row is from.
+        pub voice: Cell<super::Voice>,
         /// Whether `body` is Pango markup rather than literal text. Most
         /// messages are plain, and for those the markup round-trip is skipped
         /// entirely -- that fast path is where the rendering cost goes in a
@@ -59,6 +79,8 @@ mod imp {
         pub replies: Cell<i64>,
         /// Images attached to the message, already sized.
         pub images: RefCell<Vec<super::Attachment>>,
+        /// Webhook attachments, already rendered.
+        pub cards: RefCell<Vec<super::AttachmentView>>,
     }
 
     #[glib::object_subclass]
@@ -83,13 +105,40 @@ pub struct PostRowFields<'a> {
     pub body: &'a str,
     pub time: &'a str,
     pub meta: &'a str,
-    pub markup: bool,
-    pub system: bool,
-    pub grouped: bool,
+    pub flags: PostRowFlags,
     pub reactions: Vec<mm_core::ReactionSummary>,
     pub avatar: Option<gtk::gdk::Texture>,
     pub replies: i64,
     pub images: Vec<Attachment>,
+    pub cards: Vec<AttachmentView>,
+}
+
+/// Who a row is from.
+///
+/// One value rather than a `system` and a `bot` flag beside each other:
+/// they were never independent — a join notice is not from a bot and a bot's
+/// alert is not a system message — and a pair of booleans let both be true
+/// at once, which has no meaning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Voice {
+    /// Somebody speaking.
+    #[default]
+    Person,
+    /// A webhook or a bot account.
+    Bot,
+    /// A join/leave notice and the like, which Mattermost renders muted and
+    /// without an author.
+    System,
+}
+
+/// The rest of the yes-or-no facts about a row.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PostRowFlags {
+    /// Whether `body` is Pango markup rather than literal text.
+    pub markup: bool,
+    /// The same author is still talking.
+    pub grouped: bool,
+    pub voice: Voice,
 }
 
 impl PostRow {
@@ -102,13 +151,14 @@ impl PostRow {
         inner.body.replace(fields.body.to_owned());
         inner.time.replace(fields.time.to_owned());
         inner.meta.replace(fields.meta.to_owned());
-        inner.markup.set(fields.markup);
-        inner.system.set(fields.system);
-        inner.grouped.set(fields.grouped);
+        inner.markup.set(fields.flags.markup);
+        inner.voice.set(fields.flags.voice);
+        inner.grouped.set(fields.flags.grouped);
         inner.reactions.replace(fields.reactions);
         inner.avatar.replace(fields.avatar);
         inner.replies.set(fields.replies);
         inner.images.replace(fields.images);
+        inner.cards.replace(fields.cards);
         this
     }
 
@@ -138,6 +188,16 @@ impl PostRow {
     #[must_use]
     pub fn is_separator(&self) -> bool {
         self.imp().separator.get()
+    }
+
+    #[must_use]
+    pub fn cards(&self) -> Vec<AttachmentView> {
+        self.imp().cards.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn is_bot(&self) -> bool {
+        self.imp().voice.get() == Voice::Bot
     }
 
     #[must_use]
@@ -197,6 +257,6 @@ impl PostRow {
 
     #[must_use]
     pub fn is_system(&self) -> bool {
-        self.imp().system.get()
+        self.imp().voice.get() == Voice::System
     }
 }

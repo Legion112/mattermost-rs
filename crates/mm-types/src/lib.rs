@@ -23,6 +23,7 @@
 //! base32 string, so passing a `ChannelId` where a `PostId` belongs type-checks
 //! unless the types say otherwise.
 
+mod attachment;
 mod category;
 mod channel;
 mod ids;
@@ -33,6 +34,7 @@ mod time;
 mod user;
 pub mod wire;
 
+pub use attachment::{AttachmentField, MessageAttachment};
 pub use category::{CategoryKind, CategoryList, CategorySorting, ChannelCategory};
 pub use channel::{
     Channel, ChannelMember, ChannelStats, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION,

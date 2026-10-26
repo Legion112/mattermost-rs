@@ -1,6 +1,6 @@
 //! Posts and the paged list the server returns them in.
 
-use crate::{ChannelId, FileId, PostId, Reaction, Timestamp, UserId};
+use crate::{ChannelId, FileId, MessageAttachment, PostId, Reaction, Timestamp, UserId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -152,6 +152,48 @@ impl Post {
                 ..FileRef::default()
             })
             .collect()
+    }
+
+    /// The Slack-compatible attachments in `props`.
+    ///
+    /// A webhook post carries its whole content here and leaves `message`
+    /// empty, so this is not an extra: for those posts it is the message.
+    #[must_use]
+    pub fn message_attachments(&self) -> Vec<MessageAttachment> {
+        let Some(raw) = self.props.get("attachments") else {
+            return Vec::new();
+        };
+        serde_json::from_value::<Vec<MessageAttachment>>(raw.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| !a.is_empty())
+            .collect()
+    }
+
+    /// The name a webhook asked to post under, which is not its account's.
+    ///
+    /// An alerting integration posts as one bot account under many names --
+    /// "Alertmanager", "Deploys", "CI" -- and showing the account instead
+    /// labels every alert in the organisation with the same wrong word.
+    #[must_use]
+    pub fn override_username(&self) -> Option<&str> {
+        self.props
+            .get("override_username")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+    }
+
+    /// Whether this came from an incoming webhook rather than a person.
+    ///
+    /// The flag is the **string** `"true"`, like most of this API's
+    /// booleans; read as a JSON boolean it is always false.
+    #[must_use]
+    pub fn is_from_webhook(&self) -> bool {
+        self.props
+            .get("from_webhook")
+            .and_then(serde_json::Value::as_str)
+            == Some("true")
     }
 
     /// The reactions the server attached to this post, or `None` when the
@@ -540,5 +582,93 @@ mod file_size_tests {
         assert!(file.has_preview_image);
         assert_eq!(file.mini_preview, "/9j/2wCEAA==");
         assert_eq!(file.fitted(400, 300), Some((240, 120)));
+    }
+}
+
+#[cfg(test)]
+mod webhook_tests {
+    use super::*;
+
+    /// Captured from a real alerting webhook on 12.0.1, with the alert text
+    /// replaced. The shape is the point: `message` is empty, `type` is
+    /// `slack_attachment`, and everything is in `props`.
+    const ALERT: &str = r#"{
+      "id":"p1","message":"","type":"slack_attachment",
+      "props":{
+        "from_webhook":"true",
+        "override_username":"Alertmanager",
+        "override_icon_url":"https://example.invalid/icon.png",
+        "webhook_display_name":"techalerts",
+        "attachments":[{"id":0,"color":"warning","fallback":"a summary",
+          "title":"[FIRING:1] SomethingBroke","title_link":"https://example.invalid/a",
+          "text":"Severity: Warning"}]
+      }}"#;
+
+    /// The bug this exists for: a post whose whole content is in `props`
+    /// drew as an author and a timestamp with nothing under them.
+    #[test]
+    fn a_webhook_post_carries_its_content_in_attachments() {
+        let post: Post = serde_json::from_str(ALERT).expect("parses");
+        assert!(post.message.is_empty(), "the message really is empty");
+
+        let attachments = post.message_attachments();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].title, "[FIRING:1] SomethingBroke");
+        assert_eq!(attachments[0].text, "Severity: Warning");
+        assert_eq!(attachments[0].rgb(), Some((0xff, 0xbc, 0x1f)));
+    }
+
+    /// One bot account posts under many names, so the account's username is
+    /// the wrong label for every one of them.
+    #[test]
+    fn the_name_a_webhook_asked_for_wins_over_its_account() {
+        let post: Post = serde_json::from_str(ALERT).expect("parses");
+        assert_eq!(post.override_username(), Some("Alertmanager"));
+        assert!(post.is_from_webhook());
+    }
+
+    /// `from_webhook` is the string `"true"`, like most of this API's
+    /// booleans. Read as a JSON boolean it is always false.
+    #[test]
+    fn the_webhook_flag_is_a_string_not_a_boolean() {
+        let as_boolean: Post =
+            serde_json::from_str(r#"{"id":"p1","props":{"from_webhook":true}}"#).expect("parses");
+        assert!(
+            !as_boolean.is_from_webhook(),
+            "a real boolean is not what the server sends"
+        );
+        let as_string: Post =
+            serde_json::from_str(r#"{"id":"p1","props":{"from_webhook":"true"}}"#).expect("parses");
+        assert!(as_string.is_from_webhook());
+    }
+
+    /// An ordinary message has neither, and must not grow a BOT tag.
+    #[test]
+    fn an_ordinary_post_has_no_override_and_no_attachments() {
+        let post: Post = serde_json::from_str(r#"{"id":"p1","message":"hello"}"#).expect("parses");
+        assert_eq!(post.override_username(), None);
+        assert!(!post.is_from_webhook());
+        assert!(post.message_attachments().is_empty());
+    }
+
+    /// Malformed or empty attachments must not take the message down with
+    /// them: whatever else is on the post still has to render.
+    #[test]
+    fn unusable_attachments_are_dropped_rather_than_failing() {
+        let nonsense: Post =
+            serde_json::from_str(r#"{"id":"p1","props":{"attachments":"not a list"}}"#)
+                .expect("parses");
+        assert!(nonsense.message_attachments().is_empty());
+
+        // An attachment with only a colour would draw as a bare coloured bar.
+        let hollow: Post =
+            serde_json::from_str(r#"{"id":"p1","props":{"attachments":[{"color":"good"}]}}"#)
+                .expect("parses");
+        assert!(hollow.message_attachments().is_empty());
+
+        // A blank override is not a name.
+        let blank: Post = serde_json::from_str(r#"{"id":"p1","props":{"override_username":"  "}}"#)
+            .expect("parses");
+        assert_eq!(blank.override_username(), None);
     }
 }

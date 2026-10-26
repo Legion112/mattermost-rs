@@ -412,3 +412,36 @@ original, `/thumbnail` a 120×60 copy, and `/preview` a 240×120 one. The
 thumbnail is too small to read, so a message row wants `/preview` when
 `has_preview_image` says the server made one, and the file itself when it
 did not.
+
+## Webhook posts, and the `null` wart underneath them
+
+An incoming webhook posts with `type: "slack_attachment"`, an **empty
+`message`**, and its whole content in `props.attachments` — the
+Slack-compatible format. A client that renders only `message` draws an alert
+channel as rows with an author, a timestamp and nothing else.
+
+Alongside the attachments, `props` carries `override_username` (the name the
+webhook asked to post under, which is not its account's), `override_icon_url`,
+`webhook_display_name`, and `from_webhook` — the **string** `"true"`, like
+most of this API's booleans. One bot account posts as "Alertmanager",
+"Deploys" and "CI", so the account's username is the wrong label for all of
+them. The overrides are only honoured when the server has
+`EnablePostUsernameOverride` and `EnablePostIconOverride` on; both are off by
+default.
+
+`color` is a hex triple **or one of Slack's three names** — `good`,
+`warning`, `danger` — and a real alerting integration sends the names.
+
+### The wart
+
+**The server serialises an attachment's unset fields as `null`, not by
+omitting them**: `"fields": null`, `"ts": null`, verified on 12.0.1.
+`#[serde(default)]` does not cover that. It covers a *missing* field; a
+field that is present and null still fails, and the failure takes the whole
+surrounding structure down with it. One `"fields": null` made an entire
+attachment list parse as empty, so alerts rendered as blank rows — and
+silently, because the parse error was swallowed by a fallback to the default.
+
+`mm_types::wire::nullable` is the deserializer for this, and every field of
+an attachment uses it. Any other type that reads a `props` blob should
+expect the same thing.

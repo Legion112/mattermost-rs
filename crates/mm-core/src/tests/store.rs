@@ -1411,3 +1411,42 @@ fn usernames_never_need_disambiguating() {
         .collect();
     assert_eq!(names, ["alex.m", "alex.t"]);
 }
+
+/// A webhook posts under a name of its own choosing, and that is what
+/// belongs on the author line: one bot account sends alerts as
+/// "Alertmanager", deploys as "Deploys" and builds as "CI".
+#[test]
+fn a_webhooks_chosen_name_wins_over_its_account() {
+    let mut store = store();
+    store.apply_users(vec![person("u-bot", "turing", "")]);
+
+    let mut alert = post("p1", "c1", 10);
+    alert.user_id = UserId::new("u-bot");
+    alert.props = serde_json::json!({
+        "from_webhook": "true",
+        "override_username": "Alertmanager",
+    });
+    assert_eq!(
+        store.post_author(&alert),
+        ("Alertmanager".to_owned(), true),
+        "the account is `turing`, which is not what the alert is from"
+    );
+}
+
+/// A bot account posting as itself is still a bot, and an ordinary person
+/// is not.
+#[test]
+fn a_bot_account_is_marked_and_a_person_is_not() {
+    let mut store = store();
+    let mut robot = person("u-bot", "buildbot", "");
+    robot.is_bot = true;
+    store.apply_users(vec![robot, person("u-her", "jane", "")]);
+
+    let mut from_bot = post("p1", "c1", 10);
+    from_bot.user_id = UserId::new("u-bot");
+    assert_eq!(store.post_author(&from_bot), ("buildbot".to_owned(), true));
+
+    let mut from_person = post("p2", "c1", 20);
+    from_person.user_id = UserId::new("u-her");
+    assert_eq!(store.post_author(&from_person), ("jane".to_owned(), false));
+}

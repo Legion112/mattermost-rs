@@ -48,6 +48,22 @@ where
     })
 }
 
+/// Read a field that the server may send as `null`, as its default.
+///
+/// `#[serde(default)]` covers a **missing** field and nothing else: a field
+/// that is present and null still fails, and the failure takes the whole
+/// surrounding structure with it. Mattermost serialises unset fields of an
+/// attachment as `null` rather than omitting them — `"fields": null`,
+/// `"ts": null` — so a webhook post parsed to nothing at all and alert
+/// channels rendered as empty rows.
+pub fn nullable<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

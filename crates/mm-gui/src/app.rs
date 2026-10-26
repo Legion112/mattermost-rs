@@ -766,7 +766,12 @@ fn setup_post_row(item: &gtk::ListItem) {
         .xalign(0.0)
         .css_classes(["dim-label", "caption"])
         .build();
+    let bot = gtk::Label::builder()
+        .label("BOT")
+        .css_classes(["caption-heading", "dim-label"])
+        .build();
     header.append(&author);
+    header.append(&bot);
     header.append(&time);
     // A non-editable TextView rather than a Label: selection across the
     // whole message, and the inline paintables custom emoji will need.
@@ -804,8 +809,14 @@ fn setup_post_row(item: &gtk::ListItem) {
     images.set_margin_top(4);
     images.set_halign(gtk::Align::Start);
 
+    // Webhook attachments. A channel of alerts is nothing but these, so
+    // they sit directly under the body where a message would be.
+    let cards = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    cards.set_margin_top(2);
+
     main.append(&header);
     main.append(&body);
+    main.append(&cards);
     main.append(&images);
     main.append(&meta);
     main.append(&reactions);
@@ -851,6 +862,113 @@ fn bind_separator_row(day: &gtk::Box, line: &gtk::Box, data: &PostRow) {
 
 /// Fill a row's image strip. Rebuilt rather than recycled: a reused row can
 /// go from no images to three.
+/// Put the author's name on a row, and mark it when a bot wrote it.
+fn bind_author(author: &gtk::Label, data: &PostRow, system: bool) {
+    // A join/leave notice is not somebody speaking, so it gets no author.
+    let name = data.author();
+    author.set_text(if system { "" } else { name.as_str() });
+    if let Some(tag) = author.next_sibling() {
+        tag.set_visible(!system && data.is_bot());
+    }
+}
+
+/// Fill a row's webhook attachments.
+///
+/// Each one is a coloured bar beside a column of text, which is how every
+/// other Mattermost client draws them and how an alert channel is read at a
+/// glance: the colour is the severity.
+fn bind_cards(cards: &gtk::Box, data: &PostRow) {
+    while let Some(old) = cards.first_child() {
+        cards.remove(&old);
+    }
+    let views = data.cards();
+    cards.set_visible(!views.is_empty());
+
+    for view in views {
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        column.set_margin_start(10);
+        column.set_hexpand(true);
+
+        if !view.pretext.is_empty() {
+            column.append(&card_label(&view.pretext, false, &["dim-label"]));
+        }
+        if !view.title.is_empty() {
+            // A linked title is a link; an unlinked one is just bold. Pango
+            // markup is how a Label carries a link at all, and the title is
+            // literal text, so it has to be escaped on the way in.
+            if view.title_link.is_empty() {
+                column.append(&card_label(&view.title, false, &["heading"]));
+            } else {
+                let markup = format!(
+                    "<a href=\"{}\">{}</a>",
+                    mm_md::escape(&view.title_link),
+                    mm_md::escape(&view.title)
+                );
+                column.append(&card_label(&markup, true, &["heading"]));
+            }
+        }
+        if !view.text.is_empty() {
+            column.append(&card_label(&view.text, view.markup, &[]));
+        }
+        for (title, value) in &view.fields {
+            if !title.is_empty() {
+                column.append(&card_label(title, false, &["caption-heading"]));
+            }
+            if !value.is_empty() {
+                column.append(&card_label(value, false, &[]));
+            }
+        }
+        if !view.footer.is_empty() {
+            column.append(&card_label(&view.footer, false, &["dim-label", "caption"]));
+        }
+
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        if let Some((r, g, b)) = view.rgb {
+            card.append(&colour_bar(r, g, b));
+        }
+        card.append(&column);
+        cards.append(&card);
+    }
+}
+
+/// One line inside an attachment.
+fn card_label(text: &str, markup: bool, classes: &[&str]) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .selectable(true)
+        .css_classes(classes.to_vec())
+        .build();
+    // set_markup on text that is not markup makes GTK log and drop it.
+    if markup {
+        label.set_markup(text);
+    } else {
+        label.set_text(text);
+    }
+    label
+}
+
+/// The severity bar down an attachment's left-hand side.
+///
+/// Drawn rather than styled: the colour comes from the payload, and a CSS
+/// class per arbitrary colour would mean generating stylesheets at runtime.
+fn colour_bar(r: u8, g: u8, b: u8) -> gtk::DrawingArea {
+    let bar = gtk::DrawingArea::new();
+    bar.set_width_request(3);
+    bar.set_draw_func(move |_, context, width, height| {
+        context.set_source_rgb(
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0,
+        );
+        context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+        // A failed fill is a bar that does not draw, which is cosmetic; it
+        // is not worth taking the message down for.
+        let _ = context.fill();
+    });
+    bar
+}
+
 fn bind_images(images: &gtk::Box, data: &PostRow) {
     while let Some(old) = images.first_child() {
         images.remove(&old);
@@ -902,7 +1020,10 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
         return;
     };
-    let Some(images) = body.next_sibling().and_downcast::<gtk::Box>() else {
+    let Some(cards) = body.next_sibling().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(images) = cards.next_sibling().and_downcast::<gtk::Box>() else {
         return;
     };
     let Some(meta) = images.next_sibling().and_downcast::<gtk::Label>() else {
@@ -942,8 +1063,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
         // A join/leave notice is not somebody speaking, so it gets no
         // author line.
-        let name = data.author();
-        author.set_text(if system { "" } else { name.as_str() });
+        bind_author(&author, &data, system);
     }
     if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
         time.set_text(&data.time());
@@ -963,6 +1083,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     }
     body.set_visible(!data.body().is_empty());
 
+    bind_cards(&cards, &data);
     bind_images(&images, &data);
 
     let extra = data.meta();
@@ -1009,6 +1130,33 @@ const AVATAR_GUTTER: i32 = 32 + 8;
 /// screenshot, short enough that one photo does not fill the window.
 const IMAGE_MAX_WIDTH: i64 = 420;
 const IMAGE_MAX_HEIGHT: i64 = 320;
+
+/// Turn one Slack-style attachment into what the row draws.
+///
+/// The markdown is rendered here, once per refresh, rather than in the bind
+/// callback -- bind runs on every scroll, and a channel of alerts would
+/// re-parse every one of them each time it moved.
+fn render_card(attachment: &mm_types::MessageAttachment) -> crate::row::AttachmentView {
+    let doc = mm_md::parse(&attachment.text);
+    let (text, markup) = doc.plain_text().map_or_else(
+        || (render_markup(&doc), true),
+        |plain| (plain.to_owned(), false),
+    );
+    crate::row::AttachmentView {
+        rgb: attachment.rgb(),
+        pretext: attachment.pretext.clone(),
+        title: attachment.title.clone(),
+        title_link: attachment.title_link.clone(),
+        text,
+        markup,
+        fields: attachment
+            .fields
+            .iter()
+            .map(|f| (f.title.clone(), f.text()))
+            .collect(),
+        footer: attachment.footer.clone(),
+    }
+}
 
 /// Decode the base64 JPEG thumbnail the server puts in a file's metadata.
 ///
@@ -1408,9 +1556,17 @@ impl Ui {
     /// Shared so the thread pane and the channel cannot drift into
     /// rendering the same message two different ways.
     fn row_for(&self, store: &Store, post: &mm_types::Post, grouped: bool) -> PostRow {
-        // Ask for this author's face once, the first time they appear.
-        let avatar = self.avatars.borrow().get(&post.user_id).cloned();
+        // A webhook posting under its own name must not borrow the face of
+        // the account it posts through: an alert from "Alertmanager" showing
+        // your own photograph is worse than showing an initial.
+        let overridden = post.override_username().is_some();
+        let avatar = if overridden {
+            None
+        } else {
+            self.avatars.borrow().get(&post.user_id).cloned()
+        };
         if avatar.is_none()
+            && !overridden
             && !post.user_id.as_str().is_empty()
             && self.asked.borrow_mut().insert(post.user_id.clone())
         {
@@ -1424,7 +1580,7 @@ impl Ui {
                 })
                 .ok();
         }
-        let author = store.user_label(&post.user_id);
+        let (author, bot) = store.post_author(post);
         let suffix = if post.is_edited() { " (edited)" } else { "" };
         let doc = mm_md::parse(&post.message);
         // Most messages are a single plain paragraph, and for those the
@@ -1443,12 +1599,21 @@ impl Ui {
             body: &body,
             time: &clock_time(post.create_at.millis()),
             meta: &describe_extras(post),
-            markup,
-            system: post.is_system(),
-            grouped,
+            flags: crate::row::PostRowFlags {
+                markup,
+                grouped,
+                voice: if post.is_system() {
+                    crate::row::Voice::System
+                } else if bot {
+                    crate::row::Voice::Bot
+                } else {
+                    crate::row::Voice::Person
+                },
+            },
             reactions: store.reactions_for(&post.id),
             avatar,
             images,
+            cards: post.message_attachments().iter().map(render_card).collect(),
             // A reply never opens a thread of its own: in Mattermost the
             // whole conversation hangs off the root, and offering "2
             // replies" on a reply would open its parent under a different

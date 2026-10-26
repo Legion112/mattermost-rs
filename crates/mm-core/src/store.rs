@@ -179,6 +179,21 @@ impl Store {
             .map_or_else(|| user.to_string(), |u| u.name_as(self.name_format))
     }
 
+    /// What to put on a post's author line, and whether to mark it a bot.
+    ///
+    /// A webhook's chosen name wins over its account's: one bot account
+    /// posts as "Alertmanager", "Deploys" and "CI", and showing the account
+    /// labels every alert in the organisation with the same wrong word.
+    #[must_use]
+    pub fn post_author(&self, post: &Post) -> (String, bool) {
+        if let Some(name) = post.override_username() {
+            return (name.to_owned(), true);
+        }
+        let is_bot =
+            post.is_from_webhook() || self.users.get(&post.user_id).is_some_and(|u| u.is_bot);
+        (self.user_label(&post.user_id), is_bot)
+    }
+
     /// When the reader last viewed a channel, as the server knows it.
     ///
     /// The window captures this the moment a channel is opened, before
