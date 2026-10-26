@@ -141,28 +141,27 @@ xwininfo -root -tree | grep -F "\"mattermost-rs [$MMRS_APP_ID]\"" | awk '{print 
 `xdotool` and `wmctrl` are not installed on this machine; `import -window <id>`
 from ImageMagick is.
 
-## Bottom alignment, and the measurement it still owes
+## Bottom alignment: tried twice, dropped
 
-`ListView` has `valign: End`, so a channel with four messages rests them on
-the composer instead of stranding them at the top of an empty pane. That is
-what the Electron client does and the difference is immediately visible.
+A channel with four messages in it looks better resting them on the
+composer than stranding them at the top of an empty pane, which is what the
+Electron client does. `valign: End` on the `ListView` achieves that, and it
+was shipped with a caveat: the alignment makes `ListView` ask for its
+**natural** height rather than taking the viewport's, and the viewport's
+height is what virtualization depends on.
 
-It carries a risk worth writing down. `ListView` only realizes the rows in
-view, and that depends on `ScrolledWindow` handing it the *viewport* height.
-`valign: End` asks for its natural height instead. Measured with a 1200-post
-channel in the lab the window still opened instantly and landed on the newest
-message — but the store only ever held the newest page of 60, because
-scrollback paging is not implemented yet, so the model never grew past one
-screen's worth either way. **That measurement proved the common path and not
-the virtualization.**
+The caveat turned out to understate it. For a virtualised list the natural
+height is an *estimate*, and when the estimate exceeds the real content the
+surplus has to go somewhere — bottom-aligned, it goes above the first
+message. In a real channel that was nearly three hundred pixels of blank at
+the top, which survived scrolling and looked like a rendering failure.
 
-Backfill has since landed, so a channel's model now grows without limit as
-the reader scrolls up. Rather than leave the question open, the alignment is
-applied **only while the model holds fewer than fifty rows** — past any
-plausible window height, so beyond that there is no empty space to take up
-and nothing to gain by risking it. The visible benefit is kept for the short
-channels it was for, and large channels get the plain `Fill` that ListView
-is designed around.
+So: **no bottom alignment.** A short channel's messages sit at the top with
+space below them, which is a cosmetic difference from the Electron client.
+A blank gap above the first message is not cosmetic. If this is ever worth
+revisiting it needs a measured content height — not `valign` — and the
+measurement has to come from realized rows, which is the same trap as
+`vadjustment.upper()` above.
 
 ## Two things about avatars that cost a screenshot each
 

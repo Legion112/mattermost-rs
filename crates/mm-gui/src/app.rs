@@ -1329,10 +1329,6 @@ fn decode_mini_preview(encoded: &str) -> Option<gdk::Texture> {
 /// How much of the window a thread takes when it is open.
 const THREAD_PANE_WIDTH: i32 = 380;
 
-/// Past this many rows the post list stops bottom-aligning. See
-/// `refresh_posts` for why.
-const BOTTOM_ALIGN_BELOW: u32 = 50;
-
 /// A category heading: not selectable, so arrow keys and the first-channel
 /// fallback walk straight past it.
 fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
@@ -1425,7 +1421,6 @@ fn build_post_list(
         .model(&gtk::NoSelection::new(Some(posts.clone())))
         .factory(&factory)
         .single_click_activate(false)
-        // Bottom alignment is set per refresh, not here: see `refresh_posts`.
         .build();
     let scroller = gtk::ScrolledWindow::builder()
         .child(&post_view)
@@ -2096,24 +2091,13 @@ impl Ui {
         }
         self.composer.set_sensitive(true);
 
-        // A channel with four messages in it rests them on the composer
-        // rather than stranding them at the top of an empty pane, which is
-        // what the Electron client does and what a chat window should do.
-        //
-        // Only while the model is small, though. `valign: End` asks
-        // ListView for its natural height instead of handing it the
-        // viewport's, and ListView only realizes the rows in view when it is
-        // given the viewport. Fifty rows is past any plausible window
-        // height, so beyond it there is no empty space to take up and
-        // nothing to gain by risking the virtualization -- which now
-        // matters, because backfill means a channel's model grows without
-        // limit as the reader scrolls.
-        self.post_view
-            .set_valign(if self.posts.n_items() < BOTTOM_ALIGN_BELOW {
-                gtk::Align::End
-            } else {
-                gtk::Align::Fill
-            });
+        // No bottom alignment. Resting a short channel's messages on the
+        // composer looked better, but `valign: End` makes ListView ask for
+        // its *natural* height, and for a virtualised list that is an
+        // estimate which can exceed the real content. The surplus then
+        // shows as a blank gap above the first message -- in a real channel
+        // nearly three hundred pixels of it, which is far worse than the
+        // empty pane it was meant to fix.
 
         // A page of history was just prepended: put the reader back on the
         // message they were resting on, rather than at the top of sixty
