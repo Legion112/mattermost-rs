@@ -1,0 +1,443 @@
+//! The client's view of one server.
+//!
+//! **Every mutation here is a monotonic join, never a blind assignment.** That
+//! is what makes the store safe against the things the protocol actually does:
+//! the server replays its dead queue after a reconnect, so the same event
+//! arrives twice; a `channel_member_updated` from another device can be older
+//! than what is already held; and an edit can arrive out of order with the
+//! page that already contained the edited post. Under those conditions
+//! "assign the newer value" is wrong and "assign whichever arrived last" is
+//! worse.
+
+use crate::timeline::{Merge, PageAnchor, PostKey, Timeline};
+use crate::unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread};
+use mm_api::ws::WsEvent;
+use mm_types::{
+    Channel, ChannelId, ChannelMember, ChannelType, Post, PostId, PostList, Team, Timestamp, User,
+    UserId,
+};
+use std::collections::HashMap;
+
+/// What changed, so a GUI can invalidate only what it must.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Change {
+    /// A channel's unread or mention state moved.
+    Unread(ChannelId),
+    /// A post was added or updated.
+    Post(PostId),
+    /// A post is gone.
+    PostRemoved(PostId),
+    /// A user record changed.
+    User(UserId),
+    /// The sidebar's membership or ordering changed.
+    Sidebar,
+    /// Read state was pushed for a set of channels at once.
+    ReadState,
+}
+
+/// One row of the channel list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SidebarRow {
+    pub channel: ChannelId,
+    pub display_name: String,
+    pub kind: ChannelType,
+    pub unread: Unread,
+    pub muted: bool,
+}
+
+impl SidebarRow {
+    #[must_use]
+    pub fn is_unread(&self) -> bool {
+        self.unread.is_unread(if self.muted {
+            MarkUnread::MentionsOnly
+        } else {
+            MarkUnread::All
+        })
+    }
+}
+
+/// The store.
+#[derive(Debug, Clone, Default)]
+pub struct Store {
+    pub me: UserId,
+    /// Whether collapsed reply threads are in effect. Must be set from the
+    /// server config plus the user preference, never assumed.
+    pub threading: Threading,
+    pub users: HashMap<UserId, User>,
+    pub teams: Vec<Team>,
+    pub channels: HashMap<ChannelId, Channel>,
+    /// My membership only. Unread never needs anybody else's, and the two
+    /// arrive from different endpoints.
+    pub my_member: HashMap<ChannelId, ChannelMember>,
+    pub posts: HashMap<PostId, Post>,
+    pub timelines: HashMap<ChannelId, Timeline>,
+}
+
+impl Store {
+    #[must_use]
+    pub fn new(me: UserId, threading: Threading) -> Self {
+        Self {
+            me,
+            threading,
+            ..Self::default()
+        }
+    }
+
+    // ------------------------------------------------------------ REST
+
+    pub fn apply_teams(&mut self, teams: Vec<Team>) {
+        self.teams = teams;
+    }
+
+    pub fn apply_users(&mut self, users: Vec<User>) -> Vec<Change> {
+        users
+            .into_iter()
+            .map(|u| {
+                let id = u.id.clone();
+                self.users.insert(id.clone(), u);
+                Change::User(id)
+            })
+            .collect()
+    }
+
+    pub fn apply_channels(&mut self, channels: Vec<Channel>) -> Vec<Change> {
+        for channel in channels {
+            self.apply_channel(channel);
+        }
+        vec![Change::Sidebar]
+    }
+
+    /// Insert or update a channel.
+    ///
+    /// `total_msg_count` only ever grows, so an older payload must not drag it
+    /// back: doing so would make a channel the user has unread messages in
+    /// look read until the next update arrives.
+    pub fn apply_channel(&mut self, incoming: Channel) {
+        match self.channels.get_mut(&incoming.id) {
+            Some(held) if held.update_at > incoming.update_at => {
+                held.total_msg_count = held.total_msg_count.max(incoming.total_msg_count);
+                held.total_msg_count_root =
+                    held.total_msg_count_root.max(incoming.total_msg_count_root);
+            }
+            _ => {
+                let id = incoming.id.clone();
+                self.channels.insert(id, incoming);
+            }
+        }
+    }
+
+    pub fn apply_members(&mut self, members: Vec<ChannelMember>) -> Vec<Change> {
+        members
+            .into_iter()
+            .filter_map(|m| self.apply_member(m))
+            .collect()
+    }
+
+    /// Insert or update my membership of a channel.
+    ///
+    /// The counters only move forward, except through an explicit mark-unread.
+    /// Mentions are taken from the incoming record only when it is at least as
+    /// fresh as what is held — otherwise a `channel_member_updated` that was
+    /// generated before a mention we already know about would clear the badge.
+    pub fn apply_member(&mut self, incoming: ChannelMember) -> Option<Change> {
+        let id = incoming.channel_id.clone();
+        match self.my_member.get_mut(&id) {
+            None => {
+                self.my_member.insert(id.clone(), incoming);
+                Some(Change::Unread(id))
+            }
+            Some(held) => {
+                let stale = match (held.last_update_at, incoming.last_update_at) {
+                    (Some(a), Some(b)) => b < a,
+                    _ => false,
+                };
+                held.last_viewed_at = match (held.last_viewed_at, incoming.last_viewed_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+                held.msg_count = held.msg_count.max(incoming.msg_count);
+                held.msg_count_root = held.msg_count_root.max(incoming.msg_count_root);
+                if !stale {
+                    held.mention_count = incoming.mention_count;
+                    held.mention_count_root = incoming.mention_count_root;
+                    held.urgent_mention_count = incoming.urgent_mention_count;
+                    held.notify_props = incoming.notify_props;
+                    held.last_update_at = incoming.last_update_at.or(held.last_update_at);
+                }
+                Some(Change::Unread(id))
+            }
+        }
+    }
+
+    /// Merge a page of posts into a channel.
+    ///
+    /// A page that would leave a hole is refused by the timeline; the posts
+    /// themselves are still stored, because a thread root pulled in by
+    /// `?since=` is wanted even when it does not belong in the ordering.
+    pub fn apply_post_list(
+        &mut self,
+        channel: &ChannelId,
+        page: &PostList,
+        anchor: PageAnchor,
+    ) -> Vec<Change> {
+        let mut changes = Vec::new();
+        for post in page.posts.values() {
+            if self.store_post(post.clone()) {
+                changes.push(Change::Post(post.id.clone()));
+            }
+        }
+        let timeline = self.timelines.entry(channel.clone()).or_default();
+        match timeline.merge_page(page, anchor) {
+            Merge::Added(_) => {
+                if page.prev_post_id.is_empty() {
+                    timeline.set_older_complete(true);
+                }
+            }
+            Merge::NoChange | Merge::WouldLeaveGap => {}
+        }
+        changes
+    }
+
+    /// Store a post, newest-wins by `update_at`. Returns whether anything
+    /// changed.
+    fn store_post(&mut self, incoming: Post) -> bool {
+        match self.posts.get(&incoming.id) {
+            // An out-of-order edit must not regress a newer one, and a
+            // replayed `posted` must not resurrect a deleted post.
+            Some(held) if held.update_at >= incoming.update_at => false,
+            _ => {
+                self.posts.insert(incoming.id.clone(), incoming);
+                true
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ WebSocket
+
+    pub fn apply_ws(&mut self, event: &WsEvent) -> Vec<Change> {
+        match event {
+            WsEvent::Posted { post, .. } => self.on_posted(post),
+            WsEvent::PostEdited(post) => {
+                if self.store_post(post.clone()) {
+                    vec![Change::Post(post.id.clone())]
+                } else {
+                    Vec::new()
+                }
+            }
+            WsEvent::PostDeleted(post) => self.on_deleted(post),
+            WsEvent::ChannelMemberUpdated(member) => {
+                self.apply_member(member.clone()).into_iter().collect()
+            }
+            WsEvent::MultipleChannelsViewed { channel_times } => {
+                for (id, at) in channel_times {
+                    self.mark_viewed(&ChannelId::new(id.clone()), Timestamp(*at));
+                }
+                vec![Change::ReadState]
+            }
+            WsEvent::ChannelViewed { channel_id } => {
+                let now = self
+                    .channels
+                    .get(channel_id)
+                    .map_or(Timestamp::ZERO, |c| c.last_post_at);
+                self.mark_viewed(channel_id, now);
+                vec![Change::ReadState]
+            }
+            WsEvent::UserUpdated(user) => {
+                let id = user.id.clone();
+                self.users.insert(id.clone(), user.clone());
+                vec![Change::User(id)]
+            }
+            // Presence, typing and anything unrecognised carry no state this
+            // store owns yet. Returning no changes is correct, not a stub.
+            WsEvent::StatusChange { .. } | WsEvent::Typing { .. } | WsEvent::Unknown { .. } => {
+                Vec::new()
+            }
+        }
+    }
+
+    fn on_posted(&mut self, post: &Post) -> Vec<Change> {
+        let mut changes = Vec::new();
+        if !self.store_post(post.clone()) {
+            return changes;
+        }
+        changes.push(Change::Post(post.id.clone()));
+
+        let timeline = self.timelines.entry(post.channel_id.clone()).or_default();
+        timeline.insert(post);
+
+        // The channel's own counter has to move too, or the unread arithmetic
+        // (total minus seen) will not notice the new message until the next
+        // channel fetch.
+        if let Some(channel) = self.channels.get_mut(&post.channel_id) {
+            channel.total_msg_count += 1;
+            if !post.is_reply() {
+                channel.total_msg_count_root += 1;
+            }
+            channel.last_post_at = channel.last_post_at.max(post.create_at);
+            changes.push(Change::Unread(post.channel_id.clone()));
+        }
+        changes
+    }
+
+    fn on_deleted(&mut self, post: &Post) -> Vec<Change> {
+        // A tombstone, not a removal: a late `posted` for the same id must not
+        // resurrect it, and a permalink to it should say "message deleted"
+        // rather than render nothing.
+        let mut tomb = post.clone();
+        if tomb.delete_at.is_zero() {
+            tomb.delete_at = tomb.update_at.max(Timestamp(1));
+        }
+        self.posts.insert(tomb.id.clone(), tomb);
+        if let Some(timeline) = self.timelines.get_mut(&post.channel_id) {
+            timeline.remove(post);
+        }
+        vec![Change::PostRemoved(post.id.clone())]
+    }
+
+    // ------------------------------------------------------------ read state
+
+    /// Mark a channel read locally, as the GUI does the moment it is opened.
+    ///
+    /// Optimistic on purpose: waiting for the server round trip makes the
+    /// badge lag behind the click. The joins keep it safe — a later
+    /// `multiple_channels_viewed` carrying an older timestamp cannot undo it.
+    pub fn mark_read_locally(&mut self, channel: &ChannelId) -> Vec<Change> {
+        let totals = self.totals(channel);
+        if let Some(member) = self.my_member.get_mut(channel) {
+            member.msg_count = member.msg_count.max(totals.total_msg_count);
+            member.msg_count_root = member.msg_count_root.max(totals.total_msg_count_root);
+            member.mention_count = 0;
+            member.mention_count_root = 0;
+            member.urgent_mention_count = 0;
+        }
+        vec![Change::Unread(channel.clone())]
+    }
+
+    fn mark_viewed(&mut self, channel: &ChannelId, at: Timestamp) {
+        let totals = self.totals(channel);
+        if let Some(member) = self.my_member.get_mut(channel) {
+            member.last_viewed_at = Some(match member.last_viewed_at {
+                Some(held) => held.max(at),
+                None => at,
+            });
+            member.msg_count = member.msg_count.max(totals.total_msg_count);
+            member.msg_count_root = member.msg_count_root.max(totals.total_msg_count_root);
+            member.mention_count = 0;
+            member.mention_count_root = 0;
+        }
+    }
+
+    fn totals(&self, channel: &ChannelId) -> ChannelTotals {
+        self.channels
+            .get(channel)
+            .map(|c| ChannelTotals {
+                total_msg_count: c.total_msg_count,
+                total_msg_count_root: c.total_msg_count_root,
+            })
+            .unwrap_or_default()
+    }
+
+    // ------------------------------------------------------------ queries
+
+    #[must_use]
+    pub fn unread(&self, channel: &ChannelId) -> Unread {
+        let member = self.my_member.get(channel);
+        let counts = member.map_or_else(MemberCounts::default, |m| MemberCounts {
+            msg_count: m.msg_count,
+            msg_count_root: m.msg_count_root,
+            mention_count: m.mention_count,
+            mention_count_root: m.mention_count_root,
+        });
+        crate::unread::unread(self.totals(channel), counts, self.threading)
+    }
+
+    #[must_use]
+    pub fn is_muted(&self, channel: &ChannelId) -> bool {
+        self.my_member
+            .get(channel)
+            .is_some_and(ChannelMember::is_muted)
+    }
+
+    /// Total mentions across every channel — what the tray badge shows.
+    ///
+    /// Muted channels are included, because muting suppresses the unread
+    /// marker and not mentions.
+    #[must_use]
+    pub fn total_mentions(&self) -> i64 {
+        self.my_member
+            .keys()
+            .map(|id| self.unread(id).mentions)
+            .sum()
+    }
+
+    #[must_use]
+    pub fn any_unread(&self) -> bool {
+        self.sidebar().iter().any(SidebarRow::is_unread)
+    }
+
+    /// What to call a channel.
+    ///
+    /// A DM's `name` is the two user ids joined by `__` and its `display_name`
+    /// is empty, so the label has to come from the roster. Falling back to the
+    /// raw id is deliberate: showing something is better than showing a blank
+    /// row while the roster is still loading.
+    #[must_use]
+    pub fn channel_label(&self, channel: &Channel) -> String {
+        if channel.kind != ChannelType::Direct {
+            if channel.display_name.is_empty() {
+                return channel.name.clone();
+            }
+            return channel.display_name.clone();
+        }
+        let other = channel
+            .name
+            .split("__")
+            .find(|part| *part != self.me.as_str())
+            .unwrap_or_default();
+        self.users
+            .get(&UserId::new(other))
+            .map_or_else(|| other.to_owned(), |u| u.display_name().to_owned())
+    }
+
+    /// The channel list, deterministically ordered: unread first, then by
+    /// label. Iteration order of a `HashMap` must never reach the UI.
+    #[must_use]
+    pub fn sidebar(&self) -> Vec<SidebarRow> {
+        let mut rows: Vec<SidebarRow> = self
+            .my_member
+            .keys()
+            .filter_map(|id| self.channels.get(id))
+            .filter(|c| !c.is_deleted())
+            .map(|c| SidebarRow {
+                channel: c.id.clone(),
+                display_name: self.channel_label(c),
+                kind: c.kind.clone(),
+                unread: self.unread(&c.id),
+                muted: self.is_muted(&c.id),
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.is_unread()
+                .cmp(&a.is_unread())
+                .then_with(|| a.display_name.cmp(&b.display_name))
+                .then_with(|| a.channel.cmp(&b.channel))
+        });
+        rows
+    }
+
+    /// A channel's posts, oldest first, skipping tombstones.
+    #[must_use]
+    pub fn channel_posts(&self, channel: &ChannelId) -> Vec<&Post> {
+        self.timelines
+            .get(channel)
+            .into_iter()
+            .flat_map(Timeline::keys)
+            .filter_map(|key: &PostKey| self.posts.get(&key.id))
+            .filter(|p| !p.is_deleted())
+            .collect()
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/store.rs"]
+mod tests;

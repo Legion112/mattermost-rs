@@ -50,9 +50,13 @@ pub struct MemberCounts {
 /// `display.collapsed_reply_threads` preference -- and it must never be
 /// hardcoded: the server default was `disabled` historically and is
 /// `always_on` as of 12.1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Threading {
     /// Replies count toward the channel's unread state.
+    ///
+    /// The default only because a value must be chosen before the server
+    /// config is known; it is always overwritten by the real setting.
+    #[default]
     Flat,
     /// Only root posts count; reply unreads surface per-thread instead.
     Collapsed,

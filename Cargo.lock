@@ -94,6 +94,10 @@ version = "0.1.0"
 [[package]]
 name = "mm-core"
 version = "0.1.0"
+dependencies = [
+ "mm-api",
+ "mm-types",
+]
 
 [[package]]
 name = "mm-desktop"

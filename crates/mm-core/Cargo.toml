@@ -9,6 +9,8 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+mm-api   = { path = "../mm-api" }
+mm-types = { path = "../mm-types" }
 
 [lints]
 workspace = true
