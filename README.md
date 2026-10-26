@@ -66,6 +66,35 @@ matrix with its reason and fallback stated.
 
 Also out for now: Windows and macOS, spellchecking, i18n beyond English.
 
+## Try it
+
+Against your own server, with a personal access token (Account Settings →
+Security → Personal Access Tokens):
+
+```bash
+make release
+./target/release/mattermost-rs token --server https://your.mattermost --token <pat>
+./target/release/mattermost-rs sync      # channels and unread counts, in the terminal
+./target/release/mattermost-rs gui       # the window
+```
+
+`login --server <url> --login-id <id> --password-env <VAR>` works too; the
+password is read from the environment rather than an argument so it stays out
+of shell history and out of `ps`. SSO accounts need a token: the browser-based
+desktop-token hand-off is not implemented yet.
+
+### A throwaway server to try it against
+
+A disposable Mattermost runs in one container, which is what the development
+of this was verified against:
+
+```bash
+docker run -d --name mmrs-lab -p 8065:8065 mattermost/mattermost-preview
+```
+
+The first account you create on an empty server is automatically a system
+admin. Remove it with `docker rm -f mmrs-lab`.
+
 ## Build
 
 ```

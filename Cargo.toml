@@ -58,11 +58,13 @@ path = "src/main.rs"
 [dependencies]
 mm-api   = { path = "crates/mm-api" }
 mm-core  = { path = "crates/mm-core" }
+mm-gui   = { path = "crates/mm-gui" }
 mm-http  = { path = "crates/mm-http" }
 mm-types = { path = "crates/mm-types" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio      = { version = "1", features = ["rt", "macros", "time"] }
+tokio         = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+async-channel = "2"
 
 [lints]
 workspace = true

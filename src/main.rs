@@ -9,6 +9,7 @@
 //! `mm-core` than any mock, because the server is the thing whose behaviour
 //! the store is modelling.
 
+mod engine;
 mod session;
 
 use mm_api::ApiError;
@@ -28,6 +29,7 @@ usage:
   mattermost-rs whoami
   mattermost-rs sync   [--channel <name>]
   mattermost-rs watch  [--seconds <n>]
+  mattermost-rs gui
   mattermost-rs logout
   mattermost-rs --version | --help
 
@@ -39,10 +41,9 @@ they do not land in your shell history or in `ps` output.
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(command) = args.first().map(String::as_str) else {
-        eprint!("{USAGE}");
-        return ExitCode::FAILURE;
-    };
+    // No arguments means "open the app", which is what double-clicking the
+    // desktop entry does.
+    let command = args.first().map_or("gui", String::as_str);
     let rest_args = &args[1..];
 
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
         "whoami" => runtime.block_on(whoami()),
         "sync" => runtime.block_on(sync(rest_args)),
         "watch" => runtime.block_on(watch(rest_args)),
+        "gui" => gui(),
         "logout" => session::clear(),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     };
@@ -80,6 +82,23 @@ fn main() -> ExitCode {
             eprintln!("{msg}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Launch the window.
+///
+/// The GTK main loop owns this thread from here on; the engine runs on its
+/// own. Note what is NOT done: no `block_on` around the GUI, and the async
+/// runtime built above is dropped first, because two runtimes competing for
+/// the same thread is a deadlock waiting to happen.
+fn gui() -> Result<(), String> {
+    let saved = session::load()?;
+    let (commands, events) = engine::spawn(saved);
+    let code = mm_gui::run(mm_gui::Wiring { commands, events });
+    if code == mm_gui::glib_exit_success() {
+        Ok(())
+    } else {
+        Err("the window exited with an error".to_owned())
     }
 }
 

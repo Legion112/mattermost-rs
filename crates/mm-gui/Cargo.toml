@@ -1,6 +1,6 @@
 [package]
 name        = "mm-gui"
-description = "GTK4 and relm4 shell"
+description = "GTK4 and libadwaita shell"
 version.workspace      = true
 edition.workspace      = true
 rust-version.workspace = true
@@ -9,6 +9,19 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+mm-api   = { path = "../mm-api" }
+mm-core  = { path = "../mm-core" }
+mm-types = { path = "../mm-types" }
+
+# v4_14 / v1_5, not higher: that is the apt API level on Ubuntu 24.04 and on
+# the CI runner. Compiling against Homebrew's 4.22 produces a binary linked to
+# /home/linuxbrew/.linuxbrew/lib/libgtk-4.so, which runs on exactly one
+# machine. `cargo xtask doctor` asserts which one pkg-config resolves.
+adw  = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+gtk  = { package = "gtk4", version = "0.9", features = ["v4_14"] }
+
+async-channel = "2"
+tokio         = { version = "1", features = ["sync"] }
 
 [lints]
 workspace = true
