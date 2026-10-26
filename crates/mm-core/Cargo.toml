@@ -12,5 +12,11 @@ repository.workspace   = true
 mm-api   = { path = "../mm-api" }
 mm-types = { path = "../mm-types" }
 
+[dev-dependencies]
+# Tests only. Some payloads -- a post's `metadata` -- are opaque JSON in
+# `mm-types`, so building one by hand means writing the JSON. Never a
+# production dependency of this crate.
+serde_json = "1"
+
 [lints]
 workspace = true

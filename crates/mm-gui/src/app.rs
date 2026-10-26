@@ -27,7 +27,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 use mm_core::{PageAnchor, Store, Threading};
-use mm_types::{ChannelId, UserId};
+use mm_types::{ChannelId, PostId, UserId};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -138,7 +138,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     sidebar_pane.append(&identity);
     sidebar_pane.append(&sidebar_scroll);
 
-    let (posts, post_view, scroller) = build_post_list();
+    let (posts, post_view, scroller) = build_post_list(commands);
 
     let composer = gtk::Entry::builder()
         .placeholder_text("Write a message…")
@@ -548,15 +548,21 @@ fn setup_post_row(item: &gtk::ListItem) {
         .wrap(true)
         .css_classes(["dim-label", "caption"])
         .build();
+    // Reaction chips. Rebuilt on every bind rather than recycled: a row can
+    // carry none one moment and four the next, and four buttons is cheap.
+    let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    reactions.set_margin_top(2);
+
     row.append(&day);
     row.append(&header);
     row.append(&body);
     row.append(&meta);
+    row.append(&reactions);
     item.set_child(Some(&row));
 }
 
 /// Fill a recycled row from the model item bound to it.
-fn bind_post_row(item: &gtk::ListItem) {
+fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
     };
@@ -578,6 +584,9 @@ fn bind_post_row(item: &gtk::ListItem) {
     let Some(meta) = body.next_sibling().and_downcast::<gtk::Label>() else {
         return;
     };
+    let Some(reactions) = meta.next_sibling().and_downcast::<gtk::Box>() else {
+        return;
+    };
 
     // A separator is a day label and nothing else.
     let is_separator = data.is_separator();
@@ -593,6 +602,7 @@ fn bind_post_row(item: &gtk::ListItem) {
         header.set_visible(false);
         body.set_visible(false);
         meta.set_visible(false);
+        reactions.set_visible(false);
         return;
     }
 
@@ -631,6 +641,15 @@ fn bind_post_row(item: &gtk::ListItem) {
     let extra = data.meta();
     meta.set_text(&extra);
     meta.set_visible(!extra.is_empty());
+
+    while let Some(chip) = reactions.first_child() {
+        reactions.remove(&chip);
+    }
+    let chips = data.reactions();
+    reactions.set_visible(!chips.is_empty());
+    for chip in chips {
+        reactions.append(&reaction_chip(&data.id(), &chip, commands));
+    }
 }
 
 /// A category heading: not selectable, so arrow keys and the first-channel
@@ -668,7 +687,46 @@ fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
     row
 }
 
-fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
+/// One reaction, as a button that toggles the signed-in user's own.
+fn reaction_chip(
+    post: &str,
+    summary: &mm_core::ReactionSummary,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) -> gtk::Button {
+    // A custom or unknown emoji keeps its shortcode: `:shipit:` says what
+    // was meant, where a blank chip says nothing.
+    let face = mm_md::glyph(&summary.emoji)
+        .map_or_else(|| format!(":{}:", summary.emoji), ToOwned::to_owned);
+    let chip = gtk::Button::builder()
+        .label(format!("{face} {}", summary.count))
+        .css_classes(["flat", "caption"])
+        .tooltip_text(format!(":{}:", summary.emoji))
+        .build();
+    if summary.mine {
+        chip.add_css_class("suggested-action");
+    }
+
+    let commands = commands.clone();
+    let post = PostId::new(post);
+    let emoji = summary.emoji.clone();
+    // Clicking a reaction you are already part of takes it back, which is
+    // the whole interaction: there is no separate "remove" affordance.
+    let add = !summary.mine;
+    chip.connect_clicked(move |_| {
+        commands
+            .send(Command::React {
+                post: post.clone(),
+                emoji: emoji.clone(),
+                add,
+            })
+            .ok();
+    });
+    chip
+}
+
+fn build_post_list(
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
@@ -676,9 +734,10 @@ fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
             setup_post_row(item);
         }
     });
-    factory.connect_bind(|_, item| {
+    let sender = commands.clone();
+    factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            bind_post_row(item);
+            bind_post_row(item, &sender);
         }
     });
     let post_view = gtk::ListView::builder()
@@ -1004,6 +1063,7 @@ impl Ui {
                 markup,
                 system: post.is_system(),
                 grouped,
+                reactions: store.reactions_for(&post.id),
             }));
         }
         self.composer.set_sensitive(true);

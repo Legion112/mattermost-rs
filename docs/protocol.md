@@ -355,3 +355,28 @@ alphabetically. It is what the web app shows for an untouched Channels
 category, but it was not read out of the server or the webapp source. An
 empty category being hidden rather than drawn as a bare heading is the same
 kind of inference.
+
+## Reactions
+
+Verified against 12.0.1 on 2026-10-26.
+
+- They ride in **`post.metadata.reactions`**, so they arrive with a page of
+  posts rather than needing a request of their own. `"reactions": null` is
+  what a post nobody has reacted to sends — a statement, not an absence —
+  and metadata missing entirely means "this endpoint did not include it".
+  Collapsing those two makes a page fetched without metadata wipe reactions
+  already held.
+- A reaction carries `delete_at`, so the soft-delete rule applies here too.
+- The WebSocket events are `reaction_added` / `reaction_removed`, and
+  `reaction` is **a JSON document inside a JSON string**, like `post` and
+  `channel`.
+- **Reacting does not move the post's `update_at`.** So reactions cannot ride
+  the newest-wins join that posts use, and are keyed separately in the store.
+- `POST /reactions` takes the reacting user's id in the body; removing is
+  `DELETE /users/{user}/posts/{post}/reactions/{emoji}`, with the emoji name
+  in the path. **Removing a reaction that is not there returns 200**, which
+  is what makes a chip toggle safe to fire twice.
+
+Both request shapes are exercised against a live server by
+`mattermost-rs react`, which exists for that reason: no unit test can prove
+the server accepts an emoji name in a URL path.

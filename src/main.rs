@@ -17,7 +17,7 @@ use mm_api::rest::{self, PostQuery};
 use mm_api::ws::{WsOutcome, WsProtocol};
 use mm_core::{PageAnchor, Store, Threading};
 use mm_http::Client;
-use mm_types::{ChannelId, UserId};
+use mm_types::{ChannelId, PostId, UserId};
 use std::process::ExitCode;
 
 const USAGE: &str = "\
@@ -30,6 +30,7 @@ usage:
   mattermost-rs sync   [--channel <name>]
   mattermost-rs watch  [--seconds <n>]
   mattermost-rs send   --channel <name> --text <message>
+  mattermost-rs react  --post <id> --emoji <name> [--remove]
   mattermost-rs doctor
   mattermost-rs gui
   mattermost-rs logout
@@ -85,6 +86,7 @@ fn main() -> ExitCode {
         "sync" => runtime.block_on(sync(rest_args)),
         "watch" => runtime.block_on(watch(rest_args)),
         "send" => runtime.block_on(send(rest_args)),
+        "react" => runtime.block_on(react(rest_args)),
         "doctor" => doctor(),
         "gui" => gui(),
         "logout" => session::clear(),
@@ -98,6 +100,40 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Add or take back a reaction.
+///
+/// The window does this from a chip under the message; this is the same two
+/// requests from a terminal, and it is how their shapes were checked against
+/// a real server -- the remove path puts the emoji in the URL, which no unit
+/// test can prove the server accepts.
+async fn react(args: &[String]) -> Result<(), String> {
+    let post = PostId::new(require(args, "--post")?);
+    let emoji = require(args, "--emoji")?;
+    let remove = args.iter().any(|a| a == "--remove");
+    let (client, saved) = connect()?;
+    let me = UserId::new(&saved.user_id);
+
+    if remove {
+        let response = client
+            .send(&rest::remove_reaction(&me, &post, &emoji))
+            .await
+            .map_err(|e| e.to_string())?;
+        if response.status >= 400 {
+            return Err(format!("could not remove :{emoji}: ({})", response.status));
+        }
+        println!("took back :{emoji}: on {post}");
+    } else {
+        let added = fetch(
+            &client,
+            &rest::add_reaction(&me, &post, &emoji),
+            rest::parse_reaction,
+        )
+        .await?;
+        println!("reacted :{}: to {}", added.emoji_name, added.post_id);
+    }
+    Ok(())
 }
 
 /// Report what the desktop can actually do.
@@ -496,6 +532,13 @@ fn describe(event: &mm_api::WsEvent) -> String {
         E::Typing { user_id, .. } => format!("{user_id} is typing"),
         E::StatusChange { user_id, status } => format!("{user_id} is now {status}"),
         E::UserUpdated(u) => format!("user {} updated", u.username),
+        E::ReactionAdded(r) => format!("{} reacted :{}: to {}", r.user_id, r.emoji_name, r.post_id),
+        E::ReactionRemoved(r) => {
+            format!(
+                "{} took back :{}: on {}",
+                r.user_id, r.emoji_name, r.post_id
+            )
+        }
         E::Unknown { event } => format!("(unhandled event {event})"),
     }
 }

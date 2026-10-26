@@ -622,3 +622,27 @@ fn trimming_a_string_that_is_all_punctuation_leaves_nothing() {
         "https://a.invalid/(x)"
     );
 }
+
+/// Emoji shortcodes are translated in ordinary message text.
+#[test]
+fn shortcodes_in_a_paragraph_become_glyphs() {
+    let doc = parse("ship it :tada:");
+    assert_eq!(doc.plain_text(), Some("ship it 🎉"));
+}
+
+/// A shortcode inside code is text, exactly like a URL inside code is text.
+#[test]
+fn shortcodes_in_code_are_left_alone() {
+    let doc = parse("`:tada:`");
+    assert_eq!(doc.to_plain(), ":tada:");
+    let fenced = parse("```\n:tada:\n```");
+    assert_eq!(fenced.to_plain(), ":tada:");
+}
+
+/// A link's URL is decided before emoji are, so a colon-shaped fragment in
+/// a URL cannot be rewritten out from under it.
+#[test]
+fn a_url_is_not_rewritten_by_the_emoji_pass() {
+    let doc = parse("see https://example.com/a:tada:b now");
+    assert_eq!(doc.to_plain(), "see https://example.com/a:tada:b now");
+}

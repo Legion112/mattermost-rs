@@ -11,7 +11,8 @@
 use mm_api::ws::WsEvent;
 use mm_core::Threading;
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, PostList, Team, User, UserId,
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, PostId, PostList, Team, User,
+    UserId,
 };
 
 /// GUI to engine.
@@ -37,6 +38,13 @@ pub enum Command {
     Send { channel: ChannelId, text: String },
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
+    /// Add or take back a reaction. `add` is decided by the window, which
+    /// knows whether the signed-in user is already among them.
+    React {
+        post: PostId,
+        emoji: String,
+        add: bool,
+    },
     /// Show a desktop notification.
     ///
     /// The *decision* is made on the GUI thread, which is the only place that

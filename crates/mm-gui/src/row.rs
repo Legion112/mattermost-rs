@@ -34,6 +34,8 @@ mod imp {
         /// entirely -- that fast path is where the rendering cost goes in a
         /// busy channel.
         pub markup: Cell<bool>,
+        /// Already grouped and ordered by `mm-core`; the row only draws them.
+        pub reactions: RefCell<Vec<mm_core::ReactionSummary>>,
     }
 
     #[glib::object_subclass]
@@ -51,7 +53,7 @@ glib::wrapper! {
 
 /// Grouped so adding a field does not mean editing every call site, and so
 /// the call site reads as names rather than five positional strings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PostRowFields<'a> {
     pub id: &'a str,
     pub author: &'a str,
@@ -61,6 +63,7 @@ pub struct PostRowFields<'a> {
     pub markup: bool,
     pub system: bool,
     pub grouped: bool,
+    pub reactions: Vec<mm_core::ReactionSummary>,
 }
 
 impl PostRow {
@@ -76,6 +79,7 @@ impl PostRow {
         inner.markup.set(fields.markup);
         inner.system.set(fields.system);
         inner.grouped.set(fields.grouped);
+        inner.reactions.replace(fields.reactions);
         this
     }
 
@@ -92,6 +96,11 @@ impl PostRow {
     #[must_use]
     pub fn is_separator(&self) -> bool {
         self.imp().separator.get()
+    }
+
+    #[must_use]
+    pub fn reactions(&self) -> Vec<mm_core::ReactionSummary> {
+        self.imp().reactions.borrow().clone()
     }
 
     #[must_use]

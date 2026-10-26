@@ -28,6 +28,7 @@ mod channel;
 mod ids;
 mod post;
 mod prefs;
+mod reaction;
 mod time;
 mod user;
 pub mod wire;
@@ -39,5 +40,6 @@ pub use channel::{
 pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
 pub use post::{FileRef, Post, PostList};
 pub use prefs::{NameFormat, Preference, is_true, keys};
+pub use reaction::Reaction;
 pub use time::Timestamp;
 pub use user::{Presence, Team, User};

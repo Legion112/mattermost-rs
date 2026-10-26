@@ -116,6 +116,19 @@ async fn run(
         match command {
             Command::Sync => sync(&a.client, &a.session, &events).await,
             Command::OpenChannel(channel) => open_channel(&a.client, &channel, &events).await,
+            Command::React { post, emoji, add } => {
+                // Best effort, like MarkRead: the `reaction_added` event
+                // comes back over the WebSocket and is what actually updates
+                // the store, so a failure here simply leaves the chip as it
+                // was rather than needing to be undone.
+                let user = UserId::new(&a.session.user_id);
+                let request = if add {
+                    rest::add_reaction(&user, &post, &emoji)
+                } else {
+                    rest::remove_reaction(&user, &post, &emoji)
+                };
+                let _ = a.client.send(&request).await;
+            }
             Command::MarkRead(channel) => {
                 // Best effort: the GUI has already updated optimistically, and
                 // the store's monotonic joins mean a failure here cannot

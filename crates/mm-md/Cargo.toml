@@ -12,6 +12,10 @@ repository.workspace   = true
 # Pinned deliberately: 0.13 changed the event API, and a silent bump would
 # reshape the parse tree under the renderer.
 pulldown-cmark = { version = "0.13", default-features = false }
+# The GitHub shortcode table, which is the one Mattermost uses. A data crate
+# with no runtime dependencies, so it does not threaten the gated-crate
+# invariant.
+emojis = { version = "0.9.1", default-features = false }
 
 [lints]
 workspace = true

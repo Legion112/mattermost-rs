@@ -17,5 +17,8 @@
 mod pango;
 mod parse;
 
+pub mod emoji;
+
+pub use emoji::glyph;
 pub use pango::{escape, to_pango};
 pub use parse::{Block, Document, Inline, parse};

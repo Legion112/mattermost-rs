@@ -500,3 +500,40 @@ fn a_reconnect_reports_no_spurious_gap() {
     assert_eq!(out.len(), 1, "first event after a hello: {out:?}");
     assert!(matches!(out[0], WsOutcome::Event(_)));
 }
+
+/// `reaction` is a JSON document inside a JSON string, like `post` and
+/// `channel` -- the wart that is the classic Mattermost client bug.
+#[test]
+fn a_reaction_arrives_as_json_inside_a_string() {
+    let mut proto = WsProtocol::default();
+    let frame = r#"{"event":"reaction_added","seq":1,"data":{"reaction":
+        "{\"user_id\":\"u1\",\"post_id\":\"p1\",\"emoji_name\":\"tada\",\"create_at\":20}"}}"#;
+    let outcomes = proto.on_frame(frame);
+    let Some(WsOutcome::Event(WsEvent::ReactionAdded(reaction))) = outcomes.first() else {
+        panic!("expected a decoded reaction, got {outcomes:?}");
+    };
+    assert_eq!(reaction.emoji_name, "tada");
+    assert_eq!(reaction.post_id, mm_types::PostId::new("p1"));
+
+    let gone = r#"{"event":"reaction_removed","seq":2,"data":{"reaction":
+        "{\"user_id\":\"u1\",\"post_id\":\"p1\",\"emoji_name\":\"tada\"}"}}"#;
+    assert!(matches!(
+        proto.on_frame(gone).first(),
+        Some(WsOutcome::Event(WsEvent::ReactionRemoved(_)))
+    ));
+}
+
+/// A reaction frame whose `reaction` is a nested object rather than a string
+/// is the shape a client would assume if it had not read the server source.
+/// It must be reported, not silently dropped.
+#[test]
+fn a_reaction_sent_as_a_nested_object_is_reported_not_swallowed() {
+    let mut proto = WsProtocol::default();
+    let frame = r#"{"event":"reaction_added","seq":1,
+                    "data":{"reaction":{"emoji_name":"tada"}}}"#;
+    let outcomes = proto.on_frame(frame);
+    assert!(
+        matches!(outcomes.first(), Some(WsOutcome::Undecodable { .. })),
+        "got {outcomes:?}"
+    );
+}

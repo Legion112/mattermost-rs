@@ -18,7 +18,7 @@
 //!   resync over REST.
 
 use crate::error::AppError;
-use mm_types::{ChannelId, ChannelMember, Post, User};
+use mm_types::{ChannelId, ChannelMember, Post, Reaction, User};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -113,6 +113,10 @@ pub enum WsEvent {
     },
     /// `user` here is a nested object, unlike almost every other payload.
     UserUpdated(User),
+    /// Somebody reacted. `reaction` is a JSON document inside a JSON string,
+    /// like `post` and `channel`.
+    ReactionAdded(Reaction),
+    ReactionRemoved(Reaction),
     /// Anything else, kept so it can be logged and counted.
     Unknown {
         event: String,
@@ -314,6 +318,8 @@ fn decode_event(event: &str, data: &serde_json::Value) -> Result<WsEvent, String
             mentions: nested_json(data, "mentions").unwrap_or_default(),
         }),
         "post_edited" => Ok(WsEvent::PostEdited(nested_json(data, "post")?)),
+        "reaction_added" => Ok(WsEvent::ReactionAdded(nested_json(data, "reaction")?)),
+        "reaction_removed" => Ok(WsEvent::ReactionRemoved(nested_json(data, "reaction")?)),
         "post_deleted" => Ok(WsEvent::PostDeleted(nested_json(data, "post")?)),
         "multiple_channels_viewed" => Ok(WsEvent::MultipleChannelsViewed {
             channel_times: serde_json::from_value(

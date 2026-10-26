@@ -335,7 +335,16 @@ fn linkify_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
     inlines
         .into_iter()
         .flat_map(|inline| match inline {
-            Inline::Text(text) => autolink(&text),
+            // Emoji after linkifying, not before: a URL may legitimately
+            // contain something shaped like a shortcode, and once autolink
+            // has decided what is a link, only the leftover text is rewritten.
+            Inline::Text(text) => autolink(&text)
+                .into_iter()
+                .map(|piece| match piece {
+                    Inline::Text(t) => Inline::Text(crate::emoji::substitute(&t)),
+                    other => other,
+                })
+                .collect(),
             Inline::Emphasis(inner) => vec![Inline::Emphasis(linkify_inlines(inner))],
             Inline::Strong(inner) => vec![Inline::Strong(linkify_inlines(inner))],
             Inline::Strike(inner) => vec![Inline::Strike(linkify_inlines(inner))],

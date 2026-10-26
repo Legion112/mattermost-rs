@@ -6,8 +6,8 @@
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, Post, PostList, Preference,
-    Team, TeamId, User, UserId,
+    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, Post, PostId, PostList,
+    Preference, Reaction, Team, TeamId, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -221,6 +221,33 @@ pub fn channel_stats(channel: &ChannelId) -> HttpRequest {
 
 pub fn parse_channel_stats(resp: &HttpResponse) -> Result<ChannelStats, ApiError> {
     parse_json(resp, "GET /channels/{id}/stats")
+}
+
+/// React to a post.
+///
+/// The body carries the reacting user's id even though the session already
+/// identifies them: the endpoint is also how an admin-level integration
+/// reacts on someone else's behalf.
+#[must_use]
+pub fn add_reaction(user: &UserId, post: &PostId, emoji: &str) -> HttpRequest {
+    let body = serde_json::json!({
+        "user_id": user.as_str(),
+        "post_id": post.as_str(),
+        "emoji_name": emoji,
+    });
+    HttpRequest::post(format!("{API}/reactions")).json(&body)
+}
+
+pub fn parse_reaction(resp: &HttpResponse) -> Result<Reaction, ApiError> {
+    parse_json(resp, "POST /reactions")
+}
+
+/// Take a reaction back. The emoji name is in the path, so it has to be
+/// percent-safe; Mattermost's own validation limits it to alphanumerics,
+/// `_`, `-` and `+`, none of which need escaping.
+#[must_use]
+pub fn remove_reaction(user: &UserId, post: &PostId, emoji: &str) -> HttpRequest {
+    HttpRequest::delete(format!("{API}/users/{user}/posts/{post}/reactions/{emoji}"))
 }
 
 /// Mark a channel read.

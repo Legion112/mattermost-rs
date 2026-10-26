@@ -463,3 +463,29 @@ fn every_derive_is_exercised() {
     assert_eq!(MAX_PER_PAGE, 200);
     assert_eq!(DEFAULT_PER_PAGE, 60);
 }
+
+/// Reacting and un-reacting are different shapes: one posts a body, the
+/// other puts the emoji in the path.
+#[test]
+fn reactions_are_added_by_body_and_removed_by_path() {
+    let user = UserId::new("u1");
+    let post = PostId::new("p1");
+
+    let add = add_reaction(&user, &post, "tada");
+    assert_eq!(add.path, "/api/v4/reactions");
+    assert_eq!(add.method, Method::Post);
+    let Body::Json(body) = &add.body else {
+        panic!("expected a JSON body");
+    };
+    let body: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+    assert_eq!(body["user_id"], "u1");
+    assert_eq!(body["post_id"], "p1");
+    assert_eq!(body["emoji_name"], "tada");
+
+    let remove = remove_reaction(&user, &post, "tada");
+    assert_eq!(remove.method, Method::Delete);
+    assert_eq!(remove.path, "/api/v4/users/u1/posts/p1/reactions/tada");
+
+    let parsed = parse_reaction(&ok(r#"{"emoji_name":"tada","user_id":"u1"}"#)).unwrap();
+    assert_eq!(parsed.emoji_name, "tada");
+}

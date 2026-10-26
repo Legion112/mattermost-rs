@@ -1,6 +1,6 @@
 //! Posts and the paged list the server returns them in.
 
-use crate::{ChannelId, FileId, PostId, Timestamp, UserId};
+use crate::{ChannelId, FileId, PostId, Reaction, Timestamp, UserId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -114,6 +114,23 @@ impl Post {
                 ..FileRef::default()
             })
             .collect()
+    }
+
+    /// The reactions the server attached to this post, or `None` when the
+    /// endpoint did not include metadata at all.
+    ///
+    /// The distinction matters: `Some(vec![])` means "nobody has reacted",
+    /// and `None` means "not loaded". Collapsing them would make a page
+    /// fetched without metadata silently wipe reactions already held.
+    #[must_use]
+    pub fn reactions(&self) -> Option<Vec<Reaction>> {
+        let raw = self.metadata.get("reactions")?;
+        if raw.is_null() {
+            // The server sends `"reactions": null` for a post nobody has
+            // reacted to, which is a statement, not an absence.
+            return Some(Vec::new());
+        }
+        serde_json::from_value(raw.clone()).ok()
     }
 
     #[must_use]
@@ -387,5 +404,33 @@ mod tests {
         assert_eq!(round, p);
         let round: PostList = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
         assert_eq!(round, l);
+    }
+}
+
+#[cfg(test)]
+mod reaction_tests {
+    use super::*;
+
+    fn post(metadata: &str) -> Post {
+        serde_json::from_str(&format!(r#"{{"id":"p1","metadata":{metadata}}}"#)).expect("parses")
+    }
+
+    /// Reactions ride in metadata, like files do.
+    #[test]
+    fn reactions_come_from_metadata() {
+        let p = post(r#"{"reactions":[{"user_id":"u1","emoji_name":"tada"}]}"#);
+        let reactions = p.reactions().expect("metadata was present");
+        assert_eq!(reactions.len(), 1);
+        assert_eq!(reactions[0].emoji_name, "tada");
+    }
+
+    /// "Nobody reacted" and "this endpoint did not send metadata" are
+    /// different answers. Collapsing them lets a page fetched without
+    /// metadata wipe reactions that are already held.
+    #[test]
+    fn an_absent_metadata_is_not_an_empty_reaction_list() {
+        assert_eq!(post("{}").reactions(), None);
+        assert_eq!(post(r#"{"reactions":null}"#).reactions(), Some(Vec::new()));
+        assert_eq!(post(r#"{"reactions":[]}"#).reactions(), Some(Vec::new()));
     }
 }

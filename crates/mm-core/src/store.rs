@@ -17,7 +17,7 @@ use mm_types::{
     CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, ChannelType,
     Post, PostId, PostList, Team, Timestamp, User, UserId,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// What changed, so a GUI can invalidate only what it must.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -34,6 +34,18 @@ pub enum Change {
     Sidebar,
     /// Read state was pushed for a set of channels at once.
     ReadState,
+}
+
+/// One emoji's worth of reaction on a post.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionSummary {
+    pub emoji: String,
+    pub count: i64,
+    /// Whether the signed-in user is one of them, which decides whether
+    /// clicking the chip adds or takes back.
+    pub mine: bool,
+    /// When this emoji first appeared on the post; the display order.
+    pub first: Timestamp,
 }
 
 /// One row of the channel list.
@@ -77,6 +89,10 @@ pub struct Store {
     pub categories: Vec<ChannelCategory>,
     /// Member counts, fetched per channel when it is opened.
     pub stats: HashMap<ChannelId, ChannelStats>,
+    /// Who reacted with what, and when they first did. Keyed separately from
+    /// the post because reactions do not move a post's `update_at`, so they
+    /// cannot ride the newest-wins join that posts use.
+    pub reactions: HashMap<PostId, BTreeMap<(String, UserId), Timestamp>>,
 }
 
 impl Store {
@@ -141,6 +157,35 @@ impl Store {
             .get(channel)
             .map_or_else(|| channel.to_string(), |c| self.channel_label(c));
         (name, self.stats.get(channel).map(|s| s.member_count))
+    }
+
+    /// A post's reactions, grouped for display.
+    ///
+    /// Ordered by when each emoji was *first* used on the post, which is the
+    /// order Mattermost shows and the only one that does not reshuffle the
+    /// row every time somebody joins an existing reaction.
+    #[must_use]
+    pub fn reactions_for(&self, post: &PostId) -> Vec<ReactionSummary> {
+        let Some(held) = self.reactions.get(post) else {
+            return Vec::new();
+        };
+        let mut grouped: BTreeMap<&str, ReactionSummary> = BTreeMap::new();
+        for ((emoji, user), at) in held {
+            let entry = grouped
+                .entry(emoji.as_str())
+                .or_insert_with(|| ReactionSummary {
+                    emoji: emoji.clone(),
+                    count: 0,
+                    mine: false,
+                    first: *at,
+                });
+            entry.count += 1;
+            entry.mine |= *user == self.me;
+            entry.first = entry.first.min(*at);
+        }
+        let mut out: Vec<ReactionSummary> = grouped.into_values().collect();
+        out.sort_by(|a, b| a.first.cmp(&b.first).then_with(|| a.emoji.cmp(&b.emoji)));
+        out
     }
 
     pub fn apply_users(&mut self, users: Vec<User>) -> Vec<Change> {
@@ -255,6 +300,26 @@ impl Store {
     /// Store a post, newest-wins by `update_at`. Returns whether anything
     /// changed.
     fn store_post(&mut self, incoming: Post) -> bool {
+        // Reactions are seeded whether or not the post itself is newer:
+        // reacting does not move `update_at`, so a post that loses the
+        // newest-wins check below may still carry the only reaction list we
+        // are going to see.
+        //
+        // This is a replace, not a join. The server sends the live set and
+        // carries no version on it, so there is nothing to compare; a
+        // reaction that arrived over the WebSocket while a page was in
+        // flight can be lost, and the next time the channel is opened it
+        // comes back. A join instead would make a reaction removed on
+        // another device permanent, which is the worse failure.
+        if let Some(live) = incoming.reactions() {
+            self.reactions.insert(
+                incoming.id.clone(),
+                live.into_iter()
+                    .filter(|r| !r.is_deleted())
+                    .map(|r| ((r.emoji_name, r.user_id), r.create_at))
+                    .collect(),
+            );
+        }
         match self.posts.get(&incoming.id) {
             // An out-of-order edit must not regress a newer one, and a
             // replayed `posted` must not resurrect a deleted post.
@@ -279,6 +344,22 @@ impl Store {
                 }
             }
             WsEvent::PostDeleted(post) => self.on_deleted(post),
+            WsEvent::ReactionAdded(reaction) => {
+                self.reactions
+                    .entry(reaction.post_id.clone())
+                    .or_default()
+                    .insert(
+                        (reaction.emoji_name.clone(), reaction.user_id.clone()),
+                        reaction.create_at,
+                    );
+                vec![Change::Post(reaction.post_id.clone())]
+            }
+            WsEvent::ReactionRemoved(reaction) => {
+                if let Some(held) = self.reactions.get_mut(&reaction.post_id) {
+                    held.remove(&(reaction.emoji_name.clone(), reaction.user_id.clone()));
+                }
+                vec![Change::Post(reaction.post_id.clone())]
+            }
             WsEvent::ChannelMemberUpdated(member) => {
                 self.apply_member(member.clone()).into_iter().collect()
             }

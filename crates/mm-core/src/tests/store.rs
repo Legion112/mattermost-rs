@@ -975,3 +975,120 @@ fn an_unknown_channel_still_gets_a_heading() {
     assert_eq!(name, "c-unknown");
     assert_eq!(members, None);
 }
+
+fn reaction(post: &str, user: &str, emoji: &str, at: i64) -> mm_types::Reaction {
+    mm_types::Reaction {
+        post_id: PostId::new(post),
+        user_id: UserId::new(user),
+        emoji_name: emoji.to_owned(),
+        create_at: Timestamp(at),
+        delete_at: Timestamp::ZERO,
+    }
+}
+
+/// Reactions ride in a post's metadata, and the store has to pick them up
+/// from a page as well as from the WebSocket.
+#[test]
+fn reactions_arrive_with_the_post_that_carries_them() {
+    let mut store = store();
+    let post: Post = serde_json::from_str(
+        r#"{"id":"p1","channel_id":"c1","create_at":10,"update_at":10,
+            "metadata":{"reactions":[
+              {"post_id":"p1","user_id":"u-other","emoji_name":"tada","create_at":20},
+              {"post_id":"p1","user_id":"u-me","emoji_name":"tada","create_at":30}]}}"#,
+    )
+    .expect("parses");
+    store.apply_ws(&WsEvent::Posted {
+        post,
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    });
+
+    let summary = store.reactions_for(&PostId::new("p1"));
+    assert_eq!(summary.len(), 1);
+    assert_eq!(summary[0].emoji, "tada");
+    assert_eq!(summary[0].count, 2);
+    assert!(summary[0].mine, "the signed-in user is one of the two");
+}
+
+/// A reaction the server has soft-deleted must not be counted.
+#[test]
+fn a_deleted_reaction_in_metadata_is_not_counted() {
+    let mut store = store();
+    let post: Post = serde_json::from_str(
+        r#"{"id":"p1","channel_id":"c1","create_at":10,"update_at":10,
+            "metadata":{"reactions":[
+              {"post_id":"p1","user_id":"u-other","emoji_name":"tada","create_at":20,
+               "delete_at":25}]}}"#,
+    )
+    .expect("parses");
+    store.apply_ws(&WsEvent::Posted {
+        post,
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    });
+    assert!(store.reactions_for(&PostId::new("p1")).is_empty());
+}
+
+/// Adding and removing over the WebSocket, including the duplicate that a
+/// reconnect replay delivers.
+#[test]
+fn reactions_add_and_remove_and_survive_a_replay() {
+    let mut store = store();
+    let added = reaction("p1", "u-other", "tada", 20);
+
+    let changes = store.apply_ws(&WsEvent::ReactionAdded(added.clone()));
+    assert_eq!(changes, vec![Change::Post(PostId::new("p1"))]);
+    // The dead queue replays the same event after a reconnect.
+    store.apply_ws(&WsEvent::ReactionAdded(added.clone()));
+    assert_eq!(store.reactions_for(&PostId::new("p1"))[0].count, 1);
+    assert!(!store.reactions_for(&PostId::new("p1"))[0].mine);
+
+    store.apply_ws(&WsEvent::ReactionRemoved(added.clone()));
+    assert!(store.reactions_for(&PostId::new("p1")).is_empty());
+    // And removing one that was never there is not an error -- neither when
+    // the post is known and the reaction is not, nor when the post itself
+    // has never been seen. A reconnect replays removals too.
+    store.apply_ws(&WsEvent::ReactionRemoved(added));
+    assert!(store.reactions_for(&PostId::new("p1")).is_empty());
+    store.apply_ws(&WsEvent::ReactionRemoved(reaction(
+        "p-never-seen",
+        "u-other",
+        "tada",
+        40,
+    )));
+    assert!(store.reactions_for(&PostId::new("p-never-seen")).is_empty());
+}
+
+/// Emoji are shown in the order they first appeared on the post. Sorting by
+/// name or by count instead would reshuffle the row every time somebody
+/// joined an existing reaction, under the cursor of whoever was clicking.
+#[test]
+fn emoji_keep_the_order_they_first_appeared_in() {
+    let mut store = store();
+    store.apply_ws(&WsEvent::ReactionAdded(reaction("p1", "u-a", "zzz", 10)));
+    store.apply_ws(&WsEvent::ReactionAdded(reaction("p1", "u-b", "aaa", 20)));
+    store.apply_ws(&WsEvent::ReactionAdded(reaction("p1", "u-c", "aaa", 30)));
+    store.apply_ws(&WsEvent::ReactionAdded(reaction("p1", "u-d", "aaa", 5)));
+
+    let summary = store.reactions_for(&PostId::new("p1"));
+    let order: Vec<(&str, i64)> = summary
+        .iter()
+        .map(|r| (r.emoji.as_str(), r.count))
+        .collect();
+    // `aaa` first because its earliest reaction is at 5, even though it was
+    // the second emoji this test added.
+    assert_eq!(order, [("aaa", 3), ("zzz", 1)]);
+}
+
+/// A post nobody has reacted to has no reactions, and asking about a post
+/// that does not exist is not an error.
+#[test]
+fn a_post_with_no_reactions_has_none() {
+    let store = store();
+    assert!(store.reactions_for(&PostId::new("p-nothing")).is_empty());
+}
