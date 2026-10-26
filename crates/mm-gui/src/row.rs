@@ -21,6 +21,11 @@ mod imp {
         pub time: RefCell<String>,
         /// A trailing line for attachments and reply counts; empty hides it.
         pub meta: RefCell<String>,
+        /// A day boundary rather than a message. `body` carries the label.
+        pub separator: Cell<bool>,
+        /// The same author is still talking, so the author line is redundant
+        /// and this row draws tight under the one above it.
+        pub grouped: Cell<bool>,
         /// Join/leave notices and the like, which Mattermost renders muted
         /// and without an author rather than as somebody speaking.
         pub system: Cell<bool>,
@@ -55,6 +60,7 @@ pub struct PostRowFields<'a> {
     pub meta: &'a str,
     pub markup: bool,
     pub system: bool,
+    pub grouped: bool,
 }
 
 impl PostRow {
@@ -69,7 +75,28 @@ impl PostRow {
         inner.meta.replace(fields.meta.to_owned());
         inner.markup.set(fields.markup);
         inner.system.set(fields.system);
+        inner.grouped.set(fields.grouped);
         this
+    }
+
+    /// A day boundary. Carries its label in `body` because that is the one
+    /// string every row kind has, and a separator has nothing else.
+    #[must_use]
+    pub fn separator(label: &str) -> Self {
+        let this: Self = glib::Object::new();
+        this.imp().body.replace(label.to_owned());
+        this.imp().separator.set(true);
+        this
+    }
+
+    #[must_use]
+    pub fn is_separator(&self) -> bool {
+        self.imp().separator.get()
+    }
+
+    #[must_use]
+    pub fn is_grouped(&self) -> bool {
+        self.imp().grouped.get()
     }
 
     #[must_use]

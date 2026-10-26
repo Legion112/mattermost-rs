@@ -140,3 +140,20 @@ xwininfo -root -tree | grep -F "\"mattermost-rs [$MMRS_APP_ID]\"" | awk '{print 
 
 `xdotool` and `wmctrl` are not installed on this machine; `import -window <id>`
 from ImageMagick is.
+
+## Bottom alignment, and the measurement it still owes
+
+`ListView` has `valign: End`, so a channel with four messages rests them on
+the composer instead of stranding them at the top of an empty pane. That is
+what the Electron client does and the difference is immediately visible.
+
+It carries a risk worth writing down. `ListView` only realizes the rows in
+view, and that depends on `ScrolledWindow` handing it the *viewport* height.
+`valign: End` asks for its natural height instead. Measured with a 1200-post
+channel in the lab the window still opened instantly and landed on the newest
+message — but the store only ever held the newest page of 60, because
+scrollback paging is not implemented yet, so the model never grew past one
+screen's worth either way. **That measurement proves the common path and not
+the virtualization.** When backfill lands, measure this again with tens of
+thousands of rows in the model before trusting it; if it does fall over, the
+fix is to drop the alignment, not to work around it.

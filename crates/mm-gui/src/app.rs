@@ -416,6 +416,44 @@ fn describe_extras(post: &mm_types::Post, replies: i64) -> String {
 }
 
 /// `HH:MM` in local time.
+/// The reader's offset from UTC, east positive.
+///
+/// Read here and passed into `mm-core` rather than read there: a calendar day
+/// depends on the timezone, and the projection stays a total function of its
+/// arguments.
+fn local_utc_offset_secs() -> i32 {
+    chrono::Local::now().offset().local_minus_utc()
+}
+
+/// The label for a day separator.
+///
+/// "Today" and "Yesterday" are relative to the moment of drawing, which is
+/// why this is here and not in `mm-core`: it is the one piece of this that
+/// genuinely needs a clock.
+fn describe_day(at: mm_types::Timestamp, date: &mm_core::CivilDate) -> String {
+    use chrono::{Datelike, Local, TimeZone};
+
+    let today = Local::now().date_naive();
+    let is = |day: chrono::NaiveDate| {
+        i64::from(day.year()) == date.year && day.month() == date.month && day.day() == date.day
+    };
+    if is(today) {
+        return "Today".to_owned();
+    }
+    if today.pred_opt().is_some_and(is) {
+        return "Yesterday".to_owned();
+    }
+    match Local.timestamp_millis_opt(at.millis()) {
+        chrono::offset::LocalResult::Single(dt) if dt.year() == today.year() => {
+            dt.format("%A, %B %-d").to_string()
+        }
+        chrono::offset::LocalResult::Single(dt) => dt.format("%A, %B %-d, %Y").to_string(),
+        // An unrepresentable date is not worth failing a render over; the
+        // rule still draws, just without a label.
+        _ => String::new(),
+    }
+}
+
 fn clock_time(millis: i64) -> String {
     use chrono::{Local, TimeZone};
     // An out-of-range or ambiguous timestamp is not worth failing a render
@@ -433,102 +471,170 @@ fn clock_time(millis: i64) -> String {
 /// Not a per-post widget: a factory that materializes one widget set per item
 /// means a hundred-thousand-post channel never opens. That is measured, not
 /// assumed -- see `docs/gtk-notes.md`.
+/// Build the widget tree one list row is recycled through.
+fn setup_post_row(item: &gtk::ListItem) {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.set_margin_top(4);
+    row.set_margin_bottom(4);
+
+    // The day boundary, drawn as a rule with the date sitting in it.
+    // Every row carries one and all but the first of each day hide it,
+    // because ListView recycles a fixed set of widgets and a row that
+    // could not become a separator would need a second factory.
+    let day = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    day.set_margin_top(8);
+    day.set_margin_bottom(8);
+    day.append(
+        &gtk::Separator::builder()
+            .hexpand(true)
+            .valign(gtk::Align::Center)
+            .build(),
+    );
+    day.append(
+        &gtk::Label::builder()
+            .css_classes(["dim-label", "caption-heading"])
+            .build(),
+    );
+    day.append(
+        &gtk::Separator::builder()
+            .hexpand(true)
+            .valign(gtk::Align::Center)
+            .build(),
+    );
+
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let author = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["heading"])
+        .build();
+    let time = gtk::Label::builder()
+        .xalign(0.0)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    header.append(&author);
+    header.append(&time);
+    // A non-editable TextView rather than a Label: selection across the
+    // whole message, and the inline paintables custom emoji will need.
+    let body = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .selectable(true)
+        .build();
+    // Attachments and "N replies" -- the line that keeps a post whose
+    // only content is a file from rendering as an author and nothing.
+    let meta = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .css_classes(["dim-label", "caption"])
+        .build();
+    row.append(&day);
+    row.append(&header);
+    row.append(&body);
+    row.append(&meta);
+    item.set_child(Some(&row));
+}
+
+/// Fill a recycled row from the model item bound to it.
+fn bind_post_row(item: &gtk::ListItem) {
+    let Some(data) = item.item().and_downcast::<PostRow>() else {
+        return;
+    };
+    let Some(row) = item.child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    // Walk the children by position rather than first/last: there are
+    // four now, and last_child() silently became the wrong one when the
+    // meta line was added.
+    let Some(day) = row.first_child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(header) = day.next_sibling().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let Some(meta) = body.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+
+    // A separator is a day label and nothing else.
+    let is_separator = data.is_separator();
+    day.set_visible(is_separator);
+    if is_separator {
+        if let Some(label) = day
+            .first_child()
+            .and_then(|c| c.next_sibling())
+            .and_downcast::<gtk::Label>()
+        {
+            label.set_text(&data.body());
+        }
+        header.set_visible(false);
+        body.set_visible(false);
+        meta.set_visible(false);
+        return;
+    }
+
+    // A grouped message sits tight under the one above it, which is what
+    // makes a block read as one utterance rather than three.
+    row.set_margin_top(if data.is_grouped() { 0 } else { 6 });
+
+    let system = data.is_system();
+    // Still the same person talking: the author line would just repeat
+    // itself, so the message tucks under the one above.
+    header.set_visible(!data.is_grouped());
+    if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
+        // A join/leave notice is not somebody speaking, so it gets no
+        // author line.
+        let name = data.author();
+        author.set_text(if system { "" } else { name.as_str() });
+    }
+    if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
+        time.set_text(&data.time());
+    }
+
+    // set_markup on text that is not markup would make GTK log an error
+    // and drop the message, so the flag decides.
+    if data.is_markup() {
+        body.set_markup(&data.body());
+    } else {
+        body.set_text(&data.body());
+    }
+    if system {
+        body.add_css_class("dim-label");
+    } else {
+        body.remove_css_class("dim-label");
+    }
+    body.set_visible(!data.body().is_empty());
+
+    let extra = data.meta();
+    meta.set_text(&extra);
+    meta.set_visible(!extra.is_empty());
+}
+
 fn build_post_list() -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        row.set_margin_top(4);
-        row.set_margin_bottom(4);
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let author = gtk::Label::builder()
-            .xalign(0.0)
-            .css_classes(["heading"])
-            .build();
-        let time = gtk::Label::builder()
-            .xalign(0.0)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        header.append(&author);
-        header.append(&time);
-        // A non-editable TextView rather than a Label: selection across the
-        // whole message, and the inline paintables custom emoji will need.
-        let body = gtk::Label::builder()
-            .xalign(0.0)
-            .wrap(true)
-            .selectable(true)
-            .build();
-        // Attachments and "N replies" -- the line that keeps a post whose
-        // only content is a file from rendering as an author and nothing.
-        let meta = gtk::Label::builder()
-            .xalign(0.0)
-            .wrap(true)
-            .css_classes(["dim-label", "caption"])
-            .build();
-        row.append(&header);
-        row.append(&body);
-        row.append(&meta);
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("a list item")
-            .set_child(Some(&row));
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            setup_post_row(item);
+        }
     });
     factory.connect_bind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("a list item");
-        let Some(data) = item.item().and_downcast::<PostRow>() else {
-            return;
-        };
-        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
-            return;
-        };
-        // Walk the children by position rather than first/last: there are
-        // three now, and last_child() silently became the wrong one when the
-        // meta line was added.
-        let Some(header) = row.first_child().and_downcast::<gtk::Box>() else {
-            return;
-        };
-        let Some(body) = header.next_sibling().and_downcast::<gtk::Label>() else {
-            return;
-        };
-        let Some(meta) = body.next_sibling().and_downcast::<gtk::Label>() else {
-            return;
-        };
-
-        let system = data.is_system();
-        if let Some(author) = header.first_child().and_downcast::<gtk::Label>() {
-            // A join/leave notice is not somebody speaking, so it gets no
-            // author line.
-            let name = data.author();
-            author.set_text(if system { "" } else { name.as_str() });
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            bind_post_row(item);
         }
-        if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
-            time.set_text(&data.time());
-        }
-
-        // set_markup on text that is not markup would make GTK log an error
-        // and drop the message, so the flag decides.
-        if data.is_markup() {
-            body.set_markup(&data.body());
-        } else {
-            body.set_text(&data.body());
-        }
-        if system {
-            body.add_css_class("dim-label");
-        } else {
-            body.remove_css_class("dim-label");
-        }
-        body.set_visible(!data.body().is_empty());
-
-        let extra = data.meta();
-        meta.set_text(&extra);
-        meta.set_visible(!extra.is_empty());
     });
-
     let post_view = gtk::ListView::builder()
         .model(&gtk::NoSelection::new(Some(posts.clone())))
         .factory(&factory)
         .single_click_activate(false)
+        // A channel with four messages in it rests them on the composer
+        // rather than stranding them at the top of an empty pane, which is
+        // what the Electron client does and what a chat window should do.
+        .valign(gtk::Align::End)
         .build();
     let scroller = gtk::ScrolledWindow::builder()
         .child(&post_view)
@@ -590,6 +696,13 @@ impl Ui {
             Event::Users(users) => {
                 self.store.borrow_mut().apply_users(users);
                 self.refresh_sidebar();
+                // The roster arrives after the posts that needed it -- the
+                // authors of a page are fetched from the page itself -- so
+                // every row by a newly-known author is still showing a raw
+                // user id until this redraw.
+                if let Some(open) = self.selected.borrow().clone() {
+                    self.refresh_posts(&open);
+                }
             }
             Event::Posts { channel, page } => {
                 self.store
@@ -751,7 +864,23 @@ impl Ui {
 
         let store = self.store.borrow();
         self.posts.remove_all();
-        for post in store.channel_posts(channel) {
+        // Date separators and author grouping are computed in mm-core, where
+        // they are covered: they are calendar arithmetic and identity
+        // comparisons, and both are wrong in ways only a test notices.
+        let visible = store.channel_posts(channel);
+        let offset = local_utc_offset_secs();
+        for row in mm_core::rows::project(&visible, offset) {
+            let (id, grouped) = match row {
+                mm_core::Row::Date { at, date } => {
+                    self.posts
+                        .append(&PostRow::separator(&describe_day(at, &date)));
+                    continue;
+                }
+                mm_core::Row::Post { id, grouped } => (id, grouped),
+            };
+            let Some(post) = store.posts.get(&id) else {
+                continue;
+            };
             let author = store
                 .users
                 .get(&post.user_id)
@@ -774,6 +903,7 @@ impl Ui {
                 meta: &describe_extras(post, store.reply_count(&post.id)),
                 markup,
                 system: post.is_system(),
+                grouped,
             }));
         }
         self.composer.set_sensitive(true);

@@ -13,10 +13,12 @@
 //! the page that already carried it. Under those conditions "take the newer
 //! value" is wrong and "take whatever arrived last" is worse.
 
+pub mod rows;
 pub mod store;
 pub mod timeline;
 pub mod unread;
 
+pub use rows::{CivilDate, Row};
 pub use store::{Change, SidebarRow, Store};
 pub use timeline::{Merge, PageAnchor, PostKey, Timeline};
 pub use unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread, unread};
