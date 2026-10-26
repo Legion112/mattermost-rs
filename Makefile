@@ -1,12 +1,18 @@
 # mattermost-rs — a native Linux Mattermost client.
 #
 # Run `make` or `make help` for the available targets.
+#
+# Recipes here are one-line delegations. Anything with real logic in it lives
+# in the xtask crate, in Rust, where it is compiled, typed and linted by
+# `make check` like the rest of the tree -- rather than in shell scripts that
+# nothing checks. `cargo xtask` with no arguments lists the tasks.
 
 CARGO ?= cargo
 BIN   := mattermost-rs
+XTASK := $(CARGO) run -q -p xtask --
 
-# Homebrew's 403 .pc files shadow the system ones and report GTK 4.22 where
-# this machine actually runs apt's 4.14 -- the same version a GitHub
+# Homebrew's several hundred .pc files shadow the system ones and report GTK
+# 4.22 where this machine actually runs apt's 4.14 -- the same version a GitHub
 # ubuntu-24.04 runner has. Exported here as well as in .cargo/config.toml so
 # that pkg-config invoked from a recipe agrees with pkg-config invoked from a
 # build script. `make doctor` asserts the result.
@@ -14,7 +20,7 @@ export PKG_CONFIG_LIBDIR := /usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgco
 export PKG_CONFIG_PATH   :=
 
 # The 100% line-coverage gate applies to these and only these. The list is
-# duplicated in xtask/src/main.rs, which fails the build if a workspace member
+# duplicated in xtask/src/deps.rs, which fails the build if a workspace member
 # appears in neither list -- so the duplication cannot drift silently.
 GATED := -p mm-api -p mm-core -p mm-md -p mm-config -p mm-desktop
 
@@ -38,7 +44,7 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  $(BOLD)%-16s$(OFF) %s\n", $$1, $$2}'
 	@echo
-	@echo "$(DIM)Variables: CARGO, TAG$(OFF)"
+	@echo "$(DIM)Variables: CARGO, TAG, OUT$(OFF)"
 
 # ---------------------------------------------------------------- build
 
@@ -57,6 +63,12 @@ run: ## Run the client from the build tree
 .PHONY: install
 install: ## Install the binary into ~/.cargo/bin
 	$(CARGO) install --path . --locked
+
+OUT ?= dist
+
+.PHONY: package
+package: release ## Strip, smoke-test and checksum the release binary into $(OUT)
+	$(XTASK) package --out $(OUT)
 
 .PHONY: clean
 clean: ## Remove build artefacts
@@ -86,32 +98,23 @@ test-doc: ## Run the doctests (they do NOT count toward the coverage gate)
 
 .PHONY: check-deps
 check-deps: ## Assert every member is classified and no gated crate can reach I/O
-	$(CARGO) run -q -p xtask -- check-deps
+	$(XTASK) check-deps
 
 .PHONY: check
 check: fmt-check clippy test check-deps cover-gate ## Everything CI's check job runs
 
 .PHONY: audit
 audit: ## Check dependencies for advisories (needs cargo-audit)
-	@command -v cargo-audit >/dev/null 2>&1 \
-		|| { echo "cargo-audit not installed: cargo install cargo-audit"; exit 1; }
 	$(CARGO) audit
 
 .PHONY: version-check
 version-check: ## Assert TAG=vX.Y.Z matches the version in Cargo.toml
-	@test -n "$(TAG)" || { echo "usage: make version-check TAG=v0.1.0"; exit 1; }
-	@v=$$($(CARGO) metadata --no-deps --format-version 1 \
-		| sed -n 's/.*"name":"mattermost-rs","version":"\([^"]*\)".*/\1/p'); \
-	 test "v$$v" = "$(TAG)" \
-	   || { echo "tag $(TAG) does not match Cargo.toml version v$$v"; exit 1; }; \
-	 echo "$(TAG) matches Cargo.toml"
+	$(XTASK) version-check --tag $(TAG)
 
 # ---------------------------------------------------------------- coverage
 
 .PHONY: cover-gate
 cover-gate: ## 100% line coverage on the gated crates, or fail
-	@command -v cargo-llvm-cov >/dev/null 2>&1 \
-		|| { echo "cargo-llvm-cov not installed: cargo install cargo-llvm-cov"; exit 1; }
 	@# A stale .profraw set from a differently-configured run both inflates and
 	@# corrupts the merge. This is where go-tun's `-count=1` paranoia belongs in
 	@# Rust: cargo does not cache test results, but it does keep profile data.
@@ -154,8 +157,8 @@ cover-missing: ## List the uncovered lines in the gated crates
 
 .PHONY: apt-deps
 apt-deps: ## Install the system build dependencies (needs sudo)
-	./scripts/apt-deps.sh
+	$(XTASK) apt-deps
 
 .PHONY: doctor
 doctor: ## Check the build environment, especially which GTK pkg-config finds
-	@./scripts/doctor.sh
+	$(XTASK) doctor

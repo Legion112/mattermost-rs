@@ -2,7 +2,7 @@
 
 Measured on this machine, not inferred: Ubuntu 24.04, X11, GNOME Shell 46.0,
 GTK **4.14.5** and libadwaita **1.5.0** from apt (Homebrew's 4.22.4 excluded
-via `PKG_CONFIG_LIBDIR` — see `scripts/doctor.sh`).
+via `PKG_CONFIG_LIBDIR` — see `cargo xtask doctor`).
 
 These were the two risks the plan called most likely to blow the schedule.
 Both are retired. The spike sources are throwaway and live outside the repo.

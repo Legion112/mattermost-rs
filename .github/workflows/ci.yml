@@ -22,6 +22,9 @@ env:
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
 
+# Every step below is a single command. Anything with logic in it is a task in
+# the xtask crate, so that CI and a workstation run the same compiled code
+# rather than CI running a shell transcription of it.
 jobs:
   check:
     name: check (fmt, clippy, tests, 100% gate)
@@ -48,19 +51,22 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # mm-gui has no GTK dependency yet -- it arrives in P1. Installing the
-      # headers now is ~40s of cheap insurance: without this step, the commit
-      # that adds `gtk4` to mm-gui turns the build red for a reason that has
-      # nothing to do with that commit.
+      # headers now is cheap insurance: without this step, the commit that adds
+      # `gtk4` to mm-gui turns the build red for a reason that has nothing to
+      # do with that commit.
       - name: install system build dependencies
-        run: ./scripts/apt-deps.sh
+        run: cargo run -q -p xtask -- apt-deps
+
+      - name: check the build environment
+        run: cargo run -q -p xtask -- doctor
 
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
 
       # Asserts every workspace member is classified gated/ungated, and that no
-      # gated crate can transitively reach tokio, reqwest, gtk4, glib, zbus,
-      # rusqlite or bollard. That invariant is what makes 100% reachable.
+      # gated crate can transitively reach tokio, reqwest, gtk4, glib, ksni,
+      # zbus, rusqlite or bollard. That invariant is what makes 100% reachable.
       - run: cargo run -q -p xtask -- check-deps
 
       - uses: taiki-e/install-action@v2
@@ -96,23 +102,15 @@ jobs:
         with:
           shared-key: ubuntu-24.04-1.92.0
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: ./scripts/apt-deps.sh
+      - name: install system build dependencies
+        run: cargo run -q -p xtask -- apt-deps
 
       - run: cargo build --release --locked --bin mattermost-rs
 
-      - name: strip and smoke-test
-        run: |
-          set -o pipefail
-          strip target/release/mattermost-rs
-          ./target/release/mattermost-rs --version
-          ldd target/release/mattermost-rs
-
-      - name: collect artifacts
-        run: |
-          set -o pipefail
-          mkdir -p dist
-          cp target/release/mattermost-rs dist/
-          cd dist && sha256sum ./* > SHA256SUMS
+      # Strips, asserts the binary reports the manifest's version, asserts it
+      # links nothing out of Homebrew's prefix, and writes SHA256SUMS.
+      - name: strip, smoke-test and checksum
+        run: cargo run -q -p xtask -- package --out dist
 
       - uses: actions/upload-artifact@v7
         with:
