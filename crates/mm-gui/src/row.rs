@@ -31,7 +31,7 @@ pub enum BlockKind {
 /// expressible as Pango markup, and flattening them into one label is why
 /// code in this client read as ordinary monospace text while every other
 /// client drew it in a panel.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BlockView {
     pub kind: BlockKind,
     /// Pango markup, or literal text when `markup` is false.
@@ -49,7 +49,7 @@ pub struct BlockView {
 /// The markup is produced once here rather than in the bind callback,
 /// because bind runs on every scroll and parsing markdown there would make
 /// a channel of alerts crawl.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AttachmentView {
     /// The bar down the left, when the attachment states a colour.
     pub rgb: Option<(u8, u8, u8)>,
@@ -68,7 +68,7 @@ pub struct AttachmentView {
 /// The texture is optional: a file whose thumbnail could not be decoded and
 /// whose full image has not arrived yet still reserves its space, so the
 /// list does not jump when it lands.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
     pub texture: Option<gtk::gdk::Texture>,
     pub width: i32,
@@ -171,7 +171,7 @@ pub enum Voice {
 }
 
 /// The rest of the yes-or-no facts about a row.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PostRowFlags {
     /// The same author is still talking.
     pub grouped: bool,
@@ -217,6 +217,36 @@ impl PostRow {
         let this = Self::separator("New messages");
         this.imp().unread_mark.set(true);
         this
+    }
+
+    /// Whether this row would draw exactly as `other` does.
+    ///
+    /// What makes a redraw cheap. `refresh_posts` rebuilds every row's
+    /// worth of data -- which is free, under a millisecond for a channel
+    /// -- and then hands the list only the run that actually differs.
+    /// Handing it the lot instead made `ListView` build a widget set for
+    /// every row of the channel, every time an avatar or an image landed,
+    /// and a channel grew more expensive to redraw with every page of
+    /// history loaded into it.
+    #[must_use]
+    pub fn matches(&self, other: &Self) -> bool {
+        let (a, b) = (self.imp(), other.imp());
+        a.separator.get() == b.separator.get()
+            && a.unread_mark.get() == b.unread_mark.get()
+            && a.voice.get() == b.voice.get()
+            && a.grouped.get() == b.grouped.get()
+            && a.replies.get() == b.replies.get()
+            && *a.id.borrow() == *b.id.borrow()
+            && *a.author.borrow() == *b.author.borrow()
+            && *a.body.borrow() == *b.body.borrow()
+            && *a.time.borrow() == *b.time.borrow()
+            && *a.meta.borrow() == *b.meta.borrow()
+            && *a.blocks.borrow() == *b.blocks.borrow()
+            && *a.cards.borrow() == *b.cards.borrow()
+            && *a.images.borrow() == *b.images.borrow()
+            && *a.reactions.borrow() == *b.reactions.borrow()
+            && *a.quick_reactions.borrow() == *b.quick_reactions.borrow()
+            && *a.avatar.borrow() == *b.avatar.borrow()
     }
 
     #[must_use]

@@ -1880,6 +1880,62 @@ fn reaction_chip(
     chip
 }
 
+/// Put `next` into `model`, replacing only the run that differs.
+///
+/// `ListView` builds a widget set for every row it is handed -- measured,
+/// not assumed: a hundred-row channel realizes a hundred rows -- so
+/// handing it the whole channel on every redraw made each redraw cost the
+/// whole channel. An avatar landing, a message arriving, a page of history
+/// loaded: each one redrew everything, and every page of history made the
+/// next redraw worse, until the window stopped answering.
+///
+/// Two cases, because a message list only ever does two things. The list
+/// grows at one end -- history prepended, a new message appended -- which
+/// a common prefix and a common suffix find exactly. Or it stays the same
+/// length and some rows are redrawn, which is every avatar, image,
+/// reaction and edit, and those are replaced one at a time.
+///
+/// Returns whether anything moved.
+fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
+    let drawn: Vec<PostRow> = (0..model.n_items())
+        .filter_map(|i| model.item(i).and_downcast::<PostRow>())
+        .collect();
+
+    // The same rows, some of them redrawn: replace those, one at a time.
+    // This is the common case and the one a prefix-and-suffix diff is
+    // worst at -- an avatar arriving changes every row that person wrote,
+    // scattered down the channel, and the run from the first of them to
+    // the last is most of it.
+    if drawn.len() == next.len() {
+        let mut changed = false;
+        for (at, row) in next.iter().enumerate() {
+            if !drawn[at].matches(row) {
+                model.splice(
+                    u32::try_from(at).unwrap_or(u32::MAX),
+                    1,
+                    std::slice::from_ref(row),
+                );
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    let shared = drawn.len().min(next.len());
+    let before = (0..shared)
+        .take_while(|i| drawn[*i].matches(&next[*i]))
+        .count();
+    let after = (0..shared - before)
+        .take_while(|i| drawn[drawn.len() - 1 - i].matches(&next[next.len() - 1 - i]))
+        .count();
+    model.splice(
+        u32::try_from(before).unwrap_or(u32::MAX),
+        u32::try_from(drawn.len() - before - after).unwrap_or(u32::MAX),
+        &next[before..next.len() - after],
+    );
+    true
+}
+
 fn build_post_list(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
@@ -2363,9 +2419,8 @@ impl Ui {
             rows.push(self.row_for(&store, post, grouped, &quick));
             previous = Some(post);
         }
-        // One signal, not one per reply: see `refresh_posts`.
-        self.thread_posts
-            .splice(0, self.thread_posts.n_items(), &rows);
+        // Only what changed, for the reasons in `refresh_posts`.
+        splice_changed(&self.thread_posts, &rows);
         drop(store);
 
         // Place the divider the first time the pane appears, and leave it
@@ -2646,12 +2701,12 @@ impl Ui {
             };
             rows.push(self.row_for(&store, post, grouped, &quick));
         }
-        // Built first and handed over in one go. Appending emits
-        // `items_changed` per item, and `ListView` answers each one by
-        // measuring what it holds: a channel of sixty messages took 2.3
-        // seconds to draw that way, nearly all of it in ninety-five
-        // signals. One splice is one signal. See docs/gtk-notes.md.
-        self.posts.splice(0, self.posts.n_items(), &rows);
+        // Only what changed. Appending emits `items_changed` per item and
+        // `ListView` answers each one by measuring what it holds, so the
+        // rows are built first and handed over together; and because
+        // `ListView` realizes everything it is handed, only the run that
+        // actually differs is handed over at all. See docs/gtk-notes.md.
+        splice_changed(&self.posts, &rows);
         self.composer.set_sensitive(true);
 
         // No bottom alignment. Resting a short channel's messages on the

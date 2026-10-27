@@ -234,3 +234,48 @@ each team in turn, and each answer redrew the sidebar and the open channel.
 `redraw_soon` (100 ms) and `sidebar_soon` (50 ms) collapse a burst into one
 redraw; the WebSocket arm uses the former too, since a reconnect replays a
 queue of events.
+
+## Redrawing a channel: hand the list only what changed
+
+The measurements above said `ListView` builds a widget set for every row
+it is handed, and that turned out to be literal: a hundred-row channel
+reports a hundred `setup` calls, every time, with a 601-pixel viewport.
+Virtualisation does not happen here, and the scroll policy is not the
+reason — the view's `vscroll-policy` is already `Minimum`.
+
+Taken with `refresh_posts` rebuilding the whole model, that made every
+redraw cost the whole channel: an avatar landing, an image decoding, a
+message arriving, a page of history loaded. And every page of history
+made the next redraw worse, so a reader who scrolled up a few times
+arrived at a window that stopped answering — which is exactly what it
+looked like from the outside.
+
+So the model is handed only the run that differs. Building the rows is
+free (under a millisecond for a channel); comparing them is `PostRow::matches`,
+which compares everything a row draws, textures included. Two cases,
+because a message list only ever does two things:
+
+  - **The length changed** — history prepended, a message appended. A
+    common prefix and a common suffix find the inserted run exactly.
+  - **The length is the same and some rows are redrawn** — every avatar,
+    image, reaction and edit. Those are replaced one at a time, because a
+    prefix-and-suffix diff is worst at precisely this: one person's avatar
+    arriving changes every row they wrote, scattered down the channel, and
+    the run from the first to the last of them is most of it.
+
+Measured on the same channel, 102 rows:
+
+| | realized | time |
+|---|---|---|
+| before any of this | 95 of 95 | 2411 ms |
+| lazy hover toolbar, whole model respliced | 102 of 102 | 146 ms |
+| …and only the prefix/suffix respliced | 92 | 130 ms |
+| …and same-length rows replaced one by one | 16 | 42 ms |
+| a redraw where nothing changed | 0 | 0 ms |
+
+What is left: the first draw of a channel still realizes every row in it,
+because every row is new. That is a one-off per channel opened, and at
+about 1.4 ms a row it is 150 ms for a hundred. If it ever matters, the
+thing to find out is why `ListView` does not virtualise here — the obvious
+candidates (scroll policy, `hscrollbar-policy: never`, bottom alignment)
+have all been ruled out by measurement.
