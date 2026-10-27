@@ -14,13 +14,16 @@ use std::hash::BuildHasher;
 /// One group of channels under its heading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SidebarSection {
+    /// The server's category id, so a click on the heading can say which
+    /// category it folded. Empty for a section invented for orphans
+    /// below, which has no category behind it to fold.
+    pub id: String,
     pub display_name: String,
     pub kind: CategoryKind,
     /// The user muted the whole category.
     pub muted: bool,
-    /// The user folded it shut. Carried through rather than acted on here:
-    /// what a collapsed category still shows (its unread channels) is a
-    /// display decision.
+    /// The user folded it shut. What that leaves on show is
+    /// [`Self::visible_rows`].
     pub collapsed: bool,
     pub rows: Vec<SidebarRow>,
 }
@@ -36,6 +39,22 @@ impl SidebarSection {
     #[must_use]
     pub fn mentions(&self) -> i64 {
         self.rows.iter().map(|r| r.unread.mentions).sum()
+    }
+
+    /// What the section draws: everything in it, or -- folded shut -- only
+    /// the channels wanting attention.
+    ///
+    /// The open channel stays on show whatever happens, because folding
+    /// the category the reader is standing in must not hide where they
+    /// are. This is what the web app does, and it is the whole point of
+    /// folding a category rather than hiding it: an unread message is
+    /// still reachable.
+    #[must_use]
+    pub fn visible_rows(&self, open: Option<&ChannelId>) -> Vec<&SidebarRow> {
+        self.rows
+            .iter()
+            .filter(|row| !self.collapsed || row.is_unread() || open == Some(&row.channel))
+            .collect()
     }
 }
 
@@ -63,6 +82,7 @@ pub fn group<S: BuildHasher>(
                 .filter_map(|id| remaining.remove(id))
                 .collect();
             SidebarSection {
+                id: category.id.clone(),
                 display_name: category.display_name.clone(),
                 kind: category.kind.clone(),
                 muted: category.muted,
@@ -90,6 +110,7 @@ pub fn group<S: BuildHasher>(
         match sections.iter_mut().find(|s| s.kind == wanted) {
             Some(section) => section.rows.push(row),
             None => sections.push(SidebarSection {
+                id: String::new(),
                 display_name: heading.to_owned(),
                 kind: wanted,
                 muted: false,

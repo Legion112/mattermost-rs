@@ -52,6 +52,11 @@ pub enum Command {
     Delete(PostId),
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
+    /// Fold a sidebar category shut, or open it again.
+    ///
+    /// Carries the whole category because that is what the server takes:
+    /// it replaces a category rather than patching one.
+    SetCategory(mm_types::ChannelCategory),
     /// Fetch the page of history immediately before `before`, which is the
     /// oldest post currently held.
     LoadOlder { channel: ChannelId, before: PostId },

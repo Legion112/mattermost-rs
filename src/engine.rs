@@ -207,6 +207,19 @@ fn spawn_sync(a: &Active, events: &async_channel::Sender<Event>) {
     });
 }
 
+/// Record a category as the window now draws it -- folded shut or open.
+///
+/// Split out only to keep `handle` short enough to read in one go.
+async fn set_category(
+    a: &Active,
+    category: &mm_types::ChannelCategory,
+    events: &async_channel::Sender<Event>,
+) {
+    let user = UserId::new(&a.session.user_id);
+    let request = rest::update_category(&user, &category.team_id, category);
+    best_effort(a, &request, events).await;
+}
+
 /// Fetch a channel's messages without holding up the next command.
 ///
 /// Not awaited: a sync takes a couple of seconds, and a channel opened
@@ -262,6 +275,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
     match command {
         Command::Sync => spawn_sync(a, events),
         Command::OpenChannel(channel) => spawn_open_channel(a, channel, events),
+        Command::SetCategory(category) => set_category(a, &category, events).await,
         Command::Pin { post, pinned } => {
             best_effort(a, &rest::set_pinned(&post, pinned), events).await;
         }

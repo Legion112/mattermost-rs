@@ -158,6 +158,30 @@ impl Store {
         vec![Change::Sidebar]
     }
 
+    /// Fold a category shut, or open it again.
+    ///
+    /// The server owns this -- `collapsed` is a field on the category, and
+    /// it follows the reader to their other clients -- but the sidebar has
+    /// to fold under the click rather than when the next sync answers, so
+    /// it is applied here and sent on. A sync overwrites it, which is what
+    /// makes the server's copy the one that matters.
+    pub fn set_category_collapsed(&mut self, id: &str, collapsed: bool) -> Vec<Change> {
+        let Some(category) = self.categories.iter_mut().find(|c| c.id == id) else {
+            return Vec::new();
+        };
+        if category.collapsed == collapsed {
+            return Vec::new();
+        }
+        category.collapsed = collapsed;
+        vec![Change::Sidebar]
+    }
+
+    /// One category as the server last stated it, for sending back.
+    #[must_use]
+    pub fn category(&self, id: &str) -> Option<&ChannelCategory> {
+        self.categories.iter().find(|c| c.id == id)
+    }
+
     /// The sidebar as sections, if the server has told us how it is grouped.
     ///
     /// Empty before the first sync completes, and the caller falls back to

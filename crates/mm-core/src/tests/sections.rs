@@ -256,3 +256,72 @@ fn an_orphan_invents_only_the_heading_it_needs() {
         ]
     );
 }
+
+/// An open section draws everything in it; a folded one draws only what
+/// wants attention. This is what folding a category *means* in Mattermost
+/// -- it is not hiding the channels, it is hiding the quiet ones -- and a
+/// fold that buried an unread message would lose messages.
+#[test]
+fn folding_a_category_leaves_its_unread_channels_on_show() {
+    let mut cat = category("ch", "Channels", CategoryKind::Channels, &["c1", "c2"]);
+    let mut loud = row("c2", "Beta");
+    loud.unread.messages = 3;
+
+    let open = group(
+        vec![row("c1", "Alpha"), loud.clone()],
+        &[cat.clone()],
+        &no_recency(),
+    );
+    assert_eq!(open[0].visible_rows(None).len(), 2);
+
+    cat.collapsed = true;
+    let folded = group(vec![row("c1", "Alpha"), loud], &[cat], &no_recency());
+    let showing: Vec<&str> = folded[0]
+        .visible_rows(None)
+        .iter()
+        .map(|r| r.display_name.as_str())
+        .collect();
+    assert_eq!(showing, ["Beta"]);
+}
+
+/// The channel the reader is standing in stays on show when its category
+/// is folded. Otherwise folding the category you are reading takes the
+/// highlighted row out from under you and the sidebar shows nothing
+/// selected.
+#[test]
+fn folding_keeps_the_open_channel_on_show() {
+    let mut cat = category("ch", "Channels", CategoryKind::Channels, &["c1", "c2"]);
+    cat.collapsed = true;
+    let folded = group(
+        vec![row("c1", "Alpha"), row("c2", "Beta")],
+        &[cat],
+        &no_recency(),
+    );
+    let open = ChannelId::new("c1");
+    let showing: Vec<&str> = folded[0]
+        .visible_rows(Some(&open))
+        .iter()
+        .map(|r| r.display_name.as_str())
+        .collect();
+    assert_eq!(showing, ["Alpha"]);
+}
+
+/// The id travels with the section, because a click on the heading has to
+/// say which category it folded. A section invented for channels the
+/// server filed nowhere has none, and cannot be folded.
+#[test]
+fn a_section_carries_its_category_id_and_an_orphan_has_none() {
+    let cats = [category(
+        "fav",
+        "Favorites",
+        CategoryKind::Favorites,
+        &["c1"],
+    )];
+    let sections = group(
+        vec![row("c1", "Alpha"), row("c2", "Beta")],
+        &cats,
+        &no_recency(),
+    );
+    assert_eq!(sections[0].id, "fav");
+    assert_eq!(sections[1].id, "");
+}

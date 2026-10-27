@@ -527,6 +527,18 @@ fn wire_thread(
 ///
 /// Separate from `build` only so neither function grows past the point where
 /// it can be read in one go.
+/// Connect folding a category shut and opening it again.
+fn wire_categories(ui: &Ui, sidebar: &gtk::ListBox) {
+    let ui = ui.clone();
+    sidebar.connect_row_activated(move |_, row| {
+        // Channel rows are activatable too -- that is how a click opens
+        // one -- so this has to say which kind it was handed.
+        if row.has_css_class("mmrs-section") {
+            ui.toggle_category(&row.widget_name());
+        }
+    });
+}
+
 /// Connect choosing a channel: what it opens, and what it closes.
 fn wire_selection(
     ui: &Ui,
@@ -655,6 +667,7 @@ fn wire(
         });
     }
     wire_selection(ui, sidebar, commands);
+    wire_categories(ui, sidebar);
 
     {
         let commands = commands.clone();
@@ -1814,6 +1827,15 @@ fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     line.set_margin_top(10);
     line.set_margin_bottom(2);
+    // The chevron Mattermost puts there, pointing down when the category
+    // is open and along when it is folded.
+    let chevron = gtk::Image::from_icon_name(if section.collapsed {
+        "pan-end-symbolic"
+    } else {
+        "pan-down-symbolic"
+    });
+    chevron.add_css_class("dim-label");
+    line.append(&chevron);
     let name = gtk::Label::builder()
         .label(section.display_name.to_uppercase())
         .xalign(0.0)
@@ -1834,12 +1856,19 @@ fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
         );
     }
 
+    // Activatable but not selectable: clicking it folds the category,
+    // while arrow keys and the first-channel fallback walk straight past
+    // it the way they always did.
     let row = gtk::ListBoxRow::builder()
         .child(&line)
         .selectable(false)
-        .activatable(false)
+        .activatable(true)
         .build();
     row.add_css_class("mmrs-section");
+    // Which category this heading is, for the click. A section invented
+    // for channels the server filed in no category has no id and cannot
+    // be folded; `Store::category` returns nothing for it.
+    row.set_widget_name(&section.id);
     row
 }
 
@@ -2128,6 +2157,34 @@ impl Ui {
         }
     }
 
+    /// Fold a category shut, or open it again.
+    ///
+    /// Applied here and sent on, rather than waited for: the server owns
+    /// the flag, but a sidebar that folds when the network answers reads
+    /// as a click that did not land. The next sync states the server's
+    /// copy, which is what makes it the one that counts.
+    fn toggle_category(&self, id: &str) {
+        let Some(category) = self.store.borrow().category(id).cloned() else {
+            return;
+        };
+        let folded = !category.collapsed;
+        if self
+            .store
+            .borrow_mut()
+            .set_category_collapsed(id, folded)
+            .is_empty()
+        {
+            return;
+        }
+        self.refresh_sidebar();
+        self.commands
+            .send(Command::SetCategory(mm_types::ChannelCategory {
+                collapsed: folded,
+                ..category
+            }))
+            .ok();
+    }
+
     fn refresh_sidebar(&self) {
         let sections = self.store.borrow().sidebar_sections();
         // Nothing to redraw, and redrawing anyway would destroy the row
@@ -2170,7 +2227,7 @@ impl Ui {
         let mut to_select = None;
         for section in &sections {
             self.sidebar.append(&section_header(section));
-            for row in &section.rows {
+            for row in section.visible_rows(keep.as_ref()) {
                 let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 line.append(&self.channel_mark(row));
                 let name = gtk::Label::builder()

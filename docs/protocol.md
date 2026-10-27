@@ -350,6 +350,19 @@ unconfirmed, and a committed fixture is byte-stable by construction.
 - `channel_ids` is in the user's manual order and is empty for a category
   with nothing in it.
 
+`PUT /users/{user_id}/teams/{team_id}/channels/categories/{category_id}`
+writes one back. Verified against the live server on 2026-10-27 by folding
+a category from the client and reading the flag back: `false` → `true` →
+`false`.
+
+- **It replaces, it does not patch.** The body is a whole category, so one
+  carrying only `collapsed` would blank the display name and empty
+  `channel_ids`. Send back the category the last fetch gave you, with the
+  one field changed.
+- `collapsed` is where a folded category lives, and it follows the user
+  between clients -- the Electron client's folds are visible here and the
+  other way round.
+
 **Inferred, not verified:** that an empty `sorting` should be drawn
 alphabetically. It is what the web app shows for an untouched Channels
 category, but it was not read out of the server or the webapp source. An

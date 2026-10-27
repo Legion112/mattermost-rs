@@ -1743,3 +1743,61 @@ fn retaining_everything_reports_no_change() {
     store.apply_members(vec![member("c1", 0, 0, 0)]);
     assert!(store.retain_channels(&[ChannelId::new("c1")]).is_empty());
 }
+
+/// Folding a category is applied here and sent on, so the sidebar folds
+/// under the click rather than when the network answers.
+#[test]
+fn a_category_folds_and_unfolds_and_says_when_nothing_moved() {
+    let mut store = Store::new(UserId::new("me"), Threading::Flat);
+    store.apply_categories(&CategoryList {
+        categories: vec![ChannelCategory {
+            id: "channels_me_t".into(),
+            display_name: "Channels".into(),
+            ..ChannelCategory::default()
+        }],
+        order: vec!["channels_me_t".into()],
+    });
+
+    assert!(
+        !store
+            .category("channels_me_t")
+            .expect("the category")
+            .collapsed
+    );
+    assert_eq!(
+        store.set_category_collapsed("channels_me_t", true),
+        vec![Change::Sidebar]
+    );
+    assert!(
+        store
+            .category("channels_me_t")
+            .expect("the category")
+            .collapsed
+    );
+
+    // Folding one that is already folded changes nothing, and must not
+    // report a change: every report redraws the sidebar.
+    assert!(
+        store
+            .set_category_collapsed("channels_me_t", true)
+            .is_empty()
+    );
+    // Nor does one the server has never mentioned.
+    assert!(
+        store
+            .set_category_collapsed("no_such_category", true)
+            .is_empty()
+    );
+    assert!(store.category("no_such_category").is_none());
+
+    assert_eq!(
+        store.set_category_collapsed("channels_me_t", false),
+        vec![Change::Sidebar]
+    );
+    assert!(
+        !store
+            .category("channels_me_t")
+            .expect("the category")
+            .collapsed
+    );
+}

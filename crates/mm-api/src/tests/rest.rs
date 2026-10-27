@@ -178,6 +178,42 @@ fn the_categories_path_carries_the_user_id_not_me() {
     assert_eq!(list.order, ["channels_u1_t1"]);
 }
 
+/// Folding a category sends the **whole** category back, not a patch:
+/// the server replaces the one it holds, so a body carrying only
+/// `collapsed` would blank the display name and empty the channel list.
+#[test]
+fn updating_a_category_sends_all_of_it_back() {
+    let user = UserId::new("u1");
+    let team = TeamId::new("t1");
+    let category = mm_types::ChannelCategory {
+        id: "channels_u1_t1".into(),
+        display_name: "Channels".into(),
+        collapsed: true,
+        channel_ids: vec![ChannelId::new("c1")],
+        ..mm_types::ChannelCategory::default()
+    };
+    let request = update_category(&user, &team, &category);
+    assert_eq!(request.method, Method::Put);
+    assert_eq!(
+        request.path,
+        "/api/v4/users/u1/teams/t1/channels/categories/channels_u1_t1"
+    );
+    let Body::Json(body) = &request.body else {
+        panic!("expected JSON")
+    };
+    assert!(body.contains(r#""collapsed":true"#), "{body}");
+    assert!(body.contains(r#""display_name":"Channels""#), "{body}");
+    assert!(body.contains(r#""channel_ids":["c1"]"#), "{body}");
+
+    // The server answers with the category as it now stands.
+    let back = parse_category(&ok(
+        r#"{"id":"channels_u1_t1","type":"channels","sorting":"",
+            "display_name":"Channels","collapsed":true,"channel_ids":["c1"]}"#,
+    ))
+    .unwrap();
+    assert!(back.collapsed);
+}
+
 /// The stats endpoint feeds the member count in the channel header.
 #[test]
 fn channel_stats_reads_the_member_count() {

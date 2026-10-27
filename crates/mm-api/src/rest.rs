@@ -6,8 +6,8 @@
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
-    CategoryList, Channel, ChannelId, ChannelMember, ChannelStats, FileId, Post, PostId, PostList,
-    Preference, Reaction, Team, TeamId, User, UserId,
+    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, FileId, Post,
+    PostId, PostList, Preference, Reaction, Team, TeamId, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -211,6 +211,29 @@ pub fn my_categories(user: &UserId, team: &TeamId) -> HttpRequest {
 
 pub fn parse_categories(resp: &HttpResponse) -> Result<CategoryList, ApiError> {
     parse_json(resp, "GET /users/{user}/teams/{team}/channels/categories")
+}
+
+/// Replace one sidebar category.
+///
+/// How the server records a category being folded shut: `collapsed` is a
+/// field on the category, and the whole category is sent back, because
+/// the server replaces rather than patches. Addressed by explicit user id
+/// like the fetch above -- there is no `/users/me/` form.
+#[must_use]
+pub fn update_category(user: &UserId, team: &TeamId, category: &ChannelCategory) -> HttpRequest {
+    let body = serde_json::to_value(category).unwrap_or_default();
+    HttpRequest::put(format!(
+        "{API}/users/{user}/teams/{team}/channels/categories/{id}",
+        id = category.id
+    ))
+    .json(&body)
+}
+
+pub fn parse_category(resp: &HttpResponse) -> Result<ChannelCategory, ApiError> {
+    parse_json(
+        resp,
+        "PUT /users/{user}/teams/{team}/channels/categories/{id}",
+    )
 }
 
 /// How many people are in a channel, for the channel header.
