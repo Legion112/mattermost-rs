@@ -2546,3 +2546,52 @@ fn muting_a_channel_writes_mark_unread_rather_than_a_flag() {
     // A channel this reader is not in has no membership to change.
     assert!(store.set_muted(&ChannelId::new("c9"), true).is_empty());
 }
+
+/// A newest page that does not reach what is held means the reader has
+/// been away longer than a page. The fresh tail wins and the stale run
+/// is dropped.
+///
+/// This did nothing at all before: the page was refused, thrown away,
+/// and the channel went on showing yesterday's messages with nothing
+/// newer -- a chat client silently missing messages, which is the one
+/// failure it must not have. Suspend a laptop over a weekend and this
+/// is the path every channel takes.
+#[test]
+fn a_newest_page_past_the_gap_replaces_what_is_held() {
+    let mut store = store();
+    let c1 = ChannelId::new("c1");
+    store.apply_post_list(
+        &c1,
+        &page(vec![post("old1", "c1", 10), post("old2", "c1", 20)]),
+        PageAnchor::Newest,
+    );
+    assert_eq!(store.channel_posts(&c1).len(), 2);
+
+    // Nothing in common with what is held: the posts between were
+    // never fetched.
+    let fresh = page(vec![post("new1", "c1", 9_000), post("new2", "c1", 9_100)]);
+    let changes = store.apply_post_list(&c1, &fresh, PageAnchor::Newest);
+    let held: Vec<&str> = store
+        .channel_posts(&c1)
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    assert_eq!(held, ["new1", "new2"], "the fresh tail is what is shown");
+    // And the window is told, or it would go on drawing the old run.
+    assert!(changes.contains(&Change::Unread(c1.clone())));
+    assert!(changes.contains(&Change::Post(PostId::new("new1"))));
+    // Scrolling up must be able to close the gap, so this is open again
+    // even though the page said there was nothing before it.
+    assert!(!store.timelines[&c1].older_complete());
+
+    // An overlapping page still merges rather than resetting.
+    let overlap = page(vec![post("new2", "c1", 9_100), post("new3", "c1", 9_200)]);
+    store.apply_post_list(&c1, &overlap, PageAnchor::Newest);
+    assert_eq!(store.channel_posts(&c1).len(), 3);
+
+    // A page asked for with a cursor is the caller's to reconcile: a
+    // reset under it would throw away the stretch being paged through.
+    let detached = page(vec![post("far", "c1", 50)]);
+    store.apply_post_list(&c1, &detached, PageAnchor::Unanchored);
+    assert_eq!(store.channel_posts(&c1).len(), 3, "left alone");
+}

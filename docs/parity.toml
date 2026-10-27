@@ -130,10 +130,16 @@ notes = """
 posted / post_edited / post_deleted confirmed live, including the `post` \
 payload being a JSON document inside a JSON string. A hello carrying a NEW \
 connection id is treated as lost events; an event-sequence hole is treated the \
-same way. NOT yet done: acting on either signal with a REST resync -- the GUI \
-currently re-syncs the sidebar but does not close a post gap, which is why \
-mm-core::Timeline refuses to merge a page whose adjacency it cannot \
-establish."""
+same way, and both now re-fetch the open channel as well as re-syncing the \
+sidebar. A newest page that cannot reach what is held -- a laptop asleep for \
+longer than a page of messages -- **keeps the fresh tail and discards the \
+stale run**, as the plan's rule says, with `older_complete` reopened so \
+scrolling up closes the gap the ordinary way. That case previously did \
+nothing at all: the page was refused and thrown away, and the channel went on \
+showing yesterday's messages with nothing newer. NOT yet done: closing the \
+gap eagerly with `after=` paging rather than waiting for the reader to \
+scroll, and catching up channels other than the open one, which re-fetch when \
+they are next opened."""
 
 [[feature]]
 id       = "desktop.notifications"

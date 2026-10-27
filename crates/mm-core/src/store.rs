@@ -1079,6 +1079,28 @@ impl Store {
                     timeline.set_older_complete(true);
                 }
             }
+            // The newest page does not reach what is held: the reader
+            // has been away for longer than a page, and the posts in
+            // between were never fetched.
+            //
+            // **This used to do nothing**, which meant the page was
+            // thrown away and the channel went on showing yesterday's
+            // messages with nothing newer -- the client silently
+            // missing messages, which is the one failure a chat client
+            // must not have. The plan's rule applies: discard the stale
+            // run and keep the fresh tail, bounding memory and staying
+            // honest, rather than paging backwards indefinitely to join
+            // them. `older_complete` goes back to false, so scrolling
+            // up closes the gap the ordinary way.
+            Merge::WouldLeaveGap if anchor == PageAnchor::Newest => {
+                timeline.reset_to_page(page);
+                changes.extend(page.ordered().map(|p| Change::Post(p.id.clone())));
+                changes.push(Change::Unread(channel.clone()));
+            }
+            // Nothing to do, for two different reasons: the page was
+            // already held, or it was asked for with a cursor and its
+            // gap is the caller's to close -- resetting under one of
+            // those would throw away the stretch being paged through.
             Merge::NoChange | Merge::WouldLeaveGap => {}
         }
         changes

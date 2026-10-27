@@ -4566,6 +4566,16 @@ impl Ui {
             Event::ResyncRequired(why) => {
                 self.set_status(&format!("reconnected: {why}"));
                 self.commands.send(Command::Sync).ok();
+                // The sync rebuilds the sidebar but fetches no posts,
+                // so without this the conversation on screen keeps
+                // whatever it had when the socket died -- which, after
+                // a suspended laptop, is everything except what was
+                // said while it slept. Asking for the channel again
+                // fetches the newest page, and the store keeps that
+                // fresh tail even when it cannot reach what is held.
+                if let Some(open) = self.selected.borrow().clone() {
+                    self.commands.send(Command::OpenChannel(open)).ok();
+                }
             }
             Event::Status(text) => self.set_status(&text),
             Event::Failed(text) => self.set_status(&format!("error: {text}")),
