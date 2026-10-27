@@ -792,8 +792,8 @@ up as a second icon in the dock and no badge, with nothing anywhere saying \
 why; all three names come from one constant. The icon is deliberately **not** \
 Mattermost's own mark: this is a third-party client and that logo is somebody \
 else's trademark. Verified on this machine: the entry installed, and \
-`xdg-mime query default x-scheme-handler/mattermost` answers with it. NOT \
-built: the system-wide install a `.deb` would do.
+`xdg-mime query default x-scheme-handler/mattermost` answers with it. The \
+system-wide install is `desktop.package`.
 
 `--autostart` also writes an entry into `~/.config/autostart`, so the client \
 starts with the session -- with `--hidden`, which starts it in the tray \
@@ -824,6 +824,44 @@ this machine: with the client already running, \
 the second process exited. NOT verified: the permalink form, which fetches \
 the post to learn its channel and then opens the thread -- built and \
 unit-tested, but not followed end to end."""
+
+[[feature]]
+id       = "desktop.package"
+area     = "desktop"
+upstream = "desktop"
+status   = "partial"
+endpoints = []
+verified_against = ""
+notes = """
+`cargo xtask package --out dist --deb` builds an installable `.deb` beside \
+the stripped binary and its checksums: the binary in `/usr/bin`, and the \
+same icon and `.desktop` entry `install-desktop` writes into the user's own \
+directories, rendered from the same function with the installed path in the \
+`Exec=` line. By hand with `dpkg-deb` rather than through `cargo-deb`, \
+because the package is four files and a control stanza, and a build tool \
+that has to be installed before the build works is one more thing between a \
+clone and an artefact.
+
+The control stanza is rendered in `mm-desktop`, inside the coverage gate, \
+because what a package claims about itself is a decision and a wrong one \
+fails at install time on somebody else's machine with a dependency solver's \
+error message. GTK, libadwaita and GtkSourceView are `Depends`; the \
+dictionaries and the GNOME `AppIndicator` extension are `Recommends`, since \
+without them the client still runs -- it just draws no spelling underlines \
+and has no tray. Dependencies are named rather than derived with \
+`dpkg-shlibdeps`, which wants a full `debian/` tree to run inside. \
+`Installed-Size` is measured from the staged tree in kibibytes, which is \
+what the field means and is wrong in half the hand-written control files \
+anywhere. Every mode is normalised to 0755/0644 after staging, or the \
+build machine's umask ships group-writable files into `/usr/share`.
+
+Verified on this machine: the package builds, `dpkg-deb --info` reads the \
+stanza back, the payload is the four expected paths with root ownership and \
+standard modes, `desktop-file-validate` passes the entry out of the package, \
+and the extracted binary reports its version. NOT verified: an actual \
+`dpkg -i` and the dependency solve, which needs root. NOT built: an `.rpm`, \
+a Flatpak, a repository to install from, and a release workflow that \
+attaches the package to a tag."""
 
 [[feature]]
 id       = "desktop.badge"

@@ -61,6 +61,14 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     std::fs::copy(&built, &shipped)
         .map_err(|e| format!("could not copy to {}: {e}", shipped.display()))?;
 
+    // Before the checksums, so the package is in them: a manifest that
+    // omits an artefact is worse than no manifest, because it looks
+    // complete.
+    if args.iter().any(|a| a == "--deb") {
+        let deb = crate::deb::build(&out, &built, want)?;
+        println!("built {}", deb.display());
+    }
+
     // sha256sum-compatible: "<hex>  <name>", two spaces, so `sha256sum -c`
     // can verify it.
     let mut manifest = String::new();

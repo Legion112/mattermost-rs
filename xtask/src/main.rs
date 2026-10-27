@@ -9,6 +9,7 @@
 mod aptdeps;
 mod check;
 mod coverage;
+mod deb;
 mod deps;
 mod desktop;
 mod doctor;
@@ -33,8 +34,9 @@ usage: cargo xtask <task> [args]
                           it; --autostart also starts it at login, hidden in the
                           tray
   uninstall-desktop       take them away again
-  package --out <dir>     strip the release binary, smoke-test it, write
-                          SHA256SUMS
+  package --out <dir> [--deb]
+                          strip the release binary, smoke-test it, write
+                          SHA256SUMS; --deb also builds an installable package
   version-check --tag vX.Y.Z
                           assert the tag matches the version in Cargo.toml
 ";

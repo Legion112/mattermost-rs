@@ -6,6 +6,7 @@
 //! gate. That split is what lets every notification rule be tested in CI,
 //! which has no session bus at all.
 
+pub mod control;
 pub mod deeplink;
 pub mod download;
 pub mod entry;
@@ -13,6 +14,7 @@ pub mod geometry;
 pub mod notify;
 pub mod tray;
 
+pub use control::render_control;
 pub use deeplink::{DeepLink, DeepLinkError, parse as parse_deep_link};
 pub use download::{destination, safe_name};
 pub use entry::{

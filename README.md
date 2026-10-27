@@ -103,6 +103,26 @@ and out of `ps`. It goes through the same code as the window.
 SSO-only accounts need a personal access token (Account Settings → Security):
 the browser-based desktop-token hand-off is not implemented yet.
 
+### Installing it
+
+```bash
+cargo xtask install-desktop   # icon and .desktop entry in ~/.local/share
+make deb                      # dist/mattermost-rs_<version>_<arch>.deb
+```
+
+The first needs no root and uninstalls by deleting two files (`cargo xtask
+uninstall-desktop`); add `--autostart` to also start it with the session, in
+the tray. The second builds a system-wide package with `dpkg-deb`: the binary
+in `/usr/bin`, the same icon and entry under `/usr/share`, and a control
+stanza that depends on GTK and libadwaita while only *recommending* the
+dictionaries and the GNOME AppIndicator extension — without those the client
+still runs, it just has no spelling underlines and no tray.
+
+Either way the desktop learns the `x-scheme-handler/mattermost` association,
+so a `mattermost://` link opens this client, and the icon is deliberately not
+Mattermost's own mark: this is a third-party client and that logo is somebody
+else's trademark.
+
 ### A throwaway server to try it against
 
 A disposable Mattermost runs in one container, which is what the development

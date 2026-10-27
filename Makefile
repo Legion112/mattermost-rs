@@ -70,6 +70,10 @@ OUT ?= dist
 package: release ## Strip, smoke-test and checksum the release binary into $(OUT)
 	$(XTASK) package --out $(OUT)
 
+.PHONY: deb
+deb: release ## package, and build an installable .deb into $(OUT)
+	$(XTASK) package --out $(OUT) --deb
+
 .PHONY: clean
 clean: ## Remove build artefacts
 	$(CARGO) clean
