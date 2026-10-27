@@ -2558,6 +2558,60 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
         let store = ui.store.borrow();
         store.posts.get(&root).map(|post| post.channel_id.clone())
     });
+    // Each box edits what was last said where it sends: the channel
+    // composer the last message in the channel, the thread's own box
+    // the last reply in the thread. Taking the channel's last message
+    // from a thread box is the same mistake that once sent replies to
+    // the wrong channel.
+    attach_edit_last(ui, composer, |ui| {
+        let channel = ui.selected.borrow().clone()?;
+        let store = ui.store.borrow();
+        store.my_last_post(&channel).map(editable)
+    });
+    attach_edit_last(ui, thread_composer, |ui| {
+        let root = ui.thread_root.borrow().clone()?;
+        let store = ui.store.borrow();
+        store.my_last_reply(&root).map(editable)
+    });
+}
+
+/// Up in an empty composer edits the last thing this reader said.
+///
+/// Mattermost's own binding, and the one a daily user reaches for
+/// without thinking after a typo. **Only when the box is empty**, which
+/// is both what the webapp does and what keeps this out of the way of
+/// everything else Up means: moving the caret through a message being
+/// written, and walking either completion popup, whose runs are never
+/// empty.
+fn attach_edit_last(
+    ui: &Ui,
+    view: &gtk::TextView,
+    last: impl Fn(&Ui) -> Option<Editable> + 'static,
+) {
+    let keys = gtk::EventControllerKey::new();
+    let ui = ui.clone();
+    let box_ = view.clone();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if key != gdk::Key::Up || !state.is_empty() || !composer_text(&box_).is_empty() {
+            return glib::Propagation::Proceed;
+        }
+        let Some((post, was)) = last(&ui) else {
+            // Nothing of this reader's to edit. Not a complaint: an Up
+            // in an empty box is as likely to be a stray key press.
+            return glib::Propagation::Proceed;
+        };
+        open_editor(&box_, &post, &was, &ui.commands);
+        glib::Propagation::Stop
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    view.add_controller(keys);
+}
+
+/// A post to edit: which one, and what it says now.
+type Editable = (PostId, String);
+
+fn editable(post: &mm_types::Post) -> Editable {
+    (post.id.clone(), post.message.clone())
 }
 
 /// The list and popover a completion is drawn in, anchored on a
@@ -4597,7 +4651,7 @@ fn wire_edit(
 /// thing that matters is that the author sees the markdown they wrote
 /// and can change it.
 fn open_editor(
-    near: &gtk::Button,
+    near: &impl IsA<gtk::Widget>,
     post: &PostId,
     was: &str,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,

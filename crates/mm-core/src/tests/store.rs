@@ -2766,3 +2766,71 @@ fn an_emoji_uploaded_now_is_known_now() {
     // reconnect does not redraw every message on screen.
     assert!(store.apply_ws(&added).is_empty());
 }
+
+/// Up in an empty composer edits the last thing this reader said, so
+/// what it finds has to be editable: somebody else's message, a
+/// join/leave notice and a webhook's post are none of them.
+#[test]
+fn the_last_message_of_mine_is_the_one_up_edits() {
+    let mut store = store();
+    let channel = ChannelId::new("c1");
+    let mine = |id: &str, at: i64| Post {
+        user_id: UserId::new(ME),
+        ..post(id, "c1", at)
+    };
+
+    assert!(store.my_last_post(&channel).is_none());
+
+    store.apply_post_list(
+        &channel,
+        &page(vec![mine("p1", 10), post("p2", "c1", 20), mine("p3", 30)]),
+        PageAnchor::Newest,
+    );
+    assert_eq!(
+        store.my_last_post(&channel).map(|p| p.id.as_str()),
+        Some("p3")
+    );
+
+    // A join/leave notice is the server talking in this reader's name,
+    // and there is nothing in it to change.
+    store.apply_post_list(
+        &channel,
+        &page(vec![
+            mine("p1", 10),
+            post("p2", "c1", 20),
+            mine("p3", 30),
+            Post {
+                kind: "system_join_channel".to_owned(),
+                ..mine("p4", 40)
+            },
+        ]),
+        PageAnchor::Newest,
+    );
+    assert_eq!(
+        store.my_last_post(&channel).map(|p| p.id.as_str()),
+        Some("p3")
+    );
+
+    // A reply is edited from the thread's own box, which is where it
+    // was written.
+    let _ = store.apply_thread(&page(vec![Post {
+        root_id: PostId::new("p3"),
+        ..mine("p5", 50)
+    }]));
+    assert_eq!(
+        store
+            .my_last_reply(&PostId::new("p3"))
+            .map(|p| p.id.as_str()),
+        Some("p5")
+    );
+    // A thread nobody has replied to has only its root, which here is
+    // this reader's.
+    assert_eq!(
+        store
+            .my_last_reply(&PostId::new("p1"))
+            .map(|p| p.id.as_str()),
+        Some("p1")
+    );
+    // Somebody else's thread offers nothing to edit.
+    assert!(store.my_last_reply(&PostId::new("p2")).is_none());
+}

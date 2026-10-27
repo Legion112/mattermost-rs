@@ -1628,6 +1628,32 @@ impl Store {
             .collect()
     }
 
+    /// The last thing this reader said in a channel.
+    ///
+    /// What Up in an empty composer edits, which is why it skips the
+    /// things that cannot be edited: somebody else's message, a
+    /// join/leave notice, and a webhook's post, which is nobody's to
+    /// change. With collapsed threads a reply is not in the channel at
+    /// all, so Up in the channel composer never reaches one -- which
+    /// matches the webapp, where the thread's own box edits the thread.
+    #[must_use]
+    pub fn my_last_post(&self, channel: &ChannelId) -> Option<&Post> {
+        Self::last_of_mine(self.channel_posts(channel), &self.me)
+    }
+
+    /// The last thing this reader said in a thread.
+    #[must_use]
+    pub fn my_last_reply(&self, root: &PostId) -> Option<&Post> {
+        Self::last_of_mine(self.thread_posts(root), &self.me)
+    }
+
+    fn last_of_mine<'a>(posts: Vec<&'a Post>, me: &UserId) -> Option<&'a Post> {
+        posts
+            .into_iter()
+            .rev()
+            .find(|p| p.user_id == *me && !p.is_system() && !p.is_from_webhook())
+    }
+
     /// How many replies a root post has, counting what is actually held.
     ///
     /// The server's own `reply_count` is preferred when it is set, because it

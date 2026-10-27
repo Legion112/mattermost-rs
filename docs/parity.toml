@@ -973,6 +973,20 @@ stops instead of spinning. Every binding is on the window in the capture \
 phase, because a `GtkEntry` with the focus eats key presses and the composer \
 has the focus nearly always. Verified on a live account: Alt+Down walked \
 four channels and wrapped from the bottom of CHANNELS to the top of \
-FAVORITES, and Alt+Shift+Down landed on an unread one. NOT built: the \
-shortcuts overlay Ctrl+/ offers, Alt+Shift+Up/Down across teams, and the \
-message-level bindings (reply, edit the last message, react)."""
+FAVORITES, and Alt+Shift+Down landed on an unread one.
+
+**Up in an empty composer edits the last thing this reader said**, which \
+is Mattermost's own binding and the one a daily user reaches for without \
+thinking after a typo. Only when the box is empty: that is what the \
+webapp does, and it is also what keeps the binding out of the way of \
+everything else Up means here -- moving the caret through a message being \
+written, and walking either completion popup, whose runs are never empty. \
+Each box edits what was last said where it sends, so the thread's own box \
+edits the last reply in the thread rather than the last message in the \
+channel behind it. A join/leave notice and a webhook's post are skipped: \
+they carry this reader's id and there is nothing in them to change. \
+Verified on a live account: Up in an empty box opened the editor on the \
+last message with its text in it, and Up with two characters typed moved \
+the caret instead. NOT built: the shortcuts overlay Ctrl+/ offers, \
+Alt+Shift+Up/Down across teams, and the remaining message-level bindings \
+(reply to the last message, react to it)."""
