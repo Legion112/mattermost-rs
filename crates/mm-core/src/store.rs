@@ -1325,6 +1325,32 @@ impl Store {
             .is_some_and(ChannelMember::is_muted)
     }
 
+    /// Whether this reader follows a thread.
+    ///
+    /// Being in the followed list *is* following: the server sends no
+    /// flag, which is why there is nothing else to consult.
+    #[must_use]
+    pub fn is_following(&self, root: &PostId) -> bool {
+        self.threads.iter().any(|thread| thread.id == *root)
+    }
+
+    /// Stop following a thread, locally, and say so.
+    ///
+    /// Only the stopping is applied here. Starting has nothing to add
+    /// -- the thread object comes from the server, and inventing one
+    /// would mean a row drawn from a guess until the next sync
+    /// replaced it with the truth. Unfollowing is the one that needs
+    /// to be immediate, because it is done to make a noisy thread go
+    /// away and a row that lingers reads as a click that missed.
+    pub fn unfollow(&mut self, root: &PostId) -> Vec<Change> {
+        let before = self.threads.len();
+        self.threads.retain(|thread| thread.id != *root);
+        if self.threads.len() == before {
+            return Vec::new();
+        }
+        vec![Change::Threads]
+    }
+
     /// Mute a channel, or let it speak again, and say what to send.
     ///
     /// Applied here and sent on, like folding a category: the sidebar

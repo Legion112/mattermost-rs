@@ -248,8 +248,19 @@ The followed-thread list, with the root message, the channel, the \
 participants' faces and the reply count, and Followed/Unreads tabs. The totals \
 behind the sidebar badge are the server's account-wide ones, not a count of \
 the page: confirmed on a live server reporting 961 threads while returning 50. \
-NOT built: the filter control beside the tabs, and following or unfollowing a \
-thread from here."""
+Following and unfollowing is here: a toggle in the thread panel's header, \
+where Mattermost puts it, pressed when the thread is in the followed list \
+and flat when it is not -- being in that list *is* what following means, \
+since the server sends no flag. `PUT` to follow and `DELETE` to stop, the \
+one place in this API where the verb carries the whole meaning. Unfollowing \
+is applied at once, because it is done to make a noisy thread go away and a \
+row that lingers reads as a click that missed; following waits for the \
+server, because the thread object comes from there and inventing one would \
+draw a row from a guess. Setting the toggle to match a thread being opened \
+is guarded against its own handler, or opening a followed thread would \
+immediately unfollow it. Verified on a live account: pressed for a thread in \
+the list, flat for one opened from a channel. NOT built: the filter control \
+beside the tabs, and marking a thread read from the list."""
 
 [[feature]]
 id       = "drafts.view"

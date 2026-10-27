@@ -206,6 +206,11 @@ struct Ui {
     /// nowhere to click would put the application somewhere the reader
     /// cannot get it back from.
     has_tray: Rc<std::cell::Cell<bool>>,
+    thread_follow: gtk::ToggleButton,
+    /// True while the Following toggle is being set to match a thread
+    /// that has just been opened, so its own handler can tell that
+    /// apart from the reader clicking it.
+    setting_follow: Rc<std::cell::Cell<bool>>,
     /// What the server last answered for a quick-switcher query, and a
     /// way to redraw the open switcher when a later answer lands.
     /// `None` when no switcher is open, which is also what stops a
@@ -457,6 +462,7 @@ fn build_thread_pane(
     gtk::ListView,
     gtk::Box,
     gtk::Button,
+    gtk::ToggleButton,
     Composer,
     gtk::ScrolledWindow,
 ) {
@@ -475,7 +481,16 @@ fn build_thread_pane(
     thread_header.set_margin_end(6);
     thread_header.set_margin_top(8);
     thread_header.set_margin_bottom(4);
+    // Following, where Mattermost puts it: a thread you replied to is
+    // followed whether you meant it or not, and the Threads view is
+    // only useful if the noisy ones can be dropped from it.
+    let thread_follow = gtk::ToggleButton::builder()
+        .label("Following")
+        .css_classes(["flat", "caption"])
+        .tooltip_text("Follow this thread, or stop")
+        .build();
     thread_header.append(&thread_title);
+    thread_header.append(&thread_follow);
     thread_header.append(&thread_close);
     let thread_composer = build_composer("Reply…");
     let thread_composer_pane = thread_composer.pane.clone();
@@ -494,6 +509,7 @@ fn build_thread_pane(
         thread_view,
         thread_pane,
         thread_close,
+        thread_follow,
         thread_composer,
         thread_scroller,
     )
@@ -752,8 +768,15 @@ fn build(
     content.append(&status);
     content.append(&composer.pane);
 
-    let (thread_posts, thread_view, thread_pane, thread_close, thread_composer, thread_scroller) =
-        build_thread_pane(&rows);
+    let (
+        thread_posts,
+        thread_view,
+        thread_pane,
+        thread_close,
+        thread_follow,
+        thread_composer,
+        thread_scroller,
+    ) = build_thread_pane(&rows);
 
     let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
@@ -793,6 +816,8 @@ fn build(
         badge: Rc::new(std::cell::Cell::new(NO_BADGE_YET)),
         pending_link: Rc::new(RefCell::new(None)),
         has_tray: Rc::new(std::cell::Cell::new(false)),
+        thread_follow: thread_follow.clone(),
+        setting_follow: Rc::new(std::cell::Cell::new(false)),
         elsewhere: Rc::new(RefCell::new(Elsewhere::default())),
         refill_switcher: Rc::new(RefCell::new(None)),
         window: window.clone(),
@@ -835,6 +860,7 @@ fn build(
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_unread_filter(&ui, &unread_only);
     wire_thread(&ui, &thread_close, &thread_composer, commands);
+    wire_follow(&ui, &thread_follow);
     wire_login(&login, commands);
     ui
 }
@@ -2481,6 +2507,42 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
     // presses, and the composer has the focus most of the time.
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     window.add_controller(keys);
+}
+
+/// Connect the Following toggle on the thread panel.
+///
+/// Guarded against its own redraw: `set_active` when the panel opens a
+/// thread fires `toggled` as surely as a click does, and without the
+/// guard opening a followed thread would immediately unfollow it.
+fn wire_follow(ui: &Ui, follow: &gtk::ToggleButton) {
+    let ui = ui.clone();
+    follow.connect_toggled(move |button| {
+        if ui.setting_follow.get() {
+            return;
+        }
+        let Some(root) = ui.thread_root.borrow().clone() else {
+            return;
+        };
+        let Some(team) = ui.store.borrow().teams.first().map(|t| t.id.clone()) else {
+            return;
+        };
+        let following = button.is_active();
+        if !following {
+            // Immediate, because unfollowing is done to make a noisy
+            // thread go away and a row that lingers reads as a click
+            // that missed. Following has nothing to add until the
+            // server answers with the thread itself.
+            ui.store.borrow_mut().unfollow(&root);
+            ui.refresh_threads_view();
+        }
+        ui.commands
+            .send(Command::FollowThread {
+                team,
+                root,
+                following,
+            })
+            .ok();
+    });
 }
 
 /// Connect folding a category shut and opening it again.
@@ -6189,6 +6251,11 @@ impl Ui {
             return;
         };
         let store = self.store.borrow();
+        // The toggle says what the server says, and setting it must not
+        // read as a click -- which is what the guard is for.
+        self.setting_follow.set(true);
+        self.thread_follow.set_active(store.is_following(&root));
+        self.setting_follow.set(false);
         // No date separators here: a thread is one conversation and the
         // separators would say the same day over and over. Grouping still
         // applies, so a burst of replies from one person reads as one.

@@ -98,6 +98,13 @@ pub enum Command {
     FollowPermalink(PostId),
     /// Put the unread mention count on the application's dock icon.
     Badge(i64),
+    /// Follow a thread, or stop following it. The team comes from the
+    /// window, because the engine holds no domain facts.
+    FollowThread {
+        team: mm_types::TeamId,
+        root: PostId,
+        following: bool,
+    },
     /// Mute a channel, or let it speak again.
     SetMuted {
         channel: ChannelId,

@@ -808,6 +808,12 @@ async fn best_effort(
 /// Split from `run` so the loop above stays about *when* a command may run —
 /// before sign-in, after, at shutdown — and this stays about what each one
 /// does.
+// One match over every command there is, which is a dispatch table and
+// reads as one. Splitting it to satisfy a line count would scatter the
+// list of what this engine can be asked to do across several functions,
+// and the exhaustiveness check -- the thing that makes adding a command
+// safe -- would no longer be in one place.
+#[allow(clippy::too_many_lines)]
 async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Event>) {
     if refused_as_read_only(a, &command, events).await {
         return;
@@ -824,10 +830,22 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::OpenDirect(user) => open_direct(a, &user, events).await,
         Command::FollowPermalink(post) => follow_permalink(a, &post, events).await,
         Command::Badge(mentions) => set_badge(a, mentions, events).await,
+        Command::FollowThread {
+            team,
+            root,
+            following,
+        } => {
+            let me = UserId::new(&a.session.user_id);
+            best_effort(
+                a,
+                &rest::follow_thread(&me, &team, &root, following),
+                events,
+            )
+            .await;
+        }
         Command::SetMuted { channel, muted } => {
-            let user = UserId::new(&a.session.user_id);
-            let request = rest::set_channel_muted(&channel, &user, muted);
-            best_effort(a, &request, events).await;
+            let me = UserId::new(&a.session.user_id);
+            best_effort(a, &rest::set_channel_muted(&channel, &me, muted), events).await;
         }
         Command::SetCategory(category) => set_category(a, &category, events).await,
         Command::SetCategories(categories) => set_categories(a, &categories, events).await,

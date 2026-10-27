@@ -2622,3 +2622,39 @@ fn a_channel_can_be_found_by_the_name_a_link_carries() {
     store.apply_channels(vec![other]);
     assert!(store.channel_named("off-topic").is_none());
 }
+
+/// Being in the followed list *is* following: the server sends no
+/// flag, so there is nothing else to consult. Unfollowing is applied
+/// at once, because it is done to make a noisy thread go away and a
+/// row that lingers reads as a click that missed.
+#[test]
+fn a_thread_is_followed_while_it_is_in_the_list() {
+    let mut store = store();
+    let root = PostId::new("p1");
+    assert!(!store.is_following(&root));
+    // Nothing to stop following, so nothing to report.
+    assert!(store.unfollow(&root).is_empty());
+
+    store.apply_threads(&mm_types::ThreadList {
+        threads: vec![
+            mm_types::UserThread {
+                id: root.clone(),
+                ..mm_types::UserThread::default()
+            },
+            mm_types::UserThread {
+                id: PostId::new("p2"),
+                ..mm_types::UserThread::default()
+            },
+        ],
+        ..mm_types::ThreadList::default()
+    });
+    assert!(store.is_following(&root));
+    assert!(store.is_following(&PostId::new("p2")));
+
+    assert_eq!(store.unfollow(&root), [Change::Threads]);
+    assert!(!store.is_following(&root));
+    // Only that one.
+    assert!(store.is_following(&PostId::new("p2")));
+    // And again is a no-op rather than a second redraw.
+    assert!(store.unfollow(&root).is_empty());
+}

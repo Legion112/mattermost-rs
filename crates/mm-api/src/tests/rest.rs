@@ -1029,3 +1029,23 @@ fn one_post_is_what_a_permalink_resolves_to() {
     let post = parse_post(&ok(r#"{"id":"p1","channel_id":"c1","message":"hi"}"#)).unwrap();
     assert_eq!(post.channel_id, ChannelId::new("c1"));
 }
+
+/// The thread's id is the root post's id, and the verb carries the
+/// whole meaning: there is no `following` field on what the server
+/// returns, because being in the followed list is what following is.
+#[test]
+fn following_a_thread_is_a_put_and_unfollowing_is_a_delete() {
+    let user = UserId::new("u1");
+    let team = TeamId::new("t1");
+    let root = PostId::new("p1");
+
+    let on = follow_thread(&user, &team, &root, true);
+    assert_eq!(on.method, Method::Put);
+    assert_eq!(on.path, "/api/v4/users/u1/teams/t1/threads/p1/following");
+    assert!(matches!(on.body, Body::Empty), "no body either way");
+
+    let off = follow_thread(&user, &team, &root, false);
+    assert_eq!(off.method, Method::Delete);
+    assert_eq!(off.path, on.path);
+    assert!(matches!(off.body, Body::Empty));
+}

@@ -333,6 +333,25 @@ pub fn parse_channel(resp: &HttpResponse) -> Result<Channel, ApiError> {
     parse_json(resp, "POST /channels/direct")
 }
 
+/// Follow a thread, or stop following it.
+///
+/// The thread's id *is* the root post's id. There is no `following`
+/// field on what the server returns -- being in the followed list is
+/// what following means -- so this is the only way to say it.
+///
+/// `PUT` to follow and `DELETE` to stop, which is the one place in
+/// this API where the verb carries the whole meaning and the body is
+/// empty.
+#[must_use]
+pub fn follow_thread(user: &UserId, team: &TeamId, root: &PostId, following: bool) -> HttpRequest {
+    let path = format!("{API}/users/{user}/teams/{team}/threads/{root}/following");
+    if following {
+        HttpRequest::put(path)
+    } else {
+        HttpRequest::delete(path)
+    }
+}
+
 /// Mute a channel, or let it speak again.
 ///
 /// There is no mute flag: `notify_props.mark_unread` is `"mention"` for
