@@ -692,9 +692,20 @@ comes off the wire, so it is reduced to its last component before it is \
 used: `../../../.bashrc` is a file name. A name already taken grows a \
 counter rather than overwriting. Verified on a live account, in the \
 reader's own DM: a PNG uploaded and rendered inline, a text file uploaded \
-and saved back to ~/Downloads with its contents intact. NOT built: drag and \
-drop onto the composer, paste-to-upload, progress for a large file, and \
-previewing a non-image attachment in the client."""
+and saved back to ~/Downloads with its contents intact. **Ctrl+V with a picture on the clipboard attaches it**, which is how most \
+images get into a chat -- without it every screenshot is: save it somewhere, \
+click the paperclip, find it again, remember to delete it later. Whether the \
+clipboard holds an image is asked synchronously off the advertised formats, \
+because that decides then and there whether to let the key through to the \
+box: reading the image itself is asynchronous, and by the time it answered \
+the text would already have been pasted. Files dragged onto the composer are \
+attached too. A pasted image is written into the cache directory under a \
+name with the time in it, since an upload reads from a path and two \
+screenshots a minute apart must not be the same file. Verified on a live \
+account: a picture on the clipboard became an attachment chip, and ordinary \
+text still pastes as text. NOT built: cleaning up those cached copies, \
+progress for a large file, and previewing a non-image attachment in the \
+client."""
 
 [[feature]]
 id       = "desktop.window_geometry"

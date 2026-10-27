@@ -1666,7 +1666,26 @@ fn build_composer(placeholder: &str) -> Composer {
         chosen: Rc::new(RefCell::new(Vec::new())),
     };
     composer.wire_attach(&attach);
+    composer.wire_paste();
+    composer.wire_drop();
     composer
+}
+
+/// Where a pasted image goes, under a name that will not collide.
+///
+/// The cache directory: it is a copy of something the reader already
+/// has on the clipboard, and losing it costs nothing.
+fn pasted_image_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
+    let folder = base.join("mattermost-rs").join("pasted");
+    std::fs::create_dir_all(&folder).ok()?;
+    let when = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    Some(folder.join(format!("pasted-{when}.png")))
 }
 
 /// One composer: the box, its frame, and what has been attached to it
@@ -1681,6 +1700,51 @@ struct Composer {
 }
 
 impl Composer {
+    /// Ctrl+V with a picture on the clipboard attaches it instead of
+    /// pasting its text.
+    ///
+    /// Whether the clipboard holds an image is asked **synchronously**,
+    /// off the advertised formats, because the answer decides then and
+    /// there whether to let the key through: reading the image itself
+    /// is asynchronous, and by the time it answered the `TextView`
+    /// would already have pasted whatever text came with it.
+    fn wire_paste(&self) {
+        let keys = gtk::EventControllerKey::new();
+        let composer = self.clone();
+        keys.connect_key_pressed(move |controller, key, _, state| {
+            if !matches!(key, gdk::Key::v | gdk::Key::V)
+                || !state.contains(gdk::ModifierType::CONTROL_MASK)
+            {
+                return glib::Propagation::Proceed;
+            }
+            let Some(clipboard) = controller.widget().map(|w| w.clipboard()) else {
+                return glib::Propagation::Proceed;
+            };
+            if !clipboard.formats().contain_mime_type("image/png") {
+                // Ordinary text: let the box paste it as always.
+                return glib::Propagation::Proceed;
+            }
+            composer.paste_image(&clipboard);
+            glib::Propagation::Stop
+        });
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        self.view.add_controller(keys);
+    }
+
+    /// Files dragged onto the composer are attached to the message.
+    fn wire_drop(&self) {
+        let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        let composer = self.clone();
+        target.connect_drop(move |_, value, _, _| {
+            let Ok(files) = value.get::<gdk::FileList>() else {
+                return false;
+            };
+            composer.attach_dropped(&files);
+            true
+        });
+        self.pane.add_controller(target);
+    }
+
     /// The paperclip: pick files, and show what was picked.
     fn wire_attach(&self, button: &gtk::Button) {
         let composer = self.clone();
@@ -1746,6 +1810,43 @@ impl Composer {
             chip.append(&remove);
             self.tray.append(&chip);
         }
+    }
+
+    /// Take an image off the clipboard and attach it.
+    ///
+    /// Pasting a screenshot is how most images get into a chat, and
+    /// without this every one of them is: save it somewhere, click the
+    /// paperclip, find it again, and remember to delete it later.
+    ///
+    /// Written to the cache directory under a name with the time in
+    /// it, because an upload reads from a path and because two
+    /// screenshots pasted a minute apart must not be the same file.
+    /// Nothing cleans these up yet, which is the honest cost of doing
+    /// it this way rather than holding the bytes.
+    fn paste_image(&self, clipboard: &gdk::Clipboard) {
+        let composer = self.clone();
+        clipboard.read_texture_async(gio::Cancellable::NONE, move |found| {
+            let Ok(Some(texture)) = found else {
+                return;
+            };
+            let Some(path) = pasted_image_path() else {
+                return;
+            };
+            if std::fs::write(&path, texture.save_to_png_bytes()).is_err() {
+                return;
+            }
+            composer.chosen.borrow_mut().push(path);
+            composer.refresh_tray();
+        });
+    }
+
+    /// Attach files dropped onto the composer.
+    fn attach_dropped(&self, files: &gdk::FileList) {
+        {
+            let mut chosen = self.chosen.borrow_mut();
+            chosen.extend(files.files().iter().filter_map(gio::File::path));
+        }
+        self.refresh_tray();
     }
 
     /// What to send, and nothing left behind for the next message.
