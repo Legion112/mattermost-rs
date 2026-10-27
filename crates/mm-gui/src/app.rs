@@ -3010,6 +3010,7 @@ fn accept_mention(view: &gtk::TextView, username: &str) {
 fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
     let keys = gtk::EventControllerKey::new();
     let ui = ui.clone();
+    let parent = window.clone();
     keys.connect_key_pressed(move |_, key, _, state| {
         if key == gdk::Key::k && state.contains(gdk::ModifierType::CONTROL_MASK) {
             ui.open_switcher();
@@ -3042,6 +3043,12 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
                 _ => {}
             }
         }
+        // Ctrl+/ shows what all of this is, which is the only way a
+        // reader finds out that any of it exists.
+        if key == gdk::Key::slash && state.contains(gdk::ModifierType::CONTROL_MASK) {
+            open_shortcuts(&parent);
+            return glib::Propagation::Stop;
+        }
         // Escape puts the thread panel away, which is the only thing on
         // screen that stays open until it is told not to.
         if key == gdk::Key::Escape && ui.thread_pane.is_visible() {
@@ -3054,6 +3061,70 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
     // presses, and the composer has the focus most of the time.
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     window.add_controller(keys);
+}
+
+/// Every binding, in the groups a reader would look for them in.
+///
+/// One table, and the only place any of them is written down for a
+/// person to read. It is hand-kept rather than derived: the handlers
+/// are spread over a window controller, two composers and two
+/// completion popups, and a table that described half of them
+/// accurately would be worse than one plainly maintained by hand.
+const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Getting around",
+        &[
+            ("<Control>k", "Jump to a channel or a person"),
+            ("<Control><Shift>f", "Search this team's messages"),
+            ("<Alt>Up", "Previous channel"),
+            ("<Alt>Down", "Next channel"),
+            ("<Alt><Shift>Up", "Previous unread channel"),
+            ("<Alt><Shift>Down", "Next unread channel"),
+            ("Escape", "Close the thread panel"),
+            ("<Control>slash", "Show these shortcuts"),
+        ],
+    ),
+    (
+        "Writing",
+        &[
+            ("Return", "Send"),
+            ("<Shift>Return", "New line"),
+            ("Up", "Edit your last message, in an empty box"),
+            ("at", "Offer the people in this channel"),
+            ("colon", "Offer emoji, the server's own first"),
+            ("Tab", "Accept what is offered"),
+        ],
+    ),
+];
+
+/// The shortcuts window, built fresh each time it is asked for.
+///
+/// Fresh rather than kept: it is opened rarely and holding one window
+/// per session to save building it once is the wrong trade.
+fn open_shortcuts(parent: &adw::ApplicationWindow) {
+    let section = gtk::ShortcutsSection::builder()
+        .section_name("shortcuts")
+        .visible(true)
+        .build();
+    for (title, bindings) in SHORTCUTS {
+        let group = gtk::ShortcutsGroup::builder().title(*title).build();
+        for (accelerator, what) in *bindings {
+            group.append(
+                &gtk::ShortcutsShortcut::builder()
+                    .accelerator(*accelerator)
+                    .title(*what)
+                    .build(),
+            );
+        }
+        section.append(&group);
+    }
+
+    let window = gtk::ShortcutsWindow::builder()
+        .modal(true)
+        .transient_for(parent)
+        .build();
+    window.set_child(Some(&section));
+    window.present();
 }
 
 /// Connect the Following toggle on the thread panel.

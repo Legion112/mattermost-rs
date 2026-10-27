@@ -987,6 +987,15 @@ channel behind it. A join/leave notice and a webhook's post are skipped: \
 they carry this reader's id and there is nothing in them to change. \
 Verified on a live account: Up in an empty box opened the editor on the \
 last message with its text in it, and Up with two characters typed moved \
-the caret instead. NOT built: the shortcuts overlay Ctrl+/ offers, \
-Alt+Shift+Up/Down across teams, and the remaining message-level bindings \
-(reply to the last message, react to it)."""
+the caret instead.
+
+Ctrl+/ shows all of it, in GTK's own shortcuts window, which is the only \
+way a reader finds out that any of it exists. The list is one hand-kept \
+table rather than something derived: the handlers are spread over a \
+window controller, two composers and two completion popups, and a table \
+that described half of them accurately would be worse than one plainly \
+maintained by hand. Verified on a live account: Ctrl+/ drew both groups \
+with the right keys on them.
+
+NOT built: Alt+Shift+Up/Down across teams, and the remaining \
+message-level bindings (reply to the last message, react to it)."""
