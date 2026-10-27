@@ -81,6 +81,14 @@ fn push_plain(out: &mut String, inlines: &[Inline]) {
                 out.push('@');
                 out.push_str(name);
             }
+            // With its colons: a notification body saying
+            // `party_parrot` where the message said `:party_parrot:`
+            // would read as a word somebody typed.
+            Inline::Shortcode(name) => {
+                out.push(':');
+                out.push_str(name);
+                out.push(':');
+            }
             Inline::Emphasis(inner) | Inline::Strong(inner) | Inline::Strike(inner) => {
                 push_plain(out, inner);
             }
@@ -133,6 +141,13 @@ pub enum Inline {
         name: String,
         is_me: bool,
     },
+    /// A `:shortcode:` with no glyph behind it.
+    ///
+    /// Kept as its own inline rather than left in the text so a client
+    /// that can fetch the server's custom emoji knows where to put a
+    /// picture. One that cannot renders the name back, with its
+    /// colons, which is what it looked like before any of this.
+    Shortcode(String),
     /// A newline inside a paragraph.
     ///
     /// **Mattermost renders this as a line break, not as a space.** That is
@@ -412,9 +427,9 @@ fn linkify_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
             // has decided what is a link, only the leftover text is rewritten.
             Inline::Text(text) => autolink(&text)
                 .into_iter()
-                .map(|piece| match piece {
-                    Inline::Text(t) => Inline::Text(crate::emoji::substitute(&t)),
-                    other => other,
+                .flat_map(|piece| match piece {
+                    Inline::Text(t) => emoji_inlines(&t),
+                    other => vec![other],
                 })
                 .collect(),
             Inline::Emphasis(inner) => vec![Inline::Emphasis(linkify_inlines(inner))],
@@ -424,9 +439,39 @@ fn linkify_inlines(inlines: Vec<Inline>) -> Vec<Inline> {
             other @ (Inline::Code(_)
             | Inline::Link { .. }
             | Inline::Mention { .. }
+            | Inline::Shortcode(_)
             | Inline::SoftBreak) => vec![other],
         })
         .collect()
+}
+
+/// Resolve the shortcodes in a run of text.
+///
+/// Known ones become part of the text, because a glyph *is* text and
+/// splitting it out would make every emoji its own inline for nothing.
+/// Unknown ones become [`Inline::Shortcode`], which is where a custom
+/// emoji's picture goes.
+fn emoji_inlines(text: &str) -> Vec<Inline> {
+    use crate::emoji::Piece;
+    let mut out: Vec<Inline> = Vec::new();
+    for piece in crate::emoji::scan(text) {
+        match piece {
+            Piece::Text(run) => push_text(&mut out, run),
+            Piece::Glyph(glyph) => push_text(&mut out, glyph),
+            Piece::Unknown(name) => out.push(Inline::Shortcode(name.to_owned())),
+        }
+    }
+    out
+}
+
+/// Add to the run being built, so `a :tada: b` is one text inline
+/// rather than three.
+fn push_text(out: &mut Vec<Inline>, run: &str) {
+    if let Some(Inline::Text(held)) = out.last_mut() {
+        held.push_str(run);
+    } else {
+        out.push(Inline::Text(run.to_owned()));
+    }
 }
 
 /// Where a URL starts, if there is one, at a word boundary.

@@ -535,15 +535,39 @@ impl Emoji {
     fn image(texture: &gdk::Texture) -> gtk::Image {
         let image = gtk::Image::from_paintable(Some(texture));
         image.set_pixel_size(EMOJI_PIXELS);
+        // A `GtkImage` fills what it is given by default, and inside a
+        // `TextView` line that means claiming height the text does not
+        // need; centred on the line it sits where a glyph would.
+        image.set_valign(gtk::Align::Center);
+        image.set_halign(gtk::Align::Center);
         image
     }
 
     /// Put a decoded picture in, and say whether it is new -- a repeat
     /// must not cost a redraw of every message on screen.
+    ///
+    /// Scaled on the way in rather than on the way out. A custom emoji
+    /// is uploaded at whatever size its author had -- 128 pixels is
+    /// common and 512 happens -- and a texture is drawn inline at its
+    /// own size, so the scaling has to happen before it becomes one.
     fn received(&self, name: String, image: Vec<u8>) -> bool {
         let bytes = glib::Bytes::from_owned(image);
-        let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
-            return false;
+        let stream = gio::MemoryInputStream::from_bytes(&bytes);
+        let scaled = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
+            &stream,
+            EMOJI_PIXELS,
+            EMOJI_PIXELS,
+            true,
+            gio::Cancellable::NONE,
+        );
+        let texture = match scaled {
+            Ok(pixbuf) => gdk::Texture::for_pixbuf(&pixbuf),
+            // A format gdk-pixbuf will not scale is still worth
+            // drawing if GDK can decode it at all.
+            Err(_) => match gdk::Texture::from_bytes(&bytes) {
+                Ok(texture) => texture,
+                Err(_) => return false,
+            },
         };
         self.images
             .borrow_mut()
@@ -785,7 +809,8 @@ fn install_styles() {
          .mmrs-dot.online { background: #3db887; }\n\
          .mmrs-dot.away { background: #ffbc1f; }\n\
          .mmrs-dot.dnd { background: #d24b4e; }\n\
-         .mmrs-dot-alone { min-width: 10px; min-height: 10px; }",
+         .mmrs-dot-alone { min-width: 10px; min-height: 10px; }\n\
+         .mmrs-inline, .mmrs-inline text { background: none; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -3311,81 +3336,24 @@ fn wire_categories(ui: &Ui, sidebar: &gtk::ListBox) {
 }
 
 /// Connect choosing a channel: what it opens, and what it closes.
-fn wire_selection(
-    ui: &Ui,
-    sidebar: &gtk::ListBox,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-) {
-    let commands = commands.clone();
-    let selected = Rc::clone(&ui.selected);
-    let stick = Rc::clone(&ui.stick_to_bottom);
-    let thread_root = Rc::clone(&ui.thread_root);
-    let thread_posts = ui.thread_posts.clone();
-    let thread_pane = ui.thread_pane.clone();
-    let unread_from = Rc::clone(&ui.unread_from);
-    let store = Rc::clone(&ui.store);
-    let ui_for_views = ui.clone();
+fn wire_selection(ui: &Ui, sidebar: &gtk::ListBox) {
+    let ui = ui.clone();
     sidebar.connect_row_selected(move |_, row| {
         let Some(row) = row else { return };
         let name = row.widget_name();
         // The two views sit in the same list as the channels and are
         // selected the same way, but they open something else.
         if name == THREADS_ROW {
-            ui_for_views.show_pane(&Pane::Threads);
-            ui_for_views.set_title("Threads", "");
+            ui.show_pane(&Pane::Threads);
+            ui.set_title("Threads", "");
             return;
         }
         if name == DRAFTS_ROW {
-            ui_for_views.show_pane(&Pane::Drafts);
-            ui_for_views.set_title("Drafts", "");
+            ui.show_pane(&Pane::Drafts);
+            ui.set_title("Drafts", "");
             return;
         }
-        let id = ChannelId::new(name.to_string());
-
-        // `refresh_sidebar` rebuilds every row and re-selects the open
-        // channel, so this handler fires on its own output. Without this
-        // guard each WebSocket event -- including a stranger's `typing` --
-        // re-fetched the whole channel over the network, rebuilt the post
-        // list and wrote a mark-read. Only a real change of channel is a
-        // user action.
-        if selected.borrow().as_ref() == Some(&id) {
-            return;
-        }
-
-        // Opening a channel always starts at the newest message, and
-        // closes whatever thread was open: a thread belongs to the
-        // channel it came from, and leaving it up beside a different one
-        // shows a conversation that is not there.
-        stick.set(true);
-        // Before `MarkRead` below, which moves it.
-        *unread_from.borrow_mut() = store.borrow().last_viewed(&id);
-        *thread_root.borrow_mut() = None;
-        thread_posts.remove_all();
-        thread_pane.set_visible(false);
-        *selected.borrow_mut() = Some(id.clone());
-        ui_for_views.show_pane(&Pane::Channel);
-        // Draw what is already held, before asking for anything. A
-        // channel read earlier, or warmed in the background, is in the
-        // store already -- and waiting for the round trip to redraw it
-        // was most of what opening a channel felt like. The answer,
-        // when it comes, splices in only what differs.
-        ui_for_views.refresh_posts(&id);
-        // The caret belongs in the composer the moment a channel opens,
-        // the way Mattermost puts it there: clicking a channel is how a
-        // reader starts writing in it, and the alternative is a second
-        // click at the bottom of the window before the first letter.
-        ui_for_views.composer.view.grab_focus();
-        // Written down now rather than at close, so a client killed or
-        // crashed still comes back here -- but only when the reader
-        // chose this. The first-channel fallback's stand-in would
-        // otherwise overwrite the very channel being restored, which
-        // is how "reopen where I was" quietly became "reopen whatever
-        // sorts first" after one launch.
-        if !ui_for_views.provisional.replace(false) {
-            ui_for_views.remember_state();
-        }
-        commands.send(Command::OpenChannel(id.clone())).ok();
-        commands.send(Command::MarkRead(id)).ok();
+        ui.open_channel(&ChannelId::new(name.to_string()));
     });
 }
 
@@ -3472,7 +3440,7 @@ fn wire(
             _ => {}
         });
     }
-    wire_selection(ui, sidebar, commands);
+    wire_selection(ui, sidebar);
     wire_categories(ui, sidebar);
 
     {
@@ -3514,22 +3482,54 @@ fn wire(
 /// Pango markup, which is why this returns a list rather than one string.
 /// The common case -- a single paragraph of plain text -- comes back as one
 /// block that needs no markup parsing at all.
-fn render_blocks(doc: &mm_md::Document) -> Vec<BlockView> {
+fn render_blocks(doc: &mm_md::Document, emoji: &Emoji) -> Vec<BlockView> {
     if let Some(plain) = doc.plain_text() {
         return vec![BlockView {
             kind: BlockKind::Text,
             text: plain.to_owned(),
             markup: false,
+            inlines: Vec::new(),
+            emoji: Vec::new(),
             quoted: false,
             cells: Vec::new(),
         }];
     }
     let mut out = Vec::new();
-    push_blocks(&doc.blocks, false, &mut out);
+    push_blocks(&doc.blocks, false, &mut out, emoji);
     out
 }
 
-fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) {
+/// The pictures for the custom-emoji shortcodes in one run of inlines.
+///
+/// Asking also *requests* the ones that are missing, which is why this
+/// runs when the row is built: a row is built on every redraw, and the
+/// answer arriving makes the next redraw's row differ from the one on
+/// screen, which is what gets it drawn again.
+fn resolve_emoji(inlines: &[mm_md::Inline], emoji: &Emoji) -> Vec<(String, gdk::Texture)> {
+    fn walk(inlines: &[mm_md::Inline], emoji: &Emoji, out: &mut Vec<(String, gdk::Texture)>) {
+        for inline in inlines {
+            match inline {
+                mm_md::Inline::Shortcode(name) => {
+                    if out.iter().any(|(held, _)| held == name) {
+                        continue;
+                    }
+                    if let Some(texture) = emoji.texture(name) {
+                        out.push((name.clone(), texture));
+                    }
+                }
+                mm_md::Inline::Emphasis(inner)
+                | mm_md::Inline::Strong(inner)
+                | mm_md::Inline::Strike(inner) => walk(inner, emoji, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(inlines, emoji, &mut out);
+    out
+}
+
+fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>, emoji: &Emoji) {
     for block in blocks {
         match block {
             mm_md::Block::Paragraph(inlines) | mm_md::Block::Heading { inlines, .. } => {
@@ -3537,6 +3537,8 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                     kind: BlockKind::Text,
                     text: mm_md::to_pango(inlines),
                     markup: true,
+                    inlines: inlines.clone(),
+                    emoji: resolve_emoji(inlines, emoji),
                     quoted,
                     cells: Vec::new(),
                 });
@@ -3545,6 +3547,8 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                 kind: BlockKind::Bullet,
                 text: mm_md::to_pango(inlines),
                 markup: true,
+                inlines: inlines.clone(),
+                emoji: resolve_emoji(inlines, emoji),
                 quoted,
                 cells: Vec::new(),
             }),
@@ -3552,6 +3556,8 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                 kind: BlockKind::Table,
                 text: String::new(),
                 markup: true,
+                inlines: Vec::new(),
+                emoji: Vec::new(),
                 quoted,
                 cells: rows
                     .iter()
@@ -3564,17 +3570,21 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
                 // must never be parsed as markup.
                 text: code.trim_end().to_owned(),
                 markup: false,
+                inlines: Vec::new(),
+                emoji: Vec::new(),
                 quoted,
                 cells: Vec::new(),
             }),
             // A quote inside a quote still draws one bar. Mattermost's own
             // rendering nests them, but a second bar on a chat message is
             // noise and the depth is not information the reader needs.
-            mm_md::Block::Quote(inner) => push_blocks(inner, true, out),
+            mm_md::Block::Quote(inner) => push_blocks(inner, true, out, emoji),
             mm_md::Block::Rule => out.push(BlockView {
                 kind: BlockKind::Rule,
                 text: String::new(),
                 markup: false,
+                inlines: Vec::new(),
+                emoji: Vec::new(),
                 quoted,
                 cells: Vec::new(),
             }),
@@ -4273,6 +4283,238 @@ fn preview_card(
     card.upcast()
 }
 
+/// One block of body text.
+///
+/// A `GtkLabel` of Pango markup, unless the block holds a custom emoji
+/// this client can actually draw -- then a `GtkTextView`, which is the
+/// only widget that can put a picture in the middle of a wrapped line.
+///
+/// **A label by default, on purpose.** A `TextView` carries a buffer, a
+/// tag table and a layout of its own, and these rows are recycled by a
+/// `ListView` that realizes one widget set per visible row; making every
+/// paragraph one would pay that cost on every message to serve the few
+/// that need it. Both paths render the same `Vec<Inline>`, so they
+/// cannot disagree about what the message says.
+fn body_text(block: &BlockView) -> gtk::Widget {
+    if block.emoji.is_empty() {
+        return card_label(&block.text, block.markup, &[]).upcast();
+    }
+    inline_view(&block.inlines, &block.emoji).upcast()
+}
+
+/// Draw inlines into a `TextView`, pictures and all.
+fn inline_view(inlines: &[mm_md::Inline], emoji: &[(String, gdk::Texture)]) -> gtk::TextView {
+    let view = gtk::TextView::builder()
+        .editable(false)
+        .cursor_visible(false)
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .hexpand(true)
+        // Its own background would be a pale slab behind the message;
+        // the CSS turns it off, and this stops it claiming padding too.
+        .css_classes(["mmrs-inline"])
+        .left_margin(0)
+        .right_margin(0)
+        .top_margin(0)
+        .bottom_margin(0)
+        .build();
+    let buffer = view.buffer();
+    let tags = buffer.tag_table();
+    // Named at construction: `name` is construct-only on a `TextTag`,
+    // and setting it afterwards aborts the process rather than
+    // failing -- the setter panics inside a GTK callback, which cannot
+    // unwind.
+    for tag in [
+        gtk::TextTag::builder().name("b").weight(700).build(),
+        gtk::TextTag::builder()
+            .name("i")
+            .style(gtk::pango::Style::Italic)
+            .build(),
+        gtk::TextTag::builder()
+            .name("s")
+            .strikethrough(true)
+            .build(),
+        gtk::TextTag::builder()
+            .name("tt")
+            .family("monospace")
+            .scale(0.9)
+            .build(),
+        // Mattermost's own blue, the same one the stylesheet gives a
+        // `GtkLabel`'s links -- GTK would otherwise paint these in the
+        // desktop's accent colour, which is orange on Ubuntu.
+        gtk::TextTag::builder()
+            .name("a")
+            .foreground("#5d89ea")
+            .underline(gtk::pango::Underline::Single)
+            .build(),
+        // Mattermost's own colours, the same two the markup path uses:
+        // everyone else's mention blue, and the reader's own on amber,
+        // which is the one piece of colour a chat window must not get
+        // wrong.
+        gtk::TextTag::builder()
+            .name("mention")
+            .foreground("#5d89ea")
+            .weight(700)
+            .build(),
+        gtk::TextTag::builder()
+            .name("mention-me")
+            .background("#ffd470")
+            .foreground("#1a1a1a")
+            .weight(700)
+            .build(),
+    ] {
+        tags.add(&tag);
+    }
+
+    // Where each link goes, by the tag that marks it. One tag per link,
+    // because a tag is the only thing a `TextView` can attach meaning
+    // to and it cannot carry a payload.
+    let hrefs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut at = buffer.end_iter();
+    write_inlines(&buffer, &mut at, inlines, &[], emoji, &hrefs);
+    wire_inline_links(&view, &hrefs);
+    view
+}
+
+/// Write one run of inlines, carrying the tags that are open around it.
+fn write_inlines(
+    buffer: &gtk::TextBuffer,
+    at: &mut gtk::TextIter,
+    inlines: &[mm_md::Inline],
+    open: &[String],
+    emoji: &[(String, gdk::Texture)],
+    hrefs: &Rc<RefCell<Vec<String>>>,
+) {
+    use mm_md::Inline;
+    let names: Vec<&str> = open.iter().map(String::as_str).collect();
+    for inline in inlines {
+        match inline {
+            Inline::Text(text) => buffer.insert_with_tags_by_name(at, text, &names),
+            Inline::Code(code) => {
+                let mut with = names.clone();
+                with.push("tt");
+                buffer.insert_with_tags_by_name(at, code, &with);
+            }
+            Inline::SoftBreak => buffer.insert_with_tags_by_name(at, "\n", &names),
+            Inline::Mention { name, is_me } => {
+                let mut with = names.clone();
+                with.push(if *is_me { "mention-me" } else { "mention" });
+                buffer.insert_with_tags_by_name(at, &format!("@{name}"), &with);
+            }
+            Inline::Emphasis(inner) | Inline::Strong(inner) | Inline::Strike(inner) => {
+                let which = match inline {
+                    Inline::Emphasis(_) => "i",
+                    Inline::Strong(_) => "b",
+                    _ => "s",
+                };
+                let mut with: Vec<String> = open.to_vec();
+                with.push(which.to_owned());
+                write_inlines(buffer, at, inner, &with, emoji, hrefs);
+            }
+            Inline::Link { href, text } => {
+                let which = format!("link-{}", hrefs.borrow().len());
+                hrefs.borrow_mut().push(href.clone());
+                buffer
+                    .tag_table()
+                    .add(&gtk::TextTag::builder().name(&which).build());
+                let mut with = names.clone();
+                with.push("a");
+                with.push(&which);
+                buffer.insert_with_tags_by_name(at, text, &with);
+            }
+            Inline::Shortcode(name) => {
+                // A picture if there is one, and otherwise the name
+                // back with its colons -- the same fallback the markup
+                // path has always had.
+                let found = emoji
+                    .iter()
+                    .find_map(|(held, texture)| (held == name).then_some(texture));
+                if let Some(texture) = found {
+                    // A paintable, not a child widget on an anchor: a
+                    // widget occupies the whole line box and leaves a
+                    // band of empty space under the text, while a
+                    // paintable is laid out as a character is.
+                    buffer.insert_paintable(at, texture);
+                } else {
+                    buffer.insert_with_tags_by_name(at, &format!(":{name}:"), &names);
+                }
+            }
+        }
+    }
+}
+
+/// What is under the pointer, in buffer coordinates.
+///
+/// Pointer positions arrive as `f64` and the buffer indexes by whole
+/// pixels; a fractional pixel is below the size of a glyph, so the
+/// truncation loses nothing a reader could aim with.
+fn iter_under(view: &gtk::TextView, x: f64, y: f64) -> Option<gtk::TextIter> {
+    let round = |v: f64| {
+        let v = v.round();
+        if v.is_finite() && v.abs() < f64::from(i32::MAX) {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                v as i32
+            }
+        } else {
+            0
+        }
+    };
+    let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, round(x), round(y));
+    view.iter_at_location(bx, by)
+}
+
+/// Open a link in a `TextView`, which has no `activate-link` of its own.
+///
+/// Released rather than pressed, and only when the press and the release
+/// are on the same link: a drag that starts on a link and ends in the
+/// text beside it is somebody selecting, not somebody clicking.
+fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
+    if hrefs.borrow().is_empty() {
+        return;
+    }
+    let click = gtk::GestureClick::new();
+    let hrefs = Rc::clone(hrefs);
+    let text = view.clone();
+    click.connect_released(move |gesture, presses, x, y| {
+        if presses != 1 {
+            return;
+        }
+        if text.buffer().has_selection() {
+            return;
+        }
+        let Some(at) = iter_under(&text, x, y) else {
+            return;
+        };
+        let found = at.tags().into_iter().find_map(|tag| {
+            let name = tag.name()?;
+            let index: usize = name.strip_prefix("link-")?.parse().ok()?;
+            hrefs.borrow().get(index).cloned()
+        });
+        if let Some(href) = found {
+            gtk::UriLauncher::new(&href).launch(
+                text.root().and_downcast::<gtk::Window>().as_ref(),
+                gio::Cancellable::NONE,
+                |_| {},
+            );
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        }
+    });
+    view.add_controller(click);
+
+    // A hand over a link, the way a label does it.
+    let motion = gtk::EventControllerMotion::new();
+    let text = view.clone();
+    motion.connect_motion(move |_, x, y| {
+        let over = iter_under(&text, x, y).is_some_and(|at| {
+            at.tags()
+                .iter()
+                .any(|t| t.name().is_some_and(|n| n.starts_with("link-")))
+        });
+        text.set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
+    });
+    view.add_controller(motion);
+}
+
 /// Build the widgets for a message body, a block at a time.
 ///
 /// A code block becomes a padded box rather than a run of monospace text,
@@ -4309,7 +4551,7 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
                 // the far right.
                 bullet.set_hexpand(false);
                 item.append(&bullet);
-                item.append(&card_label(&block.text, block.markup, &[]));
+                item.append(&body_text(block));
                 item.upcast()
             }
             BlockKind::Table => {
@@ -4328,7 +4570,7 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
                     .build();
                 scroller.upcast()
             }
-            BlockKind::Text => card_label(&block.text, block.markup, &[]).upcast(),
+            BlockKind::Text => body_text(block),
         };
 
         if block.quoted {
@@ -5233,11 +5475,12 @@ const IMAGE_MAX_HEIGHT: i64 = 320;
 fn render_card(
     attachment: &mm_types::MessageAttachment,
     store: &Store,
+    emoji: &Emoji,
 ) -> crate::row::AttachmentView {
     let mut doc = mm_md::parse(&attachment.text);
     mm_md::mark_mentions(&mut doc, &|name| store.mentioned(name));
     crate::row::AttachmentView {
-        blocks: render_blocks(&doc),
+        blocks: render_blocks(&doc, emoji),
         rgb: attachment.rgb(),
         pretext: attachment.pretext.clone(),
         title: attachment.title.clone(),
@@ -6580,13 +6823,104 @@ impl Ui {
     /// handler does the fetching and the mark-read, and going around it
     /// would mean two places that know how to open a channel.
     fn show_channel(&self, channel: &ChannelId) {
+        // The channel first, the sidebar after. It used to be the other
+        // way round -- find the row, select it, and let the selection
+        // handler do the work -- and a channel with no row could not be
+        // opened at all: the quick switcher found one in a folded
+        // category, selected nothing, and the window stayed where it
+        // was with no sign anything had happened.
+        self.open_channel(channel);
+        self.unfold_category_for(channel);
         self.show_pane(&Pane::Channel);
+        // Rebuilt because folding may have changed what is in it, and
+        // because the unread filter hides a channel that is caught up
+        // until it is the open one -- which it now is.
+        self.sidebar_stale.set(true);
+        self.refresh_sidebar();
         let row = (0..)
             .map_while(|i| self.sidebar.row_at_index(i))
             .find(|row| row.widget_name() == channel.as_str());
         if let Some(row) = row {
             self.sidebar.select_row(Some(&row));
         }
+    }
+
+    /// Open the category a channel is in, if it is folded shut.
+    ///
+    /// Going somewhere the reader cannot then see in the sidebar is
+    /// disorienting: the conversation changes and nothing says where
+    /// they are. Mattermost unfolds it too, and it tells the server, so
+    /// the fold follows them to their other clients.
+    fn unfold_category_for(&self, channel: &ChannelId) {
+        let folded = {
+            let store = self.store.borrow();
+            store
+                .categories
+                .iter()
+                .find(|c| c.collapsed && c.channel_ids.contains(channel))
+                .map(|c| c.id.clone())
+        };
+        let Some(id) = folded else { return };
+        let changed = !self
+            .store
+            .borrow_mut()
+            .set_category_collapsed(&id, false)
+            .is_empty();
+        if !changed {
+            return;
+        }
+        let category = self.store.borrow().category(&id).cloned();
+        if let Some(category) = category {
+            self.commands.send(Command::SetCategory(category)).ok();
+        }
+    }
+
+    /// Go to a channel: what it opens, and what it closes.
+    fn open_channel(&self, id: &ChannelId) {
+        // `refresh_sidebar` rebuilds every row and re-selects the open
+        // channel, so the selection handler fires on its own output.
+        // Without this guard each WebSocket event -- including a
+        // stranger's `typing` -- re-fetched the whole channel over the
+        // network, rebuilt the post list and wrote a mark-read. Only a
+        // real change of channel is a user action.
+        if self.selected.borrow().as_ref() == Some(id) {
+            return;
+        }
+
+        // Opening a channel always starts at the newest message, and
+        // closes whatever thread was open: a thread belongs to the
+        // channel it came from, and leaving it up beside a different one
+        // shows a conversation that is not there.
+        self.stick_to_bottom.set(true);
+        // Before `MarkRead` below, which moves it.
+        *self.unread_from.borrow_mut() = self.store.borrow().last_viewed(id);
+        *self.thread_root.borrow_mut() = None;
+        self.thread_posts.remove_all();
+        self.thread_pane.set_visible(false);
+        *self.selected.borrow_mut() = Some(id.clone());
+        self.show_pane(&Pane::Channel);
+        // Draw what is already held, before asking for anything. A
+        // channel read earlier, or warmed in the background, is in the
+        // store already -- and waiting for the round trip to redraw it
+        // was most of what opening a channel felt like. The answer,
+        // when it comes, splices in only what differs.
+        self.refresh_posts(id);
+        // The caret belongs in the composer the moment a channel opens,
+        // the way Mattermost puts it there: clicking a channel is how a
+        // reader starts writing in it, and the alternative is a second
+        // click at the bottom of the window before the first letter.
+        self.composer.view.grab_focus();
+        // Written down now rather than at close, so a client killed or
+        // crashed still comes back here -- but only when the reader
+        // chose this. The first-channel fallback's stand-in would
+        // otherwise overwrite the very channel being restored, which
+        // is how "reopen where I was" quietly became "reopen whatever
+        // sorts first" after one launch.
+        if !self.provisional.replace(false) {
+            self.remember_state();
+        }
+        self.commands.send(Command::OpenChannel(id.clone())).ok();
+        self.commands.send(Command::MarkRead(id.clone())).ok();
     }
 
     /// Draw the followed threads.
@@ -7029,7 +7363,7 @@ impl Ui {
         }
         let mut doc = mm_md::parse(&post.message);
         mm_md::mark_mentions(&mut doc, &|name| store.mentioned(name));
-        let mut blocks = render_blocks(&doc);
+        let mut blocks = render_blocks(&doc, &self.emoji);
         // "(edited)" belongs on the end of the last thing said, not on a
         // line of its own.
         if post.is_edited() {
@@ -7047,6 +7381,8 @@ impl Ui {
                     kind: BlockKind::Text,
                     text: " (edited)".to_owned(),
                     markup: false,
+                    inlines: Vec::new(),
+                    emoji: Vec::new(),
                     quoted: false,
                     cells: Vec::new(),
                 }),
@@ -7092,7 +7428,7 @@ impl Ui {
             cards: post
                 .message_attachments()
                 .iter()
-                .map(|a| render_card(a, store))
+                .map(|a| render_card(a, store, &self.emoji))
                 .collect(),
             previews: post.link_previews(),
             presence: store.presence(&post.user_id),
@@ -7531,12 +7867,20 @@ impl Ui {
     /// The server's own emoji: the list, and the pictures.
     fn on_emoji(&self, event: Event) {
         match event {
-            // No redraw for the list. A row only asks for a picture
-            // while it is being drawn, so learning the names changes
-            // nothing on screen until something is drawn again -- and
-            // the pictures that arrive then each ask for their own.
+            // A redraw, because the list arrives *after* the messages
+            // holding it: every `:party_parrot:` already on screen was
+            // drawn as text, and nothing else would ever ask again.
+            // Coalesced, and only when the list actually moved, so a
+            // resync that learns nothing costs nothing.
             Event::CustomEmoji(emoji) => {
-                self.store.borrow_mut().apply_custom_emoji(&emoji);
+                let moved = !self
+                    .store
+                    .borrow_mut()
+                    .apply_custom_emoji(&emoji)
+                    .is_empty();
+                if moved {
+                    self.redraw_soon();
+                }
             }
             // Coalesced, and it has to be: the emoji on a busy
             // channel's reactions all land within a few milliseconds of

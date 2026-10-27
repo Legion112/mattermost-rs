@@ -37,6 +37,20 @@ pub struct BlockView {
     /// Pango markup, or literal text when `markup` is false.
     pub text: String,
     pub markup: bool,
+    /// The same content before it was flattened to markup, for the one
+    /// thing markup cannot express: a picture in the middle of a line.
+    /// Empty for the blocks that have no inlines -- code, rules, and
+    /// the plain-text fast path.
+    pub inlines: Vec<mm_md::Inline>,
+    /// The picture behind each custom-emoji shortcode in `inlines`, for
+    /// the ones this client has fetched.
+    ///
+    /// **Resolved when the row is built, not when it is drawn.** The
+    /// list replaces only the rows that differ from what is on screen,
+    /// and it compares rows by their contents -- so a picture that
+    /// landed after the message was drawn has to be *part of the row*
+    /// or nothing will ever redraw it.
+    pub emoji: Vec<(String, gtk::gdk::Texture)>,
     /// Inside a block quote, which draws a bar down the left.
     pub quoted: bool,
     /// For `Table`: the rows, each a list of cells of Pango markup, the

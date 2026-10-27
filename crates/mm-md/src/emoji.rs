@@ -79,42 +79,64 @@ pub fn search(query: &str, limit: usize) -> Vec<Choice> {
         .collect()
 }
 
-/// Replace every `:shortcode:` in `text` with its glyph.
+/// One run of a message, as the shortcode scanner sees it.
+///
+/// Borrowed from the input: scanning a message happens once per post
+/// drawn, and copying every run of ordinary text to describe it would
+/// be most of the cost of the scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Piece<'a> {
+    /// Ordinary text with no shortcode in it.
+    Text(&'a str),
+    /// A `:shortcode:` the table knows, already resolved.
+    Glyph(&'static str),
+    /// A well-formed `:shortcode:` with no glyph behind it: a server's
+    /// own custom emoji, or a name nothing has. Kept apart from `Text`
+    /// so a client that can fetch the picture knows where to put one,
+    /// and so one that cannot still has the name to print.
+    Unknown(&'a str),
+}
+
+/// Split `text` into runs at every `:shortcode:`.
 ///
 /// Scans rather than splits on `:`, because the colon that ends one
-/// shortcode can begin the next — `:tada::tada:` is two, and a splitter
-/// turns it into one and a stray colon.
+/// shortcode can begin the next -- `:tada::tada:` is two, and a
+/// splitter turns it into one and a stray colon.
 #[must_use]
-pub fn substitute(text: &str) -> String {
+pub fn scan(text: &str) -> Vec<Piece<'_>> {
     if !text.contains(':') {
-        return text.to_owned();
+        return vec![Piece::Text(text)];
     }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(open) = rest.find(':') {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 1..];
+    let mut out: Vec<Piece<'_>> = Vec::new();
+    // Where the current run of ordinary text began, in `text`.
+    let mut plain = 0;
+    let mut at = 0;
+    while let Some(offset) = text[at..].find(':') {
+        let open = at + offset;
+        let after = &text[open + 1..];
         let name_len = after
             .char_indices()
             .find(|(_, c)| !is_shortcode_char(*c))
             .map_or(after.len(), |(i, _)| i);
         let name = &after[..name_len];
-        // An empty `::` is not a shortcode, and neither is anything the
-        // table does not know.
-        let resolved = after[name_len..]
-            .strip_prefix(':')
-            .and_then(|tail| glyph(name).map(|g| (g, tail)));
-        if let Some((glyph, tail)) = resolved {
-            out.push_str(glyph);
-            rest = tail;
-        } else {
-            // Not a shortcode. Consume the colon and carry on, so the next
-            // one still gets its chance to open one.
-            out.push(':');
-            rest = after;
+        // An empty `::` is not a shortcode, and neither is one that is
+        // never closed.
+        if name.is_empty() || !after[name_len..].starts_with(':') {
+            // Consume the colon and carry on, so the next one still
+            // gets its chance to open one.
+            at = open + 1;
+            continue;
         }
+        if plain < open {
+            out.push(Piece::Text(&text[plain..open]));
+        }
+        out.push(glyph(name).map_or(Piece::Unknown(name), Piece::Glyph));
+        at = open + 1 + name_len + 1;
+        plain = at;
     }
-    out.push_str(rest);
+    if plain < text.len() {
+        out.push(Piece::Text(&text[plain..]));
+    }
     out
 }
 

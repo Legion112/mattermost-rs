@@ -833,3 +833,64 @@ fn a_cell_is_not_a_dead_end_for_links_and_mentions() {
         rows[1][1]
     );
 }
+
+/// A shortcode the table does not know is its own inline, not part of
+/// the text: that is where a client fetches the server's own emoji and
+/// puts a picture. One that cannot renders the name back, with its
+/// colons, which is what the whole message looked like before.
+#[test]
+fn an_unknown_shortcode_becomes_an_inline_of_its_own() {
+    let doc = parse("ship it :party_parrot: now :tada:");
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph, got {:?}", doc.blocks);
+    };
+    assert_eq!(
+        inlines,
+        &[
+            Inline::Text("ship it ".to_owned()),
+            Inline::Shortcode("party_parrot".to_owned()),
+            // The known one is part of the text around it: a glyph
+            // *is* text, and making every emoji its own inline would
+            // buy nothing.
+            Inline::Text(" now \u{1f389}".to_owned()),
+        ]
+    );
+
+    // Both fallbacks write it back out as it was typed.
+    assert_eq!(doc.to_plain(), "ship it :party_parrot: now \u{1f389}");
+    assert_eq!(
+        crate::to_pango(inlines),
+        "ship it :party_parrot: now \u{1f389}"
+    );
+    // And the name is escaped on the way into markup, like every other
+    // text path: malformed markup makes GTK drop the whole message.
+    assert_eq!(
+        crate::to_pango(&[Inline::Shortcode("a<b".to_owned())]),
+        ":a&lt;b:"
+    );
+
+    // Inside emphasis, and inside a code span it is still code.
+    let doc = parse("*:party_parrot:* `:party_parrot:`");
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert!(
+        matches!(&inlines[0], Inline::Emphasis(inner)
+            if inner == &[Inline::Shortcode("party_parrot".to_owned())]),
+        "{inlines:?}"
+    );
+    assert!(
+        inlines
+            .iter()
+            .any(|i| matches!(i, Inline::Code(c) if c == ":party_parrot:")),
+        "{inlines:?}"
+    );
+
+    // A URL that happens to contain something shortcode-shaped is a
+    // link, not an emoji: linkifying runs first.
+    let doc = parse("https://example.invalid/:party_parrot:/x");
+    let Some(Block::Paragraph(inlines)) = doc.blocks.first() else {
+        panic!("expected a paragraph");
+    };
+    assert!(matches!(&inlines[0], Inline::Link { .. }), "{inlines:?}");
+}

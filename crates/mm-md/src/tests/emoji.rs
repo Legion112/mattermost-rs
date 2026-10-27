@@ -1,5 +1,51 @@
 use super::*;
 
+/// What `scan` used to be: the runs joined back into one string, with
+/// an unresolved shortcode written out as it was typed. Every
+/// assertion below is about that, because it is what a reader sees
+/// from a client that cannot draw a custom emoji's picture.
+fn substitute(text: &str) -> String {
+    scan(text)
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Text(run) => run.to_owned(),
+            Piece::Glyph(glyph) => glyph.to_owned(),
+            Piece::Unknown(name) => format!(":{name}:"),
+        })
+        .collect()
+}
+
+/// The runs themselves, which is what the parser reads: a custom emoji
+/// has to come back as its own piece, or nothing downstream can put a
+/// picture where it was.
+#[test]
+fn an_unknown_shortcode_is_a_piece_of_its_own() {
+    assert_eq!(
+        scan("deploy :shipit: now"),
+        [
+            Piece::Text("deploy "),
+            Piece::Unknown("shipit"),
+            Piece::Text(" now"),
+        ]
+    );
+    // Known ones resolve in place, and text with none in it is one run.
+    assert_eq!(
+        scan("ship it :tada:"),
+        [Piece::Text("ship it "), Piece::Glyph("\u{1f389}")]
+    );
+    assert_eq!(scan("plain"), [Piece::Text("plain")]);
+    assert_eq!(scan(""), [Piece::Text("")]);
+    // Two custom ones back to back, with the colon that closes the
+    // first opening the second.
+    assert_eq!(
+        scan(":shipit::shipit:"),
+        [Piece::Unknown("shipit"), Piece::Unknown("shipit")]
+    );
+    // Every derive is exercised.
+    assert_eq!(Piece::Text("a"), Piece::Text("a").clone());
+    assert!(!format!("{:?}", Piece::Glyph("x")).is_empty());
+}
+
 /// The ordinary case.
 #[test]
 fn a_known_shortcode_becomes_its_glyph() {

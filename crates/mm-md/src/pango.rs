@@ -42,6 +42,15 @@ fn render(inlines: &[Inline], out: &mut String) {
     for inline in inlines {
         match inline {
             Inline::Text(text) => out.push_str(&escape(text)),
+            // Back to what was typed. Pango markup cannot carry an
+            // image, so a client drawing a custom emoji's picture does
+            // it by reading the inlines itself; this is the fallback,
+            // and `:party_parrot:` at least says what was meant.
+            Inline::Shortcode(name) => {
+                out.push(':');
+                out.push_str(&escape(name));
+                out.push(':');
+            }
             Inline::Code(code) => {
                 out.push_str("<tt>");
                 out.push_str(&escape(code));
