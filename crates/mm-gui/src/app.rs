@@ -93,7 +93,7 @@ struct Ui {
     /// Decoded avatars, by user. A texture is a GPU-side object and must be
     /// built on this thread, so the engine sends bytes and the decode
     /// happens here.
-    avatars: Rc<RefCell<HashMap<UserId, gdk::Texture>>>,
+    avatars: Avatars,
     /// Who has typed in a channel lately, and when they last did.
     ///
     /// View state, not store state: it expires on a clock, and the store
@@ -246,6 +246,27 @@ type ShownTools = Rc<RefCell<Option<gtk::Box>>>;
 /// second time. `None` is "asked, not here yet".
 type LinkImages = Rc<RefCell<HashMap<String, Option<gdk::Texture>>>>;
 
+/// Faces already fetched and decoded, by whose they are.
+type Avatars = Rc<RefCell<HashMap<UserId, gdk::Texture>>>;
+
+/// Everything a post row's widgets need to reach, as one thing.
+///
+/// Each field is an `Rc` or a sender the factory clones per row, and
+/// passing them one by one had grown the argument lists past what
+/// anybody can read -- and past what clippy will accept.
+#[derive(Clone)]
+struct RowContext {
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    store: Rc<RefCell<Store>>,
+    /// The server's base URL, for building a permalink.
+    server: Rc<RefCell<String>>,
+    /// The image currently open in the viewer, if any.
+    viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    shown: ShownTools,
+    links: LinkImages,
+    avatars: Avatars,
+}
+
 /// Who has typed in each channel lately, and when they last did.
 type Typing = Rc<RefCell<HashMap<ChannelId, Vec<(UserId, std::time::Instant)>>>>;
 
@@ -255,12 +276,7 @@ type Typing = Rc<RefCell<HashMap<ChannelId, Vec<(UserId, std::time::Instant)>>>>
 /// Hidden until a thread is opened — an empty panel permanently taking a
 /// third of the window would be worse than no panel.
 fn build_thread_pane(
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
-    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
-    shown: &ShownTools,
-    links: &LinkImages,
+    ctx: &RowContext,
 ) -> (
     gio::ListStore,
     gtk::ListView,
@@ -269,8 +285,7 @@ fn build_thread_pane(
     gtk::TextView,
     gtk::ScrolledWindow,
 ) {
-    let (thread_posts, thread_view, thread_scroller) =
-        build_post_list(commands, store, server, viewer, shown, links, true);
+    let (thread_posts, thread_view, thread_scroller) = build_post_list(ctx, true);
     let thread_title = gtk::Label::builder()
         .label("Thread")
         .xalign(0.0)
@@ -468,15 +483,17 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>> = Rc::new(RefCell::new(None));
     let shown_tools: ShownTools = Rc::new(RefCell::new(None));
     let link_images: LinkImages = Rc::new(RefCell::new(HashMap::new()));
-    let (posts, post_view, scroller) = build_post_list(
-        commands,
-        &store,
-        &server,
-        &viewer,
-        &shown_tools,
-        &link_images,
-        false,
-    );
+    let avatars: Avatars = Rc::new(RefCell::new(HashMap::new()));
+    let rows = RowContext {
+        commands: commands.clone(),
+        store: Rc::clone(&store),
+        server: Rc::clone(&server),
+        viewer: Rc::clone(&viewer),
+        shown: Rc::clone(&shown_tools),
+        links: Rc::clone(&link_images),
+        avatars: Rc::clone(&avatars),
+    };
+    let (posts, post_view, scroller) = build_post_list(&rows, false);
 
     let (composer, composer_pane, status) = build_composer_row();
 
@@ -495,14 +512,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     content.append(&composer_pane);
 
     let (thread_posts, thread_view, thread_pane, thread_close, thread_composer, thread_scroller) =
-        build_thread_pane(
-            commands,
-            &store,
-            &server,
-            &viewer,
-            &shown_tools,
-            &link_images,
-        );
+        build_thread_pane(&rows);
 
     let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
@@ -536,7 +546,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
-        avatars: Rc::new(RefCell::new(HashMap::new())),
+        avatars: Rc::clone(&avatars),
         typing: Rc::new(RefCell::new(HashMap::new())),
         typing_line,
         link_images: Rc::clone(&link_images),
@@ -1223,6 +1233,152 @@ fn build_typing_line() -> gtk::Label {
         .visible(false)
         .css_classes(["dim-label", "caption"])
         .build()
+}
+
+/// Everything the server will tell us about one person, as the card
+/// Mattermost opens when their name is clicked.
+///
+/// Built from what is already held rather than fetched: the roster
+/// arrives when a channel opens and carries the name, the job title and
+/// the timezone. A field the server withheld -- `email` is stripped for
+/// everybody but you unless the admin says otherwise -- is left out
+/// rather than drawn empty.
+fn profile_card(
+    store: &Rc<RefCell<Store>>,
+    avatars: &Avatars,
+    user: &mm_types::User,
+) -> gtk::Popover {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    column.set_margin_start(18);
+    column.set_margin_end(18);
+    column.set_margin_top(14);
+    column.set_margin_bottom(14);
+    column.set_halign(gtk::Align::Center);
+
+    let (gutter, face, dot) = face_with_dot(96);
+    face.set_text(Some(user.display_name()));
+    face.set_custom_image(avatars.borrow().get(&user.id));
+    set_presence(&dot, store.borrow().presence(&user.id), true);
+    gutter.set_halign(gtk::Align::Center);
+    gutter.set_margin_bottom(10);
+    column.append(&gutter);
+
+    let full = user.full_name();
+    if !full.is_empty() {
+        column.append(
+            &gtk::Label::builder()
+                .label(&full)
+                .css_classes(["title-2"])
+                .build(),
+        );
+    }
+    column.append(
+        &gtk::Label::builder()
+            .label(format!("@{}", user.username))
+            .css_classes(["dim-label"])
+            .build(),
+    );
+    if !user.position.is_empty() {
+        column.append(
+            &gtk::Label::builder()
+                .label(&user.position)
+                .wrap(true)
+                .justify(gtk::Justification::Center)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+    }
+    if user.is_bot {
+        column.append(
+            &gtk::Label::builder()
+                .label("BOT")
+                .css_classes(["caption-heading", "dim-label"])
+                .build(),
+        );
+    }
+    if user.is_deactivated() {
+        column.append(
+            &gtk::Label::builder()
+                .label("This account has been deactivated")
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+    }
+
+    let facts = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    facts.set_margin_top(12);
+    facts.set_halign(gtk::Align::Start);
+    if !user.email.is_empty() {
+        facts.append(&profile_fact("Email", &user.email));
+    }
+    if let Some((zone, now)) = local_time(user) {
+        facts.append(&profile_fact(&format!("Local time ({zone})"), &now));
+    }
+    if facts.first_child().is_some() {
+        column.append(&facts);
+    }
+
+    gtk::Popover::builder().child(&column).build()
+}
+
+/// Open the card for whoever the row under this widget is showing.
+///
+/// Connected once, in setup, because the rows are recycled: the handler
+/// asks the list item who it is currently bound to rather than closing
+/// over a person.
+fn show_profile(
+    at: &gtk::Widget,
+    item: &gtk::ListItem,
+    store: &Rc<RefCell<Store>>,
+    avatars: &Avatars,
+) {
+    let Some(data) = item.item().and_downcast::<PostRow>() else {
+        return;
+    };
+    if data.is_separator() || data.is_system() {
+        return;
+    }
+    let who = store.borrow().users.get(&data.author_id()).cloned();
+    let Some(user) = who else {
+        // A post whose author has not been fetched yet. Nothing to
+        // show, and an empty card would be worse than no card.
+        return;
+    };
+    let card = profile_card(store, avatars, &user);
+    card.set_parent(at);
+    // Taken down and detached on close, or every click leaves another
+    // popover parented to the same label.
+    card.connect_closed(gtk::Popover::unparent);
+    card.popup();
+}
+
+/// One labelled line on the card.
+fn profile_fact(title: &str, value: &str) -> gtk::Box {
+    let line = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    line.set_margin_top(6);
+    line.append(
+        &gtk::Label::builder()
+            .label(title)
+            .xalign(0.0)
+            .css_classes(["dim-label", "caption-heading"])
+            .build(),
+    );
+    line.append(&gtk::Label::builder().label(value).xalign(0.0).build());
+    line
+}
+
+/// What the clock says where this person is, and the zone's offset.
+///
+/// `None` when the server never reported a zone, or reported one this
+/// build's copy of the timezone database has never heard of -- a
+/// missing line is better than a wrong clock.
+fn local_time(user: &mm_types::User) -> Option<(String, String)> {
+    let zone: chrono_tz::Tz = user.timezone_name()?.parse().ok()?;
+    let now = chrono::Utc::now().with_timezone(&zone);
+    Some((
+        now.format("GMT%:z").to_string(),
+        now.format("%H:%M").to_string(),
+    ))
 }
 
 /// Underline what is not a word, once the typing stops, and offer
@@ -2074,14 +2230,8 @@ fn build_day_separator() -> gtk::Box {
 /// reuses a small set of rows and a button made per bind would be a button
 /// made per scroll. Which post it acts on is read from the row's widget
 /// name at click time, for the same reason.
-fn build_message_tools(
-    row: &gtk::Box,
-    item: &gtk::ListItem,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
-    shown: &ShownTools,
-) -> gtk::Box {
+fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -> gtk::Box {
+    let (commands, store, server, shown) = (&ctx.commands, &ctx.store, &ctx.server, &ctx.shown);
     // The hover toolbar: the one-click reactions this reader uses most,
     // then save and reply, then the overflow menu. Mattermost reveals
     // these on hover rather than drawing them on every message, and a
@@ -2217,13 +2367,7 @@ fn build_message_tools(
     tools
 }
 
-fn setup_post_row(
-    item: &gtk::ListItem,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
-    shown: &ShownTools,
-) {
+fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     row.set_margin_start(12);
     row.set_margin_end(12);
@@ -2314,18 +2458,14 @@ fn setup_post_row(
         let row = row.clone();
         let floating = floating.clone();
         let item = item.clone();
-        let commands = commands.clone();
-        let store = Rc::clone(store);
-        let server = Rc::clone(server);
-        let shown = Rc::clone(shown);
+        let ctx = ctx.clone();
         first_hover.connect_enter(move |_, _, _| {
             // The overlay's last child is the toolbar once there is one;
             // before that it is the message itself.
             let tools = match floating.last_child().and_downcast::<gtk::Box>() {
                 Some(tools) if tools.has_css_class("mmrs-tools") => tools,
                 _ => {
-                    let tools =
-                        build_message_tools(&row, &item, &commands, &store, &server, &shown);
+                    let tools = build_message_tools(&row, &item, &ctx);
                     floating.add_overlay(&tools);
                     tools
                 }
@@ -2339,11 +2479,26 @@ fn setup_post_row(
                 }
                 label_quick_reactions(&tools, &data);
                 tools.set_visible(true);
-                show_only(&shown, &tools);
+                show_only(&ctx.shown, &tools);
             }
         });
     }
     row.add_controller(first_hover);
+
+    // A name and a face are the two places Mattermost opens a person's
+    // card from, so both get the gesture and the hand cursor that says
+    // they are worth clicking.
+    for target in [author.upcast::<gtk::Widget>(), gutter.upcast()] {
+        target.set_cursor_from_name(Some("pointer"));
+        let click = gtk::GestureClick::new();
+        let item = item.clone();
+        let ctx = ctx.clone();
+        let at = target.clone();
+        click.connect_released(move |_, _, _, _| {
+            show_profile(&at, &item, &ctx.store, &ctx.avatars);
+        });
+        target.add_controller(click);
+    }
 
     item.set_child(Some(&row));
 }
@@ -3221,13 +3376,8 @@ impl RowWidgets {
     }
 }
 
-fn bind_post_row(
-    item: &gtk::ListItem,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
-    links: &LinkImages,
-    relative: bool,
-) {
+fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
+    let (commands, viewer, links) = (&ctx.commands, &ctx.viewer, &ctx.links);
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
     };
@@ -3612,12 +3762,7 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
 }
 
 fn build_post_list(
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
-    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
-    shown: &ShownTools,
-    links: &LinkImages,
+    ctx: &RowContext,
     // `relative`: say how long ago each message was instead of what the
     // clock said. The thread pane has no day separators, so a bare
     // "17:01" there could be today or a fortnight ago.
@@ -3626,32 +3771,20 @@ fn build_post_list(
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
 
-    let sender = commands.clone();
-    let store_for_setup = Rc::clone(store);
-    let server_for_setup = Rc::clone(server);
-    let shown_for_setup = Rc::clone(shown);
+    let for_setup = ctx.clone();
     factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(
-                item,
-                &sender,
-                &store_for_setup,
-                &server_for_setup,
-                &shown_for_setup,
-            );
+            setup_post_row(item, &for_setup);
         }
     });
-    let sender = commands.clone();
-    let viewer_for_bind = Rc::clone(viewer);
-    let shown_for_bind = Rc::clone(shown);
-    let links_for_bind = Rc::clone(links);
+    let for_bind = ctx.clone();
     factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
             // This widget may have been showing the previous occupant's
             // toolbar. The message under it has just changed, so the
             // toolbar is wrong whatever the pointer is doing.
-            hide_tools(item, &shown_for_bind);
-            bind_post_row(item, &sender, &viewer_for_bind, &links_for_bind, relative);
+            hide_tools(item, &for_bind.shown);
+            bind_post_row(item, &for_bind, relative);
         }
     });
     let post_view = gtk::ListView::builder()
@@ -4373,6 +4506,7 @@ impl Ui {
         PostRow::new(PostRowFields {
             id: post.id.as_str(),
             author: &author,
+            author_id: post.user_id.clone(),
             body: "",
             blocks,
             time: &clock_time(post.create_at.millis()),

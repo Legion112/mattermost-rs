@@ -206,10 +206,17 @@ real server yet.
 | feature | status | verified | notes |
 |---|---|---|---|
 | `users.presence` | partial | 12.0.1 | A dot in the corner of every face: green for online, amber for away, red for do not disturb, and nothing at all for offline, which is what Mattermost does rather than draw a column of grey dots about people who are simply not at work. Fetched in one POST for the sidebar's DM partners after a sync and for a channel's roster after it opens -- the ids go in the body because a roster is two hundred of them, which is past the usual proxy limit and would put everyone the reader is looking at into an access log. Kept current by `status_change`, and a repeat of what is already held produces no change so a second device reporting the same state does not redraw every row. An unrecognised status reads as offline rather than failing the batch. Verified on a live account: aragorn's face carries a green dot. NOT built: setting your own status, and there is no periodic re-poll -- a person who goes away while nothing else happens keeps their old dot until the server says otherwise. |
+| `users.profile_card` | partial | 12.0.1 | Clicking a name or a face in a message opens that person's card: their picture with its presence dot, their full name, their username, their job title, their email where the server discloses it, and the time where they are. Built from the roster already held rather than fetched, so it opens without a round trip; a field the server withheld is left out rather than drawn blank, which is why `email` is simply absent on a server that sanitizes it. The local time needs the person's IANA zone -- Mattermost sends it as three strings with the boolean written out as text -- and the line is omitted when there is no zone or this build's timezone database has never heard of it, because a missing clock beats a wrong one. Verified on a live account: aragorn's card reads his full name, @aragorn, Project Manager/Operations Assistant, and 18:20 at GMT+03:00. NOT built: the "Message" button that opens or creates a DM, custom statuses, and the card over a `@mention` in message text rather than over the author's name. |
 
 <details><summary><code>users.presence</code> wire</summary>
 
 - `POST /api/v4/users/status/ids`
 - ws `status_change`
+
+</details>
+
+<details><summary><code>users.profile_card</code> wire</summary>
+
+- `GET /api/v4/users`
 
 </details>

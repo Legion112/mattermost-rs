@@ -476,3 +476,27 @@ live account: "Ошибки в сообщениии and teh wrong word" underlin
 "сообщениии" and "teh". NOT built: a personal dictionary ("add to \
 dictionary"), grammar as opposed to spelling, and spell-checking anything \
 but the two composers."""
+
+[[feature]]
+id       = "users.profile_card"
+area     = "users"
+upstream = "webapp"
+status   = "partial"
+endpoints = ["GET /api/v4/users"]
+verified_against = "12.0.1"
+notes = """
+Clicking a name or a face in a message opens that person's card: their \
+picture with its presence dot, their full name, their username, their job \
+title, their email where the server discloses it, and the time where they \
+are. Built from the roster already held rather than fetched, so it opens \
+without a round trip; a field the server withheld is left out rather than \
+drawn blank, which is why `email` is simply absent on a server that \
+sanitizes it. The local time needs the person's IANA zone -- Mattermost \
+sends it as three strings with the boolean written out as text -- and the \
+line is omitted when there is no zone or this build's timezone database \
+has never heard of it, because a missing clock beats a wrong one. \
+Verified on a live account: aragorn's card reads his full name, \
+@aragorn, Project Manager/Operations Assistant, and 18:20 at GMT+03:00. \
+NOT built: the "Message" button that opens or creates a DM, custom \
+statuses, and the card over a `@mention` in message text rather than over \
+the author's name."""

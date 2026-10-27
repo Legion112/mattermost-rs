@@ -26,6 +26,7 @@ async-channel = "2"
 chrono        = { version = "0.4", default-features = false, features = ["clock"] }
 tokio         = { version = "1", features = ["sync"] }
 spellbook = "0.4.2"
+chrono-tz = "0.10.4"
 
 [lints]
 workspace = true

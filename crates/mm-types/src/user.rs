@@ -18,6 +18,9 @@ pub struct User {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
+    /// Job title, as the person set it. Public: the server does not
+    /// strip it the way it strips `email`.
+    pub position: String,
     pub roles: String,
     pub locale: String,
     pub create_at: Timestamp,
@@ -30,9 +33,35 @@ pub struct User {
     pub last_picture_update: Timestamp,
     pub is_bot: bool,
     pub notify_props: BTreeMap<String, String>,
+    /// `useAutomaticTimezone`, `automaticTimezone`, `manualTimezone` --
+    /// a map because every value is a string on the wire, the boolean
+    /// included, which is the same wart as the client config.
+    pub timezone: BTreeMap<String, String>,
 }
 
 impl User {
+    /// The IANA zone this person is in, if the server knows one.
+    ///
+    /// Whichever of the two the person is using: the automatic zone
+    /// their client reported, or the one they picked by hand.
+    #[must_use]
+    pub fn timezone_name(&self) -> Option<&str> {
+        let automatic = self.timezone.get("useAutomaticTimezone").is_some_and(|on| {
+            // A string, not a boolean, and seen as both "true" and
+            // "TRUE" depending on which client wrote it.
+            on.eq_ignore_ascii_case("true")
+        });
+        let key = if automatic {
+            "automaticTimezone"
+        } else {
+            "manualTimezone"
+        };
+        self.timezone
+            .get(key)
+            .map(String::as_str)
+            .filter(|zone| !zone.is_empty())
+    }
+
     #[must_use]
     pub fn is_deactivated(&self) -> bool {
         !self.delete_at.is_zero()
@@ -238,6 +267,44 @@ mod tests {
         assert_eq!(u.username, "a");
         assert_eq!(u.email, "");
         assert!(!u.is_bot);
+    }
+
+    /// A person's timezone is whichever of the two they are using, and
+    /// the flag saying which is a *string* on the wire -- the same wart
+    /// as the client config, where every value is a string including
+    /// the booleans.
+    #[test]
+    fn the_timezone_follows_the_automatic_flag() {
+        let user: User = serde_json::from_str(
+            r#"{"id":"u1","position":"Middle+ Backend Developer","timezone":
+               {"useAutomaticTimezone":"true","automaticTimezone":"Europe/Moscow",
+                "manualTimezone":"America/New_York"}}"#,
+        )
+        .unwrap();
+        assert_eq!(user.position, "Middle+ Backend Developer");
+        assert_eq!(user.timezone_name(), Some("Europe/Moscow"));
+
+        let mut manual = user.clone();
+        manual
+            .timezone
+            .insert("useAutomaticTimezone".into(), "false".into());
+        assert_eq!(manual.timezone_name(), Some("America/New_York"));
+
+        // Written "TRUE" by some clients.
+        let mut shouting = user.clone();
+        shouting
+            .timezone
+            .insert("useAutomaticTimezone".into(), "TRUE".into());
+        assert_eq!(shouting.timezone_name(), Some("Europe/Moscow"));
+
+        // An empty zone is not a zone, and a server that sends none at
+        // all is the common case.
+        let mut blank = user;
+        blank
+            .timezone
+            .insert("automaticTimezone".into(), String::new());
+        assert_eq!(blank.timezone_name(), None);
+        assert_eq!(User::default().timezone_name(), None);
     }
 
     /// Parsing is lenient where deserializing is not: a presence the

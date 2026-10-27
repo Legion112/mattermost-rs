@@ -86,6 +86,7 @@ mod imp {
     pub struct PostRow {
         pub id: RefCell<String>,
         pub author: RefCell<String>,
+        pub author_id: RefCell<mm_types::UserId>,
         pub body: RefCell<String>,
         /// The message body, a block at a time. Empty for a separator,
         /// whose text lives in `body`.
@@ -144,6 +145,8 @@ glib::wrapper! {
 pub struct PostRowFields<'a> {
     pub id: &'a str,
     pub author: &'a str,
+    /// Who said it, so a click on the name can open their card.
+    pub author_id: mm_types::UserId,
     pub body: &'a str,
     pub blocks: Vec<BlockView>,
     pub time: &'a str,
@@ -202,6 +205,7 @@ impl PostRow {
         let inner = this.imp();
         inner.id.replace(fields.id.to_owned());
         inner.author.replace(fields.author.to_owned());
+        inner.author_id.replace(fields.author_id);
         inner.body.replace(fields.body.to_owned());
         inner.blocks.replace(fields.blocks);
         inner.time.replace(fields.time.to_owned());
@@ -341,6 +345,11 @@ impl PostRow {
     #[must_use]
     pub fn id(&self) -> String {
         self.imp().id.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn author_id(&self) -> mm_types::UserId {
+        self.imp().author_id.borrow().clone()
     }
 
     #[must_use]
