@@ -537,3 +537,20 @@ fn a_reaction_sent_as_a_nested_object_is_reported_not_swallowed() {
         "got {outcomes:?}"
     );
 }
+
+/// A newly uploaded custom emoji, nested the same way a reaction is.
+///
+/// Decoded for one reason: without it the person who has just uploaded
+/// one sees their own shortcode as text until the next sync.
+#[test]
+fn an_uploaded_emoji_arrives_as_json_inside_a_string() {
+    let mut proto = WsProtocol::default();
+    let frame = r#"{"event":"emoji_added","seq":1,"data":{"emoji":
+        "{\"id\":\"e1\",\"name\":\"party_parrot\",\"creator_id\":\"u1\",\"create_at\":20}"}}"#;
+    let outcomes = proto.on_frame(frame);
+    let Some(WsOutcome::Event(WsEvent::EmojiAdded(emoji))) = outcomes.first() else {
+        panic!("expected a decoded emoji, got {outcomes:?}");
+    };
+    assert_eq!(emoji.name, "party_parrot");
+    assert_eq!(emoji.id, mm_types::EmojiId::new("e1"));
+}

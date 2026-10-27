@@ -681,6 +681,7 @@ fn describe(event: &mm_api::WsEvent) -> String {
                 r.user_id, r.emoji_name, r.post_id
             )
         }
+        E::EmojiAdded(e) => format!("custom emoji :{}: added", e.name),
         E::Unknown { event } => format!("(unhandled event {event})"),
     }
 }

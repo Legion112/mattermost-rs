@@ -826,8 +826,10 @@ held all forty-one afterwards. NOT built: **inline in a message**, which a \
 `GtkLabel` cannot do -- the body is Pango markup, which has no way to carry \
 an image, so that needs the body to become a `TextView` with child anchors. \
 A `:party_parrot:` in a message therefore still reads as `:party_parrot:`. \
-Also not built: uploading one, and the `emoji_added` WebSocket event, so an \
-emoji uploaded while this client is running is unknown until the next sync."""
+An emoji uploaded while this client is running arrives as `emoji_added` \
+over the WebSocket and is known at once, which matters most to the person \
+who just uploaded it: without it they would see their own shortcode as \
+text until the next sync. NOT built: uploading one."""
 
 [[feature]]
 id       = "desktop.install"

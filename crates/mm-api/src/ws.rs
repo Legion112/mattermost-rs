@@ -117,6 +117,12 @@ pub enum WsEvent {
     /// like `post` and `channel`.
     ReactionAdded(Reaction),
     ReactionRemoved(Reaction),
+    /// Somebody uploaded a custom emoji. Nested like `reaction`.
+    ///
+    /// Worth decoding for one reason: without it a newly uploaded emoji
+    /// is unknown until the next sync, so the person who has just added
+    /// one sees their own shortcode as text when they use it.
+    EmojiAdded(mm_types::CustomEmoji),
     /// Anything else, kept so it can be logged and counted.
     Unknown {
         event: String,
@@ -320,6 +326,7 @@ fn decode_event(event: &str, data: &serde_json::Value) -> Result<WsEvent, String
         "post_edited" => Ok(WsEvent::PostEdited(nested_json(data, "post")?)),
         "reaction_added" => Ok(WsEvent::ReactionAdded(nested_json(data, "reaction")?)),
         "reaction_removed" => Ok(WsEvent::ReactionRemoved(nested_json(data, "reaction")?)),
+        "emoji_added" => Ok(WsEvent::EmojiAdded(nested_json(data, "emoji")?)),
         "post_deleted" => Ok(WsEvent::PostDeleted(nested_json(data, "post")?)),
         "multiple_channels_viewed" => Ok(WsEvent::MultipleChannelsViewed {
             channel_times: serde_json::from_value(

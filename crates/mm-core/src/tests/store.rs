@@ -2745,3 +2745,24 @@ fn custom_emoji_complete_prefix_first() {
     // An empty query is everything, which is what an opened picker wants.
     assert_eq!(store.custom_emoji_matching("", 10).len(), 3);
 }
+
+/// An emoji uploaded while this client is running. Without it the
+/// person who just added one sees their own shortcode as text until
+/// the next sync.
+#[test]
+fn an_emoji_uploaded_now_is_known_now() {
+    let mut store = store();
+    let added = WsEvent::EmojiAdded(mm_types::CustomEmoji {
+        id: mm_types::EmojiId::new("e1"),
+        name: "party_parrot".to_owned(),
+        ..mm_types::CustomEmoji::default()
+    });
+    assert_eq!(store.apply_ws(&added), [Change::Emoji]);
+    assert_eq!(
+        store.custom_emoji("party_parrot"),
+        Some(&mm_types::EmojiId::new("e1"))
+    );
+    // The same one again is not a change, so a replayed queue after a
+    // reconnect does not redraw every message on screen.
+    assert!(store.apply_ws(&added).is_empty());
+}

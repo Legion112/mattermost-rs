@@ -1234,6 +1234,7 @@ impl Store {
                 }
             }
             WsEvent::PostDeleted(post) => self.on_deleted(post),
+            WsEvent::EmojiAdded(emoji) => self.apply_custom_emoji(std::slice::from_ref(emoji)),
             WsEvent::ReactionAdded(reaction) => {
                 self.reactions
                     .entry(reaction.post_id.clone())
