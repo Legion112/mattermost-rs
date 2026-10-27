@@ -1572,3 +1572,110 @@ fn a_channel_with_no_header_has_no_topic() {
             .is_empty()
     );
 }
+
+/// The one-click reactions are the ones this reader actually uses. A
+/// client that hardcodes three offers two people in three the wrong ones.
+#[test]
+fn quick_reactions_come_from_what_the_reader_uses() {
+    let mut store = store();
+    for (post, emoji) in [
+        ("p1", "tada"),
+        ("p2", "tada"),
+        ("p3", "tada"),
+        ("p4", "rocket"),
+        ("p5", "rocket"),
+    ] {
+        store.apply_ws(&WsEvent::ReactionAdded(reaction(post, ME, emoji, 10)));
+    }
+    // Somebody else's reactions are not this reader's habits.
+    store.apply_ws(&WsEvent::ReactionAdded(reaction(
+        "p6", "u-other", "zzz", 10,
+    )));
+    store.apply_ws(&WsEvent::ReactionAdded(reaction(
+        "p7", "u-other", "zzz", 10,
+    )));
+
+    assert_eq!(store.favourite_emoji(2), ["tada", "rocket"]);
+}
+
+/// A new account has reacted to nothing, and must still get three buttons
+/// rather than none.
+#[test]
+fn quick_reactions_fall_back_to_a_common_set() {
+    let store = store();
+    assert_eq!(store.favourite_emoji(3).len(), 3);
+
+    // And a reader with one habit gets it first, padded with the rest.
+    let mut one = self::store();
+    one.apply_ws(&WsEvent::ReactionAdded(reaction("p1", ME, "tada", 10)));
+    let offered = one.favourite_emoji(3);
+    assert_eq!(offered[0], "tada");
+    assert_eq!(offered.len(), 3);
+    assert!(!offered[1..].contains(&"tada".to_owned()), "{offered:?}");
+}
+
+/// A link to a post is `{server}/{team}/pl/{post}`, which is what pasting
+/// one into Mattermost resolves.
+#[test]
+fn a_post_has_a_permalink() {
+    let mut store = store();
+    store.apply_teams(vec![Team {
+        id: TeamId::new("t1"),
+        name: "alanbase".into(),
+        ..Team::default()
+    }]);
+    let mut channel = channel("c1", 0, 0);
+    channel.team_id = TeamId::new("t1");
+    store.apply_channels(vec![channel]);
+
+    let mut page = PostList::default();
+    let only = post("p1", "c1", 10);
+    page.order.push(only.id.clone());
+    page.posts.insert(only.id.clone(), only);
+    store.apply_post_list(&ChannelId::new("c1"), &page, PageAnchor::Newest);
+
+    assert_eq!(
+        store.permalink("https://matter.example.invalid/", &PostId::new("p1")),
+        Some("https://matter.example.invalid/alanbase/pl/p1".to_owned())
+    );
+    // A post nobody has loaded has no link.
+    assert_eq!(
+        store.permalink("https://x.invalid", &PostId::new("p-none")),
+        None
+    );
+}
+
+/// A reader with more habits than there are buttons gets the commonest,
+/// and one whose habit is already in the default set is not offered it
+/// twice.
+#[test]
+fn quick_reactions_are_capped_and_never_repeat() {
+    let mut store = store();
+    for (post, emoji, times) in [
+        ("p1", "tada", 4),
+        ("p2", "rocket", 3),
+        ("p3", "eyes", 2),
+        ("p4", "heart", 1),
+    ] {
+        for n in 0..times {
+            // A distinct post each time: one person reacts to one post
+            // with one emoji once.
+            let id = format!("{post}-{n}");
+            store.apply_ws(&WsEvent::ReactionAdded(reaction(&id, ME, emoji, 10)));
+        }
+    }
+    assert_eq!(store.favourite_emoji(3), ["tada", "rocket", "eyes"]);
+
+    // A reader whose only habit is already one of the defaults is not
+    // offered it twice: the padding skips what is already there.
+    let mut overlapping = self::store();
+    overlapping.apply_ws(&WsEvent::ReactionAdded(reaction("p9", ME, "eyes", 10)));
+    let offered = overlapping.favourite_emoji(3);
+    assert_eq!(offered[0], "eyes");
+    assert_eq!(
+        offered.iter().filter(|e| *e == "eyes").count(),
+        1,
+        "{offered:?}"
+    );
+    assert_eq!(offered.len(), 3);
+}

@@ -284,6 +284,67 @@ impl Store {
             .is_some_and(Timeline::older_complete)
     }
 
+    /// The emoji this reader reaches for most, commonest first.
+    ///
+    /// Mattermost offers a few one-click reactions on every message, and
+    /// which ones depends on the person: a client that hardcodes three
+    /// offers two people the wrong ones. Taken from the reactions they
+    /// have actually left, and padded from a default set so a new account
+    /// still gets three buttons rather than none.
+    #[must_use]
+    pub fn favourite_emoji(&self, want: usize) -> Vec<String> {
+        /// What to offer somebody who has never reacted to anything.
+        const COMMON: [&str; 3] = ["+1", "eyes", "white_check_mark"];
+
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for ((emoji, user), _) in self.reactions.values().flatten() {
+            if *user == self.me {
+                *counts.entry(emoji.as_str()).or_default() += 1;
+            }
+        }
+        let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+        // By count, then by name: a `BTreeMap` iterates in name order, so
+        // ties are already stable and the buttons do not move about.
+        ranked.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut out: Vec<String> = Vec::with_capacity(want);
+        for (emoji, _) in ranked {
+            if out.len() == want {
+                break;
+            }
+            out.push(emoji.to_owned());
+        }
+        for fallback in COMMON {
+            if out.len() == want {
+                break;
+            }
+            if !out.iter().any(|held| held == fallback) {
+                out.push(fallback.to_owned());
+            }
+        }
+        out
+    }
+
+    /// A link to one post, the way Mattermost writes them.
+    ///
+    /// `{server}/{team}/pl/{post}` — the team is the one the post's channel
+    /// belongs to, and a DM has none, so those get the first team the
+    /// reader is in, which is what the web app does.
+    #[must_use]
+    pub fn permalink(&self, server: &str, post: &PostId) -> Option<String> {
+        let channel = self.posts.get(post).map(|p| p.channel_id.clone())?;
+        let team = self
+            .channels
+            .get(&channel)
+            .and_then(|c| self.teams.iter().find(|t| t.id == c.team_id))
+            .or_else(|| self.teams.first())?;
+        Some(format!(
+            "{}/{}/pl/{post}",
+            server.trim_end_matches('/'),
+            team.name
+        ))
+    }
+
     /// A post's reactions, grouped for display.
     ///
     /// Ordered by when each emoji was *first* used on the post, which is the

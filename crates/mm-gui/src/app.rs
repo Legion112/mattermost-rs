@@ -61,6 +61,8 @@ pub struct Wiring {
 #[derive(Clone)]
 struct Ui {
     store: Rc<RefCell<Store>>,
+    /// The server's base URL, for building a link to a message.
+    server: Rc<RefCell<String>>,
     /// Swaps between the sign-in screen and the chat view. The window starts
     /// on sign-in and only moves once the engine reports a session, so there
     /// is never a moment where an empty chat view is shown as though it were
@@ -175,6 +177,8 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
 /// third of the window would be worse than no panel.
 fn build_thread_pane(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) -> (
     gio::ListStore,
     gtk::ListView,
@@ -182,7 +186,7 @@ fn build_thread_pane(
     gtk::Button,
     gtk::Entry,
 ) {
-    let (thread_posts, thread_view, thread_scroller) = build_post_list(commands);
+    let (thread_posts, thread_view, thread_scroller) = build_post_list(commands, store, server);
     let thread_title = gtk::Label::builder()
         .label("Thread")
         .xalign(0.0)
@@ -258,13 +262,25 @@ fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::Box) {
 
 /// Styling this window needs that the theme does not provide.
 ///
-/// Only links: GTK paints them in the desktop's accent colour, which on
-/// Ubuntu is orange, and a chat client showing orange links beside a
-/// Mattermost client showing blue ones reads as a different application.
-/// The colour is Mattermost's own, and it is legible on both themes.
+/// Links, because GTK paints them in the desktop's accent colour -- orange
+/// on Ubuntu -- and a chat client showing orange links beside a Mattermost
+/// client showing blue ones reads as a different application. The colour is
+/// Mattermost's own and is legible on both themes.
+///
+/// And the hover toolbar, which floats over a message and so needs a
+/// background of its own: without one its buttons are drawn on top of the
+/// text they belong to and neither can be read.
 fn install_styles() {
     let css = gtk::CssProvider::new();
-    css.load_from_string("link { color: #5d89ea; } link:hover { color: #86a9f2; }");
+    css.load_from_string(
+        "link { color: #5d89ea; } link:hover { color: #86a9f2; }\n\
+         .mmrs-tools { \
+             background: @popover_bg_color; \
+             border: 1px solid @borders; \
+             border-radius: 6px; \
+             padding: 1px; \
+         }",
+    );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -274,53 +290,12 @@ fn install_styles() {
     }
 }
 
-fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
-    install_styles();
-    let (sidebar, identity, sidebar_pane) = build_sidebar();
-
-    let (posts, post_view, scroller) = build_post_list(commands);
-
-    let composer = gtk::Entry::builder()
-        .placeholder_text("Write a message…")
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(12)
-        .sensitive(false)
-        .build();
-
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .margin_start(12)
-        .margin_bottom(4)
-        .css_classes(["dim-label", "caption"])
-        .label("starting…")
-        .build();
-
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.append(&scroller);
-    content.append(&status);
-    content.append(&composer);
-
-    let (thread_posts, thread_view, thread_pane, thread_close, thread_composer) =
-        build_thread_pane(commands);
-
-    let conversation = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&content)
-        .end_child(&thread_pane)
-        .resize_end_child(false)
-        .shrink_end_child(false)
-        .build();
-
-    let split = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&sidebar_pane)
-        .end_child(&conversation)
-        .resize_start_child(false)
-        .position(260)
-        .build();
-
+/// The window itself: its title bar, the sign-in page, and the stack
+/// that swaps between that page and the chat view.
+fn build_window(
+    app: &adw::Application,
+    split: &gtk::Paned,
+) -> (adw::WindowTitle, gtk::Button, Rc<LoginPage>, gtk::Stack) {
     let title = adw::WindowTitle::new("mattermost-rs", "connecting…");
     let header = adw::HeaderBar::builder().title_widget(&title).build();
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
@@ -336,7 +311,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         .transition_type(gtk::StackTransitionType::None)
         .build();
     stack.add_named(&login.root, Some("login"));
-    stack.add_named(&split, Some("main"));
+    stack.add_named(split, Some("main"));
     stack.set_visible_child_name("login");
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -361,8 +336,68 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         .build();
     window.present();
 
+    (title, refresh, login, stack)
+}
+
+fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
+    install_styles();
+    let (sidebar, identity, sidebar_pane) = build_sidebar();
+
+    // Made here rather than in the `Ui` below, because the post list's
+    // widgets are built before it and the copy-link button needs both: a
+    // permalink is the server, the team and the post, and only the store
+    // knows the last two.
+    let store = Rc::new(RefCell::new(Store::new(UserId::default(), Threading::Flat)));
+    let server = Rc::new(RefCell::new(String::new()));
+
+    let (posts, post_view, scroller) = build_post_list(commands, &store, &server);
+
+    let composer = gtk::Entry::builder()
+        .placeholder_text("Write a message…")
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(12)
+        .sensitive(false)
+        .build();
+
+    let status = gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_bottom(4)
+        .css_classes(["dim-label", "caption"])
+        .label("starting…")
+        .build();
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&scroller);
+    content.append(&status);
+    content.append(&composer);
+
+    let (thread_posts, thread_view, thread_pane, thread_close, thread_composer) =
+        build_thread_pane(commands, &store, &server);
+
+    let conversation = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&content)
+        .end_child(&thread_pane)
+        .resize_end_child(false)
+        .shrink_end_child(false)
+        .build();
+
+    let split = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&sidebar_pane)
+        .end_child(&conversation)
+        .resize_start_child(false)
+        .position(260)
+        .build();
+
+    let (title, refresh, login, stack) = build_window(app, &split);
+
     let ui = Ui {
-        store: Rc::new(RefCell::new(Store::new(UserId::default(), Threading::Flat))),
+        store,
+        server,
         commands: commands.clone(),
         selected: Rc::new(RefCell::new(None)),
         sidebar: sidebar.clone(),
@@ -841,7 +876,96 @@ fn build_day_separator() -> gtk::Box {
     day
 }
 
-fn setup_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
+/// The toolbar that appears over a message on hover.
+///
+/// Built once per recycled row and relabelled on bind, because `ListView`
+/// reuses a small set of rows and a button made per bind would be a button
+/// made per scroll. Which post it acts on is read from the row's widget
+/// name at click time, for the same reason.
+fn build_message_tools(
+    row: &gtk::Box,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
+) -> gtk::Box {
+    // The hover toolbar: the one-click reactions this reader uses most,
+    // then reply, then copy-link. Mattermost reveals these on hover rather
+    // than drawing them on every message, and a channel with a toolbar per
+    // row is unreadable.
+    //
+    // The quick-reaction buttons are built once, here, and relabelled on
+    // bind: `ListView` recycles rows, so a button made per bind would be a
+    // button made per scroll.
+    let tools = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tools.add_css_class("linked");
+    tools.add_css_class("mmrs-tools");
+    tools.set_margin_top(2);
+    tools.set_margin_end(6);
+    tools.set_halign(gtk::Align::End);
+    tools.set_valign(gtk::Align::Start);
+    tools.set_visible(false);
+
+    for slot in 0..QUICK_REACTIONS {
+        let button = gtk::Button::builder().css_classes(["flat"]).build();
+        button.set_widget_name(&format!("quick{slot}"));
+        let commands = commands.clone();
+        let row = row.clone();
+        button.connect_clicked(move |button| {
+            // The emoji is on the button, put there at bind time; the post
+            // is on the row, for the same reason.
+            let (post, emoji) = (row.widget_name(), button.tooltip_text());
+            if let (false, Some(emoji)) = (post.is_empty(), emoji) {
+                commands
+                    .send(Command::React {
+                        post: PostId::new(post.as_str()),
+                        emoji: emoji.to_string(),
+                        add: true,
+                    })
+                    .ok();
+            }
+        });
+        tools.append(&button);
+    }
+
+    let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
+    reply.add_css_class("flat");
+    reply.set_tooltip_text(Some("Reply in thread"));
+    tools.append(&reply);
+
+    let copier = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copier.add_css_class("flat");
+    copier.set_tooltip_text(Some("Copy link to message"));
+    {
+        // No request: a permalink is the server, the team and the post id,
+        // all of which are already here.
+        let store = Rc::clone(store);
+        let server = Rc::clone(server);
+        let row = row.clone();
+        copier.connect_clicked(move |button| {
+            let post = row.widget_name();
+            if post.is_empty() {
+                return;
+            }
+            let address = store
+                .borrow()
+                .permalink(&server.borrow(), &PostId::new(post.as_str()));
+            if let (Some(address), Some(display)) = (address, gdk::Display::default()) {
+                display.clipboard().set_text(&address);
+                button.set_tooltip_text(Some("Link copied"));
+            }
+        });
+    }
+    tools.append(&copier);
+
+    tools
+}
+
+fn setup_post_row(
+    item: &gtk::ListItem,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
+) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     row.set_margin_start(12);
     row.set_margin_end(12);
@@ -914,38 +1038,16 @@ fn setup_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedS
     line.append(&face);
     line.append(&main);
 
-    // Replying. Mattermost reveals this on hover rather than drawing it on
-    // every message, and a channel with one of these per row is unreadable.
-    // It is the only way to start a thread on a message nobody has replied
-    // to yet -- the "N replies" button only exists once there are replies.
-    let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
-    reply.add_css_class("flat");
-    reply.set_tooltip_text(Some("Reply in thread"));
-    reply.set_valign(gtk::Align::Start);
-    reply.set_halign(gtk::Align::End);
-    reply.set_visible(false);
-
-    {
-        let commands = commands.clone();
-        let row = row.clone();
-        reply.connect_clicked(move |_| {
-            let post = row.widget_name();
-            if !post.is_empty() {
-                commands
-                    .send(Command::OpenThread(PostId::new(post.as_str())))
-                    .ok();
-            }
-        });
-    }
+    let tools = build_message_tools(&row, commands, store, server);
 
     let hover = gtk::EventControllerMotion::new();
     {
-        let reply = reply.clone();
-        hover.connect_enter(move |_, _, _| reply.set_visible(true));
+        let tools = tools.clone();
+        hover.connect_enter(move |_, _, _| tools.set_visible(true));
     }
     {
-        let reply = reply.clone();
-        hover.connect_leave(move |_| reply.set_visible(false));
+        let tools = tools.clone();
+        hover.connect_leave(move |_| tools.set_visible(false));
     }
     row.add_controller(hover);
 
@@ -955,7 +1057,7 @@ fn setup_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedS
     // is what the reader came for.
     let floating = gtk::Overlay::new();
     floating.set_child(Some(&line));
-    floating.add_overlay(&reply);
+    floating.add_overlay(&tools);
     row.append(&floating);
     item.set_child(Some(&row));
 }
@@ -1245,6 +1347,32 @@ fn bind_images(images: &gtk::Box, data: &PostRow) {
     }
 }
 
+/// Hide the hover toolbar and relabel its one-click reactions for the row
+/// now bound to it.
+fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
+    if let Some(tools) = floating.last_child().and_downcast::<gtk::Box>() {
+        tools.set_visible(false);
+        // Relabel the one-click reactions for this row. The buttons are
+        // made once in setup and reused, so the emoji has to be put on
+        // them here -- and the tooltip carries the shortcode, which is
+        // what the click handler sends.
+        let mut button = tools.first_child();
+        for emoji in data.quick_reactions() {
+            let Some(current) = button.and_downcast::<gtk::Button>() else {
+                break;
+            };
+            if !current.widget_name().starts_with("quick") {
+                break;
+            }
+            current.set_label(
+                &mm_md::glyph(&emoji).map_or_else(|| format!(":{emoji}:"), ToOwned::to_owned),
+            );
+            current.set_tooltip_text(Some(&emoji));
+            button = current.next_sibling();
+        }
+    }
+}
+
 fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
@@ -1336,9 +1464,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         body.remove_css_class("dim-label");
     }
 
-    if let Some(reply) = floating.last_child().and_downcast::<gtk::Button>() {
-        reply.set_visible(false);
-    }
+    bind_message_tools(&floating, &data);
 
     bind_cards(&cards, &data);
     bind_images(&images, &data);
@@ -1377,6 +1503,9 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         reactions.append(&reaction_chip(&data.id(), &chip, commands));
     }
 }
+
+/// How many one-click reaction buttons a message's hover toolbar carries.
+const QUICK_REACTIONS: usize = 3;
 
 /// The avatar's width plus the gap after it. A grouped message has no
 /// avatar and borrows this as a left margin, so its text stays in line with
@@ -1503,13 +1632,17 @@ fn reaction_chip(
 
 fn build_post_list(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
     let sender = commands.clone();
+    let store_for_setup = Rc::clone(store);
+    let server_for_setup = Rc::clone(server);
     factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(item, &sender);
+            setup_post_row(item, &sender, &store_for_setup, &server_for_setup);
         }
     });
     let sender = commands.clone();
@@ -1590,6 +1723,9 @@ impl Ui {
                     .map_or(server.as_str(), |(_, host)| host);
                 self.identity
                     .set_text(&format!("{username} · {host}{mode}"));
+                // Kept whole, scheme and all: a link to a message has to be
+                // one somebody can paste into a browser.
+                self.server.replace(server.clone());
                 self.set_status("connected");
             }
             Event::Threading(threading) => {
@@ -1855,6 +1991,7 @@ impl Ui {
             }
         }
         let images = self.images_for(post);
+        let quick = store.favourite_emoji(QUICK_REACTIONS);
         let replies = store.reply_count(&post.id);
         PostRow::new(PostRowFields {
             id: post.id.as_str(),
@@ -1874,6 +2011,7 @@ impl Ui {
                 },
             },
             reactions: store.reactions_for(&post.id),
+            quick_reactions: quick.clone(),
             avatar,
             images,
             cards: post

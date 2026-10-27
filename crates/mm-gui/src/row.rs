@@ -109,6 +109,8 @@ mod imp {
         /// How many replies hang off this post, for the button that opens
         /// the thread. Zero on a reply, which has no thread of its own.
         pub replies: Cell<i64>,
+        /// The one-click reactions to offer on this row.
+        pub quick_reactions: RefCell<Vec<String>>,
         /// Images attached to the message, already sized.
         pub images: RefCell<Vec<super::Attachment>>,
         /// Webhook attachments, already rendered.
@@ -144,6 +146,7 @@ pub struct PostRowFields<'a> {
     pub replies: i64,
     pub images: Vec<Attachment>,
     pub cards: Vec<AttachmentView>,
+    pub quick_reactions: Vec<String>,
 }
 
 /// Who a row is from.
@@ -189,6 +192,7 @@ impl PostRow {
         inner.avatar.replace(fields.avatar);
         inner.replies.set(fields.replies);
         inner.images.replace(fields.images);
+        inner.quick_reactions.replace(fields.quick_reactions);
         inner.cards.replace(fields.cards);
         this
     }
@@ -229,6 +233,11 @@ impl PostRow {
     #[must_use]
     pub fn is_bot(&self) -> bool {
         self.imp().voice.get() == Voice::Bot
+    }
+
+    #[must_use]
+    pub fn quick_reactions(&self) -> Vec<String> {
+        self.imp().quick_reactions.borrow().clone()
     }
 
     #[must_use]
