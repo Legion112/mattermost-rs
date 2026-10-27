@@ -67,7 +67,7 @@ fn split_args(args: &[String]) -> (&str, &[String]) {
     // reach the window. Without this the `.desktop` entry's handler
     // registration is accepted and every link prints "unknown
     // command", which is worse than not registering at all.
-    let command = if first.starts_with(DEEP_LINK_SCHEME) {
+    let command = if first.starts_with(DEEP_LINK_SCHEME) || first == HIDDEN_FLAG {
         "gui"
     } else {
         first
@@ -77,6 +77,10 @@ fn split_args(args: &[String]) -> (&str, &[String]) {
 
 /// The scheme the `.desktop` entry registers for.
 const DEEP_LINK_SCHEME: &str = "mattermost://";
+
+/// Start in the tray rather than with a window. What the autostart
+/// entry passes, so logging in does not throw a window at somebody.
+const HIDDEN_FLAG: &str = "--hidden";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -111,7 +115,7 @@ fn main() -> ExitCode {
         "react" => runtime.block_on(react(rest_args)),
         "history" => runtime.block_on(history(rest_args)),
         "doctor" => doctor(),
-        "gui" => gui(),
+        "gui" => gui(args.iter().any(|a| a == HIDDEN_FLAG)),
         "logout" => session::clear(),
         other => Err(format!("unknown command {other:?}\n\n{USAGE}")),
     };
@@ -308,7 +312,7 @@ fn doctor() -> Result<(), String> {
 /// own. Note what is NOT done: no `block_on` around the GUI, and the async
 /// runtime built above is dropped first, because two runtimes competing for
 /// the same thread is a deadlock waiting to happen.
-fn gui() -> Result<(), String> {
+fn gui(hidden: bool) -> Result<(), String> {
     // A missing session is not an error any more: the window shows a sign-in
     // screen. Demanding a token before the GUI will even open was a developer's
     // idea of a login flow.
@@ -318,6 +322,7 @@ fn gui() -> Result<(), String> {
         commands,
         events,
         restored: geometry::load(),
+        hidden,
         remember: std::rc::Rc::new(|state| geometry::store(&state)),
     });
     if code == mm_gui::glib_exit_success() {

@@ -81,3 +81,28 @@ fn the_badge_shows_mentions_and_hides_itself_at_zero() {
     assert_eq!(one, one);
     assert!(!format!("{one:?}").is_empty());
 }
+
+/// The autostart entry differs in exactly two ways, both necessary:
+/// it starts hidden, so logging in does not throw a window at
+/// somebody looking at something else, and it carries the key GNOME's
+/// own Startup Applications toggles -- without which the entry cannot
+/// be turned off from the settings anybody would look in.
+#[test]
+fn the_autostart_entry_starts_hidden_and_can_be_switched_off() {
+    let binary = PathBuf::from("/usr/bin/mattermost-rs");
+    let auto = render_autostart(&binary);
+    assert!(
+        auto.contains("Exec=/usr/bin/mattermost-rs --hidden %u\n"),
+        "{auto}"
+    );
+    assert!(auto.contains("X-GNOME-Autostart-enabled=true\n"), "{auto}");
+
+    // Everything else is the ordinary entry, so a link still opens it
+    // and the dock still matches the window to it.
+    let plain = render(&binary);
+    assert!(auto.contains(&format!("StartupWMClass={APP_ID}\n")));
+    assert!(auto.contains("MimeType=x-scheme-handler/mattermost;\n"));
+    assert!(!plain.contains("--hidden"), "{plain}");
+    assert!(!plain.contains("X-GNOME-Autostart-enabled"), "{plain}");
+    assert!(auto.len() > plain.len());
+}

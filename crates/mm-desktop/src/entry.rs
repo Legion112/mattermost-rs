@@ -22,6 +22,26 @@ pub const APP_ID: &str = "dev.legion.mattermost_rs";
 /// and then silently does nothing with the link.
 #[must_use]
 pub fn render(binary: &Path) -> String {
+    entry(binary, "")
+}
+
+/// The same entry, for the autostart directory.
+///
+/// Two differences, both necessary. `--hidden` starts it in the tray
+/// rather than throwing a window at somebody who has just logged in
+/// and is looking at something else. And `X-GNOME-Autostart-enabled`
+/// is what GNOME's own Startup Applications toggles, so without it the
+/// entry cannot be turned off from the settings the reader would look
+/// in.
+#[must_use]
+pub fn render_autostart(binary: &Path) -> String {
+    format!(
+        "{}X-GNOME-Autostart-enabled=true\n",
+        entry(binary, " --hidden")
+    )
+}
+
+fn entry(binary: &Path, extra: &str) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
@@ -29,7 +49,7 @@ pub fn render(binary: &Path) -> String {
          Name=mattermost-rs\n\
          GenericName=Mattermost client\n\
          Comment=A native Linux client for Mattermost\n\
-         Exec={exec} %u\n\
+         Exec={exec}{extra} %u\n\
          Icon={APP_ID}\n\
          Terminal=false\n\
          StartupNotify=true\n\

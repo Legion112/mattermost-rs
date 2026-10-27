@@ -27,8 +27,11 @@ usage: cargo xtask <task> [args]
   doctor                  check the build environment, especially which GTK
                           pkg-config resolves
   apt-deps                install the system build dependencies (needs sudo)
-  install-desktop         put the icon and the .desktop entry in ~/.local/share,
-                          so it appears in the menu and mattermost:// links open it
+  install-desktop [--autostart]
+                          put the icon and the .desktop entry in ~/.local/share,
+                          so it appears in the menu and mattermost:// links open
+                          it; --autostart also starts it at login, hidden in the
+                          tray
   uninstall-desktop       take them away again
   package --out <dir>     strip the release binary, smoke-test it, write
                           SHA256SUMS
@@ -51,7 +54,7 @@ fn main() -> ExitCode {
         "coverage" => coverage::run(rest),
         "doctor" => doctor::run(),
         "apt-deps" => aptdeps::run(),
-        "install-desktop" => desktop::install(),
+        "install-desktop" => desktop::install(rest),
         "uninstall-desktop" => desktop::uninstall(),
         "package" => package::run(rest),
         "version-check" => version::run(rest),

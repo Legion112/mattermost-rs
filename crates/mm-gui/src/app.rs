@@ -56,6 +56,10 @@ const APP_ID_OVERRIDE: &str = "MMRS_APP_ID";
 /// closure and there is nothing useful to print about one.
 pub struct Wiring {
     pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    /// Start in the tray rather than with a window on screen, which is
+    /// what `--hidden` and the autostart entry ask for. Honoured only
+    /// if a tray actually appears; see [`HIDDEN_GRACE`].
+    pub hidden: bool,
     pub events: async_channel::Receiver<Event>,
     /// How big the window was when it was last closed. The window is
     /// where this client lives -- half a screen, usually -- and opening
@@ -72,6 +76,7 @@ impl std::fmt::Debug for Wiring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Wiring")
             .field("restored", &self.restored)
+            .field("hidden", &self.hidden)
             .finish_non_exhaustive()
     }
 }
@@ -281,8 +286,31 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
         });
     }
 
-    // The real arguments, so a URL on the command line reaches `open`.
-    app.run()
+    // The real arguments, so a URL on the command line reaches `open`
+    // -- minus `--hidden`, which is this binary's own and which GTK
+    // would reject as an unknown option before anything else ran.
+    let argv: Vec<String> = std::env::args().filter(|a| a != HIDDEN_FLAG).collect();
+    app.run_with_args(&argv)
+}
+
+/// Honour `--hidden`, with a way back if there turns out to be no tray.
+///
+/// Asked for by the autostart entry, so that logging in does not throw
+/// a window at somebody who is looking at something else. **But a
+/// hidden window with no tray icon is an application nobody can
+/// reach**, and whether a tray appears is not known at startup -- it
+/// depends on the desktop. So the window is hidden immediately and
+/// shown again after a moment if no icon has turned up.
+fn stay_hidden(ui: &Rc<Ui>) {
+    ui.window.set_visible(false);
+    let ui = Rc::clone(ui);
+    glib::timeout_add_local_once(HIDDEN_GRACE, move || {
+        if !ui.has_tray.get() {
+            ui.window.set_visible(true);
+            ui.window.present();
+            ui.set_status("no tray to hide in");
+        }
+    });
 }
 
 /// Build the window, or hand back the one that is already up.
@@ -306,6 +334,7 @@ fn start(
         events,
         restored,
         remember,
+        hidden,
     } = wiring.borrow_mut().take()?;
 
     // No `Command::Sync` here. The engine syncs as soon as it has a
@@ -314,6 +343,9 @@ fn start(
     // each of them.
     let ui = Rc::new(build(app, &commands, restored, &remember));
     *started.borrow_mut() = Some(Rc::clone(&ui));
+    if hidden {
+        stay_hidden(&ui);
+    }
 
     // THE one bridge. Children never spawn; they send commands.
     let pump = Rc::clone(&ui);
@@ -4420,6 +4452,12 @@ const ELSEWHERE_MINIMUM: usize = 2;
 /// says something. A client that starts with no mentions still has to
 /// clear a badge the last run left on the dock.
 const NO_BADGE_YET: i64 = -1;
+/// How long a `--hidden` start waits for a tray icon before deciding
+/// there is not going to be one and showing itself anyway.
+const HIDDEN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// This binary's own flag, which GTK must never see: it parses argv
+/// itself and exits on an option it does not know.
+const HIDDEN_FLAG: &str = "--hidden";
 const SWITCHER_RESULTS: usize = 30;
 
 /// How big the image window opens. Large enough to be worth opening,

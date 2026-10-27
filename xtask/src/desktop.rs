@@ -17,7 +17,8 @@ use std::process::Command;
 const ICON_DIR: &str = "icons/hicolor/scalable/apps";
 const ENTRY_DIR: &str = "applications";
 
-pub(crate) fn install() -> Result<(), String> {
+pub(crate) fn install(args: &[String]) -> Result<(), String> {
+    let autostart = args.iter().any(|a| a == "--autostart");
     let binary = built_binary()?;
     let icon = icon_path()?;
     let entry = entry_path()?;
@@ -30,10 +31,20 @@ pub(crate) fn install() -> Result<(), String> {
     write(&icon, &svg)?;
     write(&entry, mm_desktop::render_desktop_entry(&binary).as_bytes())?;
 
+    if autostart {
+        write(
+            &autostart_path()?,
+            mm_desktop::render_autostart_entry(&binary).as_bytes(),
+        )?;
+    }
+
     println!("installed:");
     write_theme_index()?;
     println!("  {}", entry.display());
     println!("  {}", icon.display());
+    if autostart {
+        println!("  {}", autostart_path()?.display());
+    }
     println!("  pointing at {}", binary.display());
     refresh_caches();
     println!(
@@ -45,7 +56,7 @@ pub(crate) fn install() -> Result<(), String> {
 }
 
 pub(crate) fn uninstall() -> Result<(), String> {
-    for path in [entry_path()?, icon_path()?] {
+    for path in [entry_path()?, icon_path()?, autostart_path()?] {
         match std::fs::remove_file(&path) {
             Ok(()) => println!("removed {}", path.display()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -123,6 +134,20 @@ fn write_theme_index() -> Result<(), String> {
         path.display()
     );
     Ok(())
+}
+
+/// Where the desktop looks for things to start at login.
+///
+/// Under config rather than data: it is a choice the reader made, not
+/// a file the application needs to run.
+fn autostart_path() -> Result<PathBuf, String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .ok_or_else(|| "neither XDG_CONFIG_HOME nor HOME is set".to_owned())?;
+    Ok(base
+        .join("autostart")
+        .join(format!("{id}.desktop", id = mm_desktop::APP_ID)))
 }
 
 fn repo_root() -> PathBuf {
