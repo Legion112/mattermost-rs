@@ -1018,6 +1018,12 @@ fn wire_selection(
         thread_pane.set_visible(false);
         *selected.borrow_mut() = Some(id.clone());
         ui_for_views.show_pane(&Pane::Channel);
+        // Draw what is already held, before asking for anything. A
+        // channel read earlier, or warmed in the background, is in the
+        // store already -- and waiting for the round trip to redraw it
+        // was most of what opening a channel felt like. The answer,
+        // when it comes, splices in only what differs.
+        ui_for_views.refresh_posts(&id);
         commands.send(Command::OpenChannel(id.clone())).ok();
         commands.send(Command::MarkRead(id)).ok();
     });

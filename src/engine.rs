@@ -44,6 +44,9 @@ struct Active {
     /// busy channel would open forty connections at once to somebody's
     /// work server.
     downloads: Arc<tokio::sync::Semaphore>,
+    /// Channels whose first page has already been asked for, so a
+    /// resync does not fetch the whole account again.
+    warmed: Arc<tokio::sync::Mutex<std::collections::HashSet<ChannelId>>>,
 }
 
 impl Active {
@@ -203,8 +206,13 @@ fn spawn_sync(a: &Active, events: &async_channel::Sender<Event>) {
     let session = a.session.clone();
     let events = events.clone();
     let collapsed = Arc::clone(&a.collapsed);
+    let warmed = Arc::clone(&a.warmed);
     tokio::spawn(async move {
-        sync(&client, &session, &events, &collapsed).await;
+        let channels = sync(&client, &session, &events, &collapsed).await;
+        // Only once the reader has everything they asked for. Warming
+        // first would put speculative requests in front of the sidebar.
+        let collapsed = collapsed.load(std::sync::atomic::Ordering::Relaxed);
+        warm_channels(&client, &warmed, collapsed, channels, &events).await;
     });
 }
 
@@ -240,6 +248,66 @@ async fn set_category(
     let user = UserId::new(&a.session.user_id);
     let request = rest::update_category(&user, &category.team_id, category);
     best_effort(a, &request, events).await;
+}
+
+/// Fetch the first page of the channels the reader is most likely to
+/// open, while they are not asking for anything.
+///
+/// Ordered by last activity, which is the best guess available without
+/// reading their mind: a channel that moved an hour ago is the one they
+/// open next, and a channel silent since April is not. Unread ones come
+/// first within that, for the same reason the sidebar sorts that way.
+///
+/// Nothing is applied differently from a click: the page arrives as the
+/// same `Event::Posts`, the store joins it, and the window ignores it
+/// because the channel is not the open one. The only difference is that
+/// when the reader does click, the answer is already there.
+async fn warm_channels(
+    client: &Client,
+    warmed: &Arc<tokio::sync::Mutex<std::collections::HashSet<ChannelId>>>,
+    collapsed: bool,
+    channels: Vec<mm_types::Channel>,
+    events: &async_channel::Sender<Event>,
+) {
+    let mut wanted: Vec<mm_types::Channel> = channels
+        .into_iter()
+        // A channel nobody has ever posted in has nothing to warm.
+        .filter(|c| !c.is_deleted() && c.last_post_at.millis() > 0)
+        .collect();
+    wanted.sort_by(|x, y| y.last_post_at.millis().cmp(&x.last_post_at.millis()));
+    wanted.truncate(WARM_CHANNELS);
+
+    let permits = Arc::new(tokio::sync::Semaphore::new(WARM_AT_ONCE));
+    for channel in wanted {
+        {
+            // Already asked for, this run or a previous sync.
+            let mut warmed = warmed.lock().await;
+            if !warmed.insert(channel.id.clone()) {
+                continue;
+            }
+        }
+        let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+            return;
+        };
+        let client = client.clone();
+        let events = events.clone();
+        tokio::spawn(async move {
+            let request = rest::posts_for_channel(&channel.id, &PostQuery::first(), collapsed);
+            // Silent on failure, unlike a click: nobody asked for this,
+            // so nobody should be told it did not work. The channel is
+            // simply fetched the ordinary way when it is opened.
+            if let Ok(page) = fetch(&client, &request, rest::parse_post_list).await {
+                let _ = events
+                    .send(Event::Posts {
+                        channel: channel.id.clone(),
+                        page,
+                    })
+                    .await;
+            }
+            drop(permit);
+        });
+        tokio::time::sleep(WARM_GAP).await;
+    }
 }
 
 /// Hand the window what the Threads and Drafts views are drawn from.
@@ -656,6 +724,7 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         read_only: is_read_only(),
         collapsed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         downloads: Arc::new(tokio::sync::Semaphore::new(6)),
+        warmed: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
     })
 }
 
@@ -698,6 +767,22 @@ async fn resolve_settings(
     apply_settings(&config, &preferences, events, collapsed).await;
     (config, preferences)
 }
+
+/// How much of the account to warm in the background, and how fast.
+///
+/// A channel fetched only when it is clicked costs a round trip the
+/// reader waits through, every first visit -- on a server a third of a
+/// second away that is most of what opening a channel feels like. So
+/// the ones they are most likely to open are fetched while nothing else
+/// is happening.
+///
+/// Bounded three ways, because speculative work on somebody's work
+/// server should be polite: the most recently active channels only, two
+/// requests at a time, and a gap between starts so a channel the reader
+/// *does* click is never queued behind a burst of guesses.
+const WARM_CHANNELS: usize = 30;
+const WARM_AT_ONCE: usize = 2;
+const WARM_GAP: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// How many followed threads to ask for. The view shows the ones that
 /// have moved, and a reader with more than this many followed threads is
@@ -756,7 +841,7 @@ async fn sync(
     session: &Session,
     events: &async_channel::Sender<Event>,
     collapsed: &std::sync::atomic::AtomicBool,
-) {
+) -> Vec<mm_types::Channel> {
     let _ = events.send(Event::Status("loading…".into())).await;
 
     // Last time's sidebar, painted now, so the window has something in it
@@ -781,7 +866,7 @@ async fn sync(
         Ok(t) => t,
         Err(e) => {
             let _ = events.send(Event::Failed(e)).await;
-            return;
+            return Vec::new();
         }
     };
 
@@ -889,6 +974,7 @@ async fn sync(
     }
 
     let _ = events.send(Event::Status("ready".into())).await;
+    snapshot.channels
 }
 
 /// Replay a snapshot as the events a sync would have sent, so the window
