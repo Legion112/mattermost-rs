@@ -198,6 +198,9 @@ struct Ui {
     /// told when the number actually moves rather than on every redraw.
     /// Starts at [`NO_BADGE_YET`].
     badge: Rc<std::cell::Cell<i64>>,
+    /// A `mattermost://` link naming a channel this client has not
+    /// heard of yet. Retried until the channel list arrives.
+    pending_link: Rc<RefCell<Option<String>>>,
     /// What the server last answered for a quick-switcher query, and a
     /// way to redraw the open switcher when a later answer lands.
     /// `None` when no switcher is open, which is also what stops a
@@ -232,52 +235,97 @@ struct Ui {
 #[must_use]
 pub fn run(wiring: Wiring) -> glib::ExitCode {
     let app_id = std::env::var(APP_ID_OVERRIDE).unwrap_or_else(|_| APP_ID.to_owned());
-    let app = adw::Application::builder().application_id(app_id).build();
+    let app = adw::Application::builder()
+        .application_id(app_id)
+        // Without this a `mattermost://` URL on the command line is an
+        // error rather than something to open, and the `.desktop`
+        // entry's handler registration would be accepted and then do
+        // nothing with the link.
+        .flags(gio::ApplicationFlags::HANDLES_OPEN)
+        .build();
+
     let wiring = Rc::new(RefCell::new(Some(wiring)));
+    let started: Rc<RefCell<Option<Rc<Ui>>>> = Rc::new(RefCell::new(None));
 
-    app.connect_activate(move |app| {
-        let Some(Wiring {
-            commands,
-            events,
-            restored,
-            remember,
-        }) = wiring.borrow_mut().take()
-        else {
-            // A second activation (another launch while this one is running)
-            // must present the existing window rather than build a second one.
-            if let Some(window) = app.windows().first() {
-                window.present();
-            }
-            return;
-        };
-        // No `Command::Sync` here. The engine syncs as soon as it has a
-        // session, and asking for a second one ran every request twice --
-        // two sets of answers, and the window drew the channel again for
-        // each of them.
-        let ui = Rc::new(build(app, &commands, restored, &remember));
-
-        // THE one bridge. Children never spawn; they send commands.
-        let pump = Rc::clone(&ui);
-        glib::spawn_future_local(async move {
-            while let Ok(event) = events.recv().await {
-                pump.on_event(event);
-            }
-            pump.set_status("the engine stopped");
+    {
+        let wiring = Rc::clone(&wiring);
+        let started = Rc::clone(&started);
+        app.connect_activate(move |app| {
+            start(app, &wiring, &started);
         });
-
-        // The dictionaries, on a worker thread: `ru_RU.dic` is three and
-        // a half megabytes, and parsing it here would hold the window's
-        // first paint for as long as it took.
-        let reading = gio::spawn_blocking(crate::spelling::Spelling::load);
-        let dictionaries = Rc::clone(&ui);
-        glib::spawn_future_local(async move {
-            if let Ok(spelling) = reading.await {
-                dictionaries.use_spelling(spelling);
+    }
+    {
+        let wiring = Rc::clone(&wiring);
+        let started = Rc::clone(&started);
+        // Launched with a link, or handed one while already running --
+        // `gio::Application` routes the second launch to this instance
+        // over D-Bus, which is single-instance for free and is why
+        // there is no lock file anywhere in this tree.
+        app.connect_open(move |app, files, _hint| {
+            let Some(ui) = start(app, &wiring, &started) else {
+                return;
+            };
+            for file in files {
+                ui.follow_link(file.uri().as_str());
             }
         });
+    }
+
+    // The real arguments, so a URL on the command line reaches `open`.
+    app.run()
+}
+
+/// Build the window, or hand back the one that is already up.
+///
+/// Both entry points go through here: a second launch must present the
+/// existing window rather than build a second one, and a link handed to
+/// a running instance has to reach the window it already has.
+fn start(
+    app: &adw::Application,
+    wiring: &Rc<RefCell<Option<Wiring>>>,
+    started: &Rc<RefCell<Option<Rc<Ui>>>>,
+) -> Option<Rc<Ui>> {
+    if let Some(ui) = started.borrow().clone() {
+        if let Some(window) = app.windows().first() {
+            window.present();
+        }
+        return Some(ui);
+    }
+    let Wiring {
+        commands,
+        events,
+        restored,
+        remember,
+    } = wiring.borrow_mut().take()?;
+
+    // No `Command::Sync` here. The engine syncs as soon as it has a
+    // session, and asking for a second one ran every request twice --
+    // two sets of answers, and the window drew the channel again for
+    // each of them.
+    let ui = Rc::new(build(app, &commands, restored, &remember));
+    *started.borrow_mut() = Some(Rc::clone(&ui));
+
+    // THE one bridge. Children never spawn; they send commands.
+    let pump = Rc::clone(&ui);
+    glib::spawn_future_local(async move {
+        while let Ok(event) = events.recv().await {
+            pump.on_event(event);
+        }
+        pump.set_status("the engine stopped");
     });
 
-    app.run_with_args::<&str>(&[])
+    // The dictionaries, on a worker thread: `ru_RU.dic` is three and a
+    // half megabytes, and parsing it here would hold the window's first
+    // paint for as long as it took.
+    let reading = gio::spawn_blocking(crate::spelling::Spelling::load);
+    let dictionaries = Rc::clone(&ui);
+    glib::spawn_future_local(async move {
+        if let Ok(spelling) = reading.await {
+            dictionaries.use_spelling(spelling);
+        }
+    });
+
+    Some(ui)
 }
 
 /// The one hover toolbar currently on screen, so the next one can take
@@ -729,6 +777,7 @@ fn build(
         reopen: Rc::new(RefCell::new(reopen)),
         provisional: Rc::new(std::cell::Cell::new(false)),
         badge: Rc::new(std::cell::Cell::new(NO_BADGE_YET)),
+        pending_link: Rc::new(RefCell::new(None)),
         elsewhere: Rc::new(RefCell::new(Elsewhere::default())),
         refill_switcher: Rc::new(RefCell::new(None)),
         window: window.clone(),
@@ -5229,6 +5278,58 @@ impl Ui {
         }
     }
 
+    /// Go where a `mattermost://` link points.
+    ///
+    /// Held rather than acted on immediately when it cannot be
+    /// resolved yet: a link that launches the application arrives
+    /// before the channel list does, and a client that said "no such
+    /// channel" half a second before learning about it would be wrong
+    /// for no reason. Retried on every sidebar redraw, like the channel
+    /// being restored, and it wins over that -- the reader asked for
+    /// this one just now.
+    fn follow_link(&self, uri: &str) {
+        match mm_desktop::parse_deep_link(uri) {
+            Ok(mm_desktop::DeepLink::Server { host }) => {
+                // Nowhere in particular: just this server's window,
+                // which is already the one in front of them.
+                self.set_status(&format!("link to {host}"));
+            }
+            Ok(mm_desktop::DeepLink::Permalink { post, .. }) => {
+                self.set_status("following link…");
+                self.commands.send(Command::FollowPermalink(post)).ok();
+            }
+            Ok(mm_desktop::DeepLink::Channel { channel, .. }) => {
+                *self.pending_link.borrow_mut() = Some(channel);
+                if !self.follow_pending_link() {
+                    self.set_status("looking for that channel…");
+                }
+            }
+            Err(e) => self.set_status(&format!("link: {e}")),
+        }
+    }
+
+    /// Try the held link again. Answers whether it landed.
+    fn follow_pending_link(&self) -> bool {
+        let Some(name) = self.pending_link.borrow().clone() else {
+            return false;
+        };
+        let found = self
+            .store
+            .borrow()
+            .channel_named(&name)
+            .map(|channel| channel.id.clone());
+        let Some(channel) = found else {
+            return false;
+        };
+        *self.pending_link.borrow_mut() = None;
+        // A link is the reader asking for this channel now, so it also
+        // settles the question of where they were last time.
+        *self.reopen.borrow_mut() = None;
+        self.set_status("");
+        self.show_channel(&channel);
+        true
+    }
+
     /// Put the reader back in the channel they left, once it is there
     /// to put them in.
     ///
@@ -5728,7 +5829,9 @@ impl Ui {
         // the first few draws happen before the channel list has
         // arrived -- consuming it on the first attempt is how this
         // silently fell back to whatever sorts first.
-        if self.restore_reopen() {
+        // A link the reader followed wins over where they were last
+        // time: they asked for this one just now.
+        if self.follow_pending_link() || self.restore_reopen() {
             return;
         }
 

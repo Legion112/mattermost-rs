@@ -740,9 +740,23 @@ why; all three names come from one constant. The icon is deliberately **not** \
 Mattermost's own mark: this is a third-party client and that logo is somebody \
 else's trademark. Verified on this machine: the entry installed, and \
 `xdg-mime query default x-scheme-handler/mattermost` answers with it. NOT \
-built: autostart, the system-wide install a `.deb` would do, and acting on \
-the link once the desktop hands it over -- `mm-desktop::parse_deep_link` \
-understands them, the binary does not yet take one as an argument."""
+built: autostart, and the system-wide install a `.deb` would do.
+
+A `mattermost://` link is **acted on** now, not just registered for. The \
+application takes `HANDLES_OPEN`, so a URL on the command line arrives as \
+something to open rather than an error, and `gio::Application` routes a \
+second launch to the running instance over D-Bus -- single-instance for \
+free, which is why there is no lock file anywhere in this tree. A link \
+naming a channel this client has not heard of yet is held and retried on \
+every sidebar redraw, because a link that launches the application arrives \
+before the channel list does. The binary's own argument parser had to learn \
+that a URL is not a subcommand: without that, every link printed "unknown \
+command", which is worse than never registering the handler. Verified on \
+this machine: with the client already running, \
+`mattermost://.../alanbase/channels/town-square` moved it to Town Square and \
+the second process exited. NOT verified: the permalink form, which fetches \
+the post to learn its channel and then opens the thread -- built and \
+unit-tested, but not followed end to end."""
 
 [[feature]]
 id       = "desktop.badge"

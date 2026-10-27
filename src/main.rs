@@ -61,9 +61,22 @@ they do not land in your shell history or in `ps` output.
 /// no arguments at all, the single most common way anybody starts it, crashed
 /// before reaching any of the code that had been tested.
 fn split_args(args: &[String]) -> (&str, &[String]) {
-    let command = args.first().map_or("gui", String::as_str);
+    let first = args.first().map_or("gui", String::as_str);
+    // A `mattermost://` URL is not a subcommand: it is what the desktop
+    // hands this binary when somebody clicks a link, and it has to
+    // reach the window. Without this the `.desktop` entry's handler
+    // registration is accepted and every link prints "unknown
+    // command", which is worse than not registering at all.
+    let command = if first.starts_with(DEEP_LINK_SCHEME) {
+        "gui"
+    } else {
+        first
+    };
     (command, args.get(1..).unwrap_or(&[]))
 }
+
+/// The scheme the `.desktop` entry registers for.
+const DEEP_LINK_SCHEME: &str = "mattermost://";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

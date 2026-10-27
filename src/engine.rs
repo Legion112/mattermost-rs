@@ -359,6 +359,37 @@ async fn save_file(
     }
 }
 
+/// Resolve a permalink and go there.
+///
+/// The link carries a post and nothing else, so the post is fetched
+/// first: which channel it is in is a thing only the post knows. Then
+/// the channel is opened the ordinary way, and the thread it belongs
+/// to beside it, because a permalink usually points into a
+/// conversation rather than at a lone message.
+async fn follow_permalink(a: &Active, post: &PostId, events: &async_channel::Sender<Event>) {
+    let found = match fetch(&a.client, &rest::one_post(post), rest::parse_post).await {
+        Ok(found) => found,
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("link: {e}"))).await;
+            return;
+        }
+    };
+    let channel = found.channel_id.clone();
+    let root = found.thread_root().clone();
+    let collapsed = a.collapsed.load(std::sync::atomic::Ordering::Relaxed);
+    open_channel(&a.client, &channel, events, collapsed).await;
+    let _ = events.send(Event::Opened(channel)).await;
+    if let Ok(page) = fetch(
+        &a.client,
+        &rest::post_thread(root.as_str()),
+        rest::parse_post_list,
+    )
+    .await
+    {
+        let _ = events.send(Event::Thread { root, page }).await;
+    }
+}
+
 /// Put the mention count on the dock icon.
 ///
 /// A desktop with nothing listening for the signal simply ignores it,
@@ -713,6 +744,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Elsewhere { team, term } => find_elsewhere(a, &team, &term, events).await,
         Command::JoinChannel(channel) => join_channel(a, &channel, events).await,
         Command::OpenDirect(user) => open_direct(a, &user, events).await,
+        Command::FollowPermalink(post) => follow_permalink(a, &post, events).await,
         Command::Badge(mentions) => set_badge(mentions, events).await,
         Command::SetMuted { channel, muted } => {
             let user = UserId::new(&a.session.user_id);

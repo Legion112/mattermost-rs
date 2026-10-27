@@ -506,6 +506,20 @@ impl Store {
         self.statuses.get(user).copied().unwrap_or_default()
     }
 
+    /// The channel with this URL name, which is what a
+    /// `mattermost://` link and a permalink both carry.
+    ///
+    /// `name`, not `display_name`: the URL form is lowercase and
+    /// hyphenated and is the only one a link ever contains, while the
+    /// display name is whatever somebody typed and may be in Russian.
+    #[must_use]
+    pub fn channel_named(&self, name: &str) -> Option<&Channel> {
+        self.my_member
+            .keys()
+            .filter_map(|id| self.channels.get(id))
+            .find(|channel| channel.name == name)
+    }
+
     /// Who is in a channel, as people rather than ids, ordered by name.
     ///
     /// Empty until the channel has been opened once, which is when the

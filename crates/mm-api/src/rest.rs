@@ -716,6 +716,15 @@ pub fn parse_post_list(resp: &HttpResponse) -> Result<PostList, ApiError> {
     parse_json(resp, "GET /channels/{id}/posts")
 }
 
+/// One post by id.
+///
+/// What a permalink resolves to: the link carries a post, and which
+/// channel it is in is a thing only the post knows.
+#[must_use]
+pub fn one_post(post: &PostId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/posts/{post}"))
+}
+
 #[must_use]
 pub fn post_thread(root: &str) -> HttpRequest {
     HttpRequest::get(format!("{API}/posts/{root}/thread"))

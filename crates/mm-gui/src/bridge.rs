@@ -93,6 +93,9 @@ pub enum Command {
     /// Open the one-to-one conversation with somebody, creating it if
     /// there is not one yet.
     OpenDirect(UserId),
+    /// Follow a permalink: find out which channel the post is in, open
+    /// it, and open the post's thread beside it.
+    FollowPermalink(PostId),
     /// Put the unread mention count on the application's dock icon.
     Badge(i64),
     /// Mute a channel, or let it speak again.

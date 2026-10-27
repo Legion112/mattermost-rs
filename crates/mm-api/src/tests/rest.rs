@@ -1018,3 +1018,14 @@ fn joining_answers_with_a_membership_and_the_channel_is_fetched_separately() {
     assert_eq!(request.path, "/api/v4/channels/c1");
     assert!(request.query.is_empty());
 }
+
+/// A permalink carries a post and nothing else; which channel it is in
+/// is a thing only the post knows, so following one starts here.
+#[test]
+fn one_post_is_what_a_permalink_resolves_to() {
+    let request = one_post(&PostId::new("p1"));
+    assert_eq!(request.method, Method::Get);
+    assert_eq!(request.path, "/api/v4/posts/p1");
+    let post = parse_post(&ok(r#"{"id":"p1","channel_id":"c1","message":"hi"}"#)).unwrap();
+    assert_eq!(post.channel_id, ChannelId::new("c1"));
+}

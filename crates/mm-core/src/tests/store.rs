@@ -2595,3 +2595,30 @@ fn a_newest_page_past_the_gap_replaces_what_is_held() {
     store.apply_post_list(&c1, &detached, PageAnchor::Unanchored);
     assert_eq!(store.channel_posts(&c1).len(), 3, "left alone");
 }
+
+/// A `mattermost://` link and a permalink both carry a channel's URL
+/// name, never its display name: the URL form is lowercase and
+/// hyphenated, while the display name is whatever somebody typed and on
+/// this server is often in Russian.
+#[test]
+fn a_channel_can_be_found_by_the_name_a_link_carries() {
+    let mut store = store();
+    let mut named = channel("c1", 0, 0);
+    named.name = "town-square".into();
+    named.display_name = "Городская площадь".into();
+    store.apply_channels(vec![named]);
+    store.apply_members(vec![member("c1", 0, 0, 0)]);
+
+    assert_eq!(
+        store.channel_named("town-square").map(|c| c.id.clone()),
+        Some(ChannelId::new("c1"))
+    );
+    assert!(store.channel_named("Городская площадь").is_none());
+    assert!(store.channel_named("no-such-channel").is_none());
+
+    // A channel the reader is not a member of is not somewhere to go.
+    let mut other = channel("c2", 0, 0);
+    other.name = "off-topic".into();
+    store.apply_channels(vec![other]);
+    assert!(store.channel_named("off-topic").is_none());
+}
