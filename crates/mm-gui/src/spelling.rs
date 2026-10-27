@@ -19,7 +19,7 @@
 //! most messages here -- check correctly in both.
 
 use mm_md::spell::Word;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Where Debian and Ubuntu keep them. Both are read: `myspell` is where
@@ -30,6 +30,16 @@ pub(crate) struct Spelling {
     /// Kept with the code they came from so a failure to find anything
     /// can be reported in words rather than as silence.
     loaded: Vec<(String, spellbook::Dictionary)>,
+    /// Words this reader has said are words.
+    ///
+    /// A chat client for a team is full of names no dictionary has --
+    /// services, ticket prefixes, hostnames -- and underlining every
+    /// one of them turns the whole feature into noise somebody turns
+    /// off. Held here rather than written into a Hunspell dictionary:
+    /// `spellbook` takes its input as text at construction, so adding
+    /// a word would mean rebuilding three and a half megabytes of
+    /// Russian.
+    personal: BTreeSet<String>,
 }
 
 impl Spelling {
@@ -49,7 +59,10 @@ impl Spelling {
                 loaded.push((code, dictionary));
             }
         }
-        Self { loaded }
+        Self {
+            loaded,
+            personal: read_personal(),
+        }
     }
 
     /// The language codes in use, for the status line.
@@ -62,10 +75,32 @@ impl Spelling {
     #[must_use]
     pub(crate) fn is_misspelled(&self, word: &str) -> bool {
         !self.loaded.is_empty()
+            && !self.personal.contains(word)
             && !self
                 .loaded
                 .iter()
                 .any(|(_, dictionary)| dictionary.check(word))
+    }
+
+    /// Record a word as a word, here and on disk.
+    ///
+    /// Best effort on the file: a reader whose home is read-only
+    /// still gets the word accepted for this session, which is better
+    /// than refusing to accept it at all.
+    pub(crate) fn learn(&mut self, word: &str) {
+        if word.is_empty() || !self.personal.insert(word.to_owned()) {
+            return;
+        }
+        let Some(file) = personal_path() else { return };
+        if let Some(folder) = file.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        let mut all: Vec<&str> = self.personal.iter().map(String::as_str).collect();
+        all.sort_unstable();
+        // Rewritten whole rather than appended: the set is small, the
+        // order is then stable, and a half-written append would leave
+        // a word split across two lines.
+        let _ = std::fs::write(&file, all.join("\n") + "\n");
     }
 
     /// What the author might have meant, best first, from whichever
@@ -94,6 +129,34 @@ impl Spelling {
             .filter(|word| self.is_misspelled(&word.text))
             .collect()
     }
+}
+
+/// Where the reader's own words live.
+///
+/// Under `XDG_DATA_HOME` rather than the cache: a word somebody
+/// taught this client is not something to throw away to reclaim
+/// space.
+fn personal_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
+        })?;
+    Some(base.join("mattermost-rs").join("personal.dic"))
+}
+
+/// The words taught so far. One per line, blank lines ignored.
+fn read_personal() -> BTreeSet<String> {
+    let Some(file) = personal_path() else {
+        return BTreeSet::new();
+    };
+    std::fs::read_to_string(file)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// Every `code -> path stem` pair with both an `.aff` and a `.dic`.

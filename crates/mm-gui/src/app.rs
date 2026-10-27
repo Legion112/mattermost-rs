@@ -2799,6 +2799,25 @@ fn offer_corrections(ui: &Ui, view: &gtk::TextView, x: f64, y: f64) {
         actions.add_action(&action);
         menu.append(Some(suggestion), Some(&format!("spell.{name}")));
     }
+    // Last, under the suggestions, and offered even when there are
+    // none: a word with no suggestions is the likeliest one to be a
+    // service name somebody wants accepted rather than corrected.
+    {
+        let learn = gio::SimpleAction::new("learn", None);
+        let ui = ui.clone();
+        let view = view.clone();
+        let word = word.text.clone();
+        learn.connect_activate(move |_, _| {
+            if let Some(spelling) = ui.spelling.borrow_mut().as_mut() {
+                spelling.learn(&word);
+            }
+            // Redraw at once: an underline that stays after "add to
+            // dictionary" reads as a click that missed.
+            ui.mark_mistakes(&view.buffer());
+        });
+        actions.add_action(&learn);
+        menu.append(Some("Add to dictionary"), Some("spell.learn"));
+    }
     view.insert_action_group("spell", Some(&actions));
     view.set_extra_menu(Some(&menu));
 }

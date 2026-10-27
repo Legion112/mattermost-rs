@@ -718,9 +718,25 @@ like this one would otherwise be solid red. The dictionaries load on a \
 worker thread -- `ru_RU.dic` is 3.4 MB -- and checking is debounced 400 ms \
 so a word is not marked wrong while it is still half typed. Verified on a \
 live account: "Ошибки в сообщениии and teh wrong word" underlines exactly \
-"сообщениии" and "teh". NOT built: a personal dictionary ("add to \
-dictionary"), grammar as opposed to spelling, and spell-checking anything \
-but the two composers."""
+"сообщениии" and "teh".
+
+**Add to dictionary** sits under the suggestions in the right-click menu, \
+and is offered even when there are none -- a word with no suggestions is \
+the likeliest one to be a service name somebody wants accepted rather than \
+corrected. A chat client for a team is full of names no dictionary has, \
+and underlining every one of them turns the feature into noise somebody \
+switches off. The words are kept in a plain list under `XDG_DATA_HOME`, \
+not in the cache: a word somebody taught this client is not something to \
+throw away to reclaim space. They are held beside the dictionaries rather \
+than written into one, because `spellbook` takes its input as text at \
+construction and adding a word would mean rebuilding three and a half \
+megabytes of Russian. Writing the file is best effort: a read-only home \
+still gets the word accepted for the session. Verified on this machine: a \
+jargon word was underlined, "Add to dictionary" took the underline away at \
+once, and the word was in the file afterwards.
+
+NOT built: grammar as opposed to spelling, and spell-checking anything but \
+the two composers."""
 
 [[feature]]
 id       = "users.profile_card"
