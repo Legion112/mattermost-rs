@@ -638,12 +638,35 @@ post map but **not** a timeline: a result sits next to the result above \
 it for reasons that have nothing to do with time, and filing them as \
 history would be the client inventing adjacency the server never claimed. \
 Verified on a live account: "deploy" answered with 100 hits across \
-several channels. NOT built: paging past the first sixty, jumping to the \
-hit's exact place in its channel's scrollback -- clicking a result opens \
-the channel and that message's own thread beside it, which puts the \
-message on screen without the timeline having to grow a segment around a \
-post from a year ago -- and the match highlighting the server returns \
-alongside the posts."""
+several channels.
+
+A full page offers **Load more results** at its foot, which asks for the \
+next one and adds to what is on screen -- deduplicated, because the \
+server pages by offset and a message posted between two requests shifts \
+everything down one. A button rather than scrolling to the end: the \
+server states no total, so a full page is the only evidence another one \
+exists.
+
+On this server there is never another one, and that is the part worth \
+writing down. Measured against the live 12.0.1 server, `per_page` in the \
+body is **ignored** -- 10, 60 and no paging at all each answer with a \
+hundred hits -- and `page: 1` answers with nothing even though page 0 was \
+full. A hundred is Mattermost's own `LIMIT` on the SQL search; paging is \
+honoured only where Elasticsearch or Bleve is configured, which is \
+licensed and absent from most self-hosted servers. So the request asks \
+for a hundred, which is what it will be handed either way, and an empty \
+next page says **no more results** out loud rather than letting the \
+button vanish having done nothing, which reads as a bug. Written down in \
+`docs/protocol.md`, since the API documentation makes `page` and \
+`per_page` look like ordinary paging. Verified on the live account: \
+"test" found a hundred hits with the button under them, and clicking it \
+said no more results and took the button away.
+
+NOT built: jumping to the hit's exact place in its channel's scrollback \
+-- clicking a result opens the channel and that message's own thread \
+beside it, which puts the message on screen without the timeline having \
+to grow a segment around a post from a year ago -- and the match \
+highlighting the server returns alongside the posts."""
 
 [[feature]]
 id       = "posts.pinned_and_saved"
