@@ -28,7 +28,7 @@ use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
 use mm_core::{PageAnchor, Store, Threading};
-use mm_types::{ChannelId, PostId, UserId};
+use mm_types::{ChannelId, FileId, PostId, UserId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -90,6 +90,9 @@ struct Ui {
     /// `mini_preview` thumbnail that already rides in the metadata, then
     /// replaced by the real image when it arrives.
     images: Rc<RefCell<HashMap<mm_types::FileId, gdk::Texture>>>,
+    /// The image window that is open, if one is: which file it shows and
+    /// the picture to put a better copy into when one arrives.
+    viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
     /// The thread pane: its model, its view, the panel itself and which
     /// root it is showing.
     thread_posts: gio::ListStore,
@@ -192,6 +195,7 @@ fn build_thread_pane(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
     server: &Rc<RefCell<String>>,
+    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
 ) -> (
     gio::ListStore,
     gtk::ListView,
@@ -199,7 +203,8 @@ fn build_thread_pane(
     gtk::Button,
     gtk::Entry,
 ) {
-    let (thread_posts, thread_view, thread_scroller) = build_post_list(commands, store, server);
+    let (thread_posts, thread_view, thread_scroller) =
+        build_post_list(commands, store, server, viewer);
     let thread_title = gtk::Label::builder()
         .label("Thread")
         .xalign(0.0)
@@ -369,7 +374,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let store = Rc::new(RefCell::new(Store::new(UserId::default(), Threading::Flat)));
     let server = Rc::new(RefCell::new(String::new()));
 
-    let (posts, post_view, scroller) = build_post_list(commands, &store, &server);
+    let viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>> = Rc::new(RefCell::new(None));
+    let (posts, post_view, scroller) = build_post_list(commands, &store, &server, &viewer);
 
     let composer = gtk::Entry::builder()
         .placeholder_text("Write a message…")
@@ -407,7 +413,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     content.append(&composer);
 
     let (thread_posts, thread_view, thread_pane, thread_close, thread_composer) =
-        build_thread_pane(commands, &store, &server);
+        build_thread_pane(commands, &store, &server, &viewer);
 
     let conversation = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -454,6 +460,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         restore_to: Rc::new(RefCell::new(None)),
         avatars: Rc::new(RefCell::new(HashMap::new())),
         images: Rc::new(RefCell::new(HashMap::new())),
+        viewer: Rc::clone(&viewer),
         asked: Rc::new(RefCell::new(HashSet::new())),
         asked_files: Rc::new(RefCell::new(HashSet::new())),
         posts,
@@ -1261,25 +1268,7 @@ fn build_message_tools(
     tools.set_visible(false);
 
     for slot in 0..QUICK_REACTIONS {
-        let button = gtk::Button::builder().css_classes(["flat"]).build();
-        button.set_widget_name(&format!("quick{slot}"));
-        let commands = commands.clone();
-        let row = row.clone();
-        button.connect_clicked(move |button| {
-            // The emoji is on the button, put there at bind time; the post
-            // is on the row, for the same reason.
-            let (post, emoji) = (row.widget_name(), button.tooltip_text());
-            if let (false, Some(emoji)) = (post.is_empty(), emoji) {
-                commands
-                    .send(Command::React {
-                        post: PostId::new(post.as_str()),
-                        emoji: emoji.to_string(),
-                        add: true,
-                    })
-                    .ok();
-            }
-        });
-        tools.append(&button);
+        tools.append(&quick_reaction_button(slot, row, commands, store));
     }
 
     let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
@@ -1528,6 +1517,12 @@ fn setup_post_row(
 /// emoji is put on them here; the tooltip carries the shortcode, which is
 /// what the click handler sends.
 fn label_quick_reactions(tools: &gtk::Box, data: &PostRow) {
+    let mine: Vec<String> = data
+        .reactions()
+        .into_iter()
+        .filter(|r| r.mine)
+        .map(|r| r.emoji)
+        .collect();
     let mut button = tools.first_child();
     for emoji in data.quick_reactions() {
         let Some(current) = button.and_downcast::<gtk::Button>() else {
@@ -1540,6 +1535,14 @@ fn label_quick_reactions(tools: &gtk::Box, data: &PostRow) {
             &mm_md::glyph(&emoji).map_or_else(|| format!(":{emoji}:"), ToOwned::to_owned),
         );
         current.set_tooltip_text(Some(&emoji));
+        // Lit when the reader has already used it, so the button says
+        // which way it will go before it is pressed -- the same signal
+        // the reaction chips under the message give.
+        if mine.contains(&emoji) {
+            current.add_css_class("suggested-action");
+        } else {
+            current.remove_css_class("suggested-action");
+        }
         button = current.next_sibling();
     }
 }
@@ -1806,7 +1809,12 @@ fn colour_bar(r: u8, g: u8, b: u8) -> gtk::DrawingArea {
     bar
 }
 
-fn bind_images(images: &gtk::Box, data: &PostRow) {
+fn bind_images(
+    images: &gtk::Box,
+    data: &PostRow,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+) {
     while let Some(old) = images.first_child() {
         images.remove(&old);
     }
@@ -1825,8 +1833,136 @@ fn bind_images(images: &gtk::Box, data: &PostRow) {
             picture.set_paintable(Some(texture));
         }
         picture.add_css_class("card");
+
+        // A click opens it full size, which is what a thumbnail is for.
+        let click = gtk::GestureClick::new();
+        {
+            let image = image.clone();
+            let commands = commands.clone();
+            let viewer = Rc::clone(viewer);
+            click.connect_released(move |_, _, _, _| {
+                open_image(&image, &commands, &viewer);
+            });
+        }
+        picture.add_controller(click);
+        // So the pointer says it is something to click.
+        picture.set_cursor_from_name(Some("pointer"));
+
         images.append(&picture);
     }
+}
+
+/// One of the hover toolbar's one-click reactions.
+///
+/// Made once and relabelled on bind, because rows are recycled: a button
+/// made per bind would be a button made per scroll. Which emoji it
+/// carries is therefore read at click time, off the button itself.
+fn quick_reaction_button(
+    slot: usize,
+    row: &gtk::Box,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+) -> gtk::Button {
+    let button = gtk::Button::builder().css_classes(["flat"]).build();
+    button.set_widget_name(&format!("quick{slot}"));
+    let commands = commands.clone();
+    let row = row.clone();
+    let store = Rc::clone(store);
+    button.connect_clicked(move |button| {
+        // The emoji is on the button, put there at bind time; the post
+        // is on the row, for the same reason.
+        let (post, emoji) = (row.widget_name(), button.tooltip_text());
+        let (false, Some(emoji)) = (post.is_empty(), emoji) else {
+            return;
+        };
+        let post = PostId::new(post.as_str());
+        // A toggle, not an add. Clicking a reaction you have already made
+        // takes it back -- there is no separate way to undo one, here or
+        // anywhere in Mattermost -- and asking the store is what tells
+        // the two apart. It used to send `add: true` whatever the state,
+        // so the one-click reactions could only ever be put on.
+        let add = !store.borrow().reacted(&post, &emoji);
+        commands
+            .send(Command::React {
+                post,
+                emoji: emoji.to_string(),
+                add,
+            })
+            .ok();
+    });
+    button
+}
+
+/// Open an attached image in a window of its own.
+///
+/// Mattermost opens a lightbox over the channel; this is a window,
+/// because a client that is already a window manager's client has no
+/// business drawing its own modal scrim. What matters is the same: the
+/// image at the size the screen can give it rather than the size a
+/// message row can.
+///
+/// The copy already in hand is shown at once -- it is the server's
+/// preview, and waiting on the network to show something that is already
+/// decoded would be a blank window for a second. The full-size one is
+/// asked for at the same time and swapped in when it lands.
+fn open_image(
+    attachment: &Attachment,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+) {
+    let Some(texture) = &attachment.texture else {
+        // Nothing decoded yet: the row is still showing a placeholder,
+        // and an empty window would say less than the row does.
+        return;
+    };
+    let picture = gtk::Picture::builder()
+        .paintable(texture)
+        .content_fit(gtk::ContentFit::ScaleDown)
+        .build();
+
+    let window = adw::Window::builder()
+        .title("Image")
+        .default_width(IMAGE_WINDOW_WIDTH)
+        .default_height(IMAGE_WINDOW_HEIGHT)
+        .build();
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    layout.append(&adw::HeaderBar::new());
+    layout.append(&picture);
+    picture.set_vexpand(true);
+    window.set_content(Some(&layout));
+
+    // Escape, because this is a viewer and that is what closes one.
+    let keys = gtk::EventControllerKey::new();
+    {
+        let window = window.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                window.close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    window.add_controller(keys);
+
+    // Only one viewer is tracked, which is the one that can still be
+    // improved by bytes arriving; closing it takes the entry away so a
+    // later file does not try to paint into a window that is gone.
+    *viewer.borrow_mut() = Some((attachment.file.clone(), picture));
+    {
+        let viewer = Rc::clone(viewer);
+        window.connect_close_request(move |_| {
+            viewer.borrow_mut().take();
+            glib::Propagation::Proceed
+        });
+    }
+    commands
+        .send(Command::FetchFile {
+            file: attachment.file.clone(),
+            preview: false,
+        })
+        .ok();
+    window.present();
 }
 
 /// Fill a message's overflow menu.
@@ -1971,7 +2107,11 @@ fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
     }
 }
 
-fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
+fn bind_post_row(
+    item: &gtk::ListItem,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
     };
@@ -2065,7 +2205,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     bind_message_tools(&floating, &data);
 
     bind_cards(&cards, &data);
-    bind_images(&images, &data);
+    bind_images(&images, &data, commands, viewer);
 
     let extra = data.meta();
     meta.set_text(&extra);
@@ -2101,6 +2241,11 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         reactions.append(&reaction_chip(&data.id(), &chip, commands));
     }
 }
+
+/// How big the image window opens. Large enough to be worth opening,
+/// small enough not to fill a 4K screen with somebody's screenshot.
+const IMAGE_WINDOW_WIDTH: i32 = 1100;
+const IMAGE_WINDOW_HEIGHT: i32 = 800;
 
 /// How many of a thread's participants to draw. Mattermost shows a
 /// handful and stops; a thread of forty people would otherwise be a row
@@ -2329,6 +2474,7 @@ fn build_post_list(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
     server: &Rc<RefCell<String>>,
+    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
 ) -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
@@ -2342,9 +2488,10 @@ fn build_post_list(
         }
     });
     let sender = commands.clone();
+    let viewer_for_bind = Rc::clone(viewer);
     factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            bind_post_row(item, &sender);
+            bind_post_row(item, &sender, &viewer_for_bind);
         }
     });
     let post_view = gtk::ListView::builder()
@@ -3003,6 +3150,7 @@ impl Ui {
                 }
             };
             out.push(Attachment {
+                file: file.id.clone(),
                 texture,
                 width,
                 height,
@@ -3164,6 +3312,13 @@ impl Ui {
         let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
             return;
         };
+        // If this is the image somebody is looking at full size, it is
+        // the full-size copy they asked for by opening it.
+        if let Some((showing, picture)) = self.viewer.borrow().as_ref()
+            && *showing == file
+        {
+            picture.set_paintable(Some(&texture));
+        }
         self.images.borrow_mut().insert(file, texture);
         self.redraw_soon();
     }

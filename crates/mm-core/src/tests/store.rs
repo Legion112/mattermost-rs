@@ -1903,3 +1903,33 @@ fn drafts_are_newest_first_and_never_blank() {
         .collect();
     assert_eq!(order, ["c2", "c1"]);
 }
+
+/// Reacting is a toggle everywhere, so every button that offers an emoji
+/// has to be able to ask whether this reader already used it. Nobody
+/// else's reaction counts, and nor does a different emoji.
+#[test]
+fn reacted_asks_about_this_reader_and_this_emoji() {
+    let mut store = store();
+    let post: Post = serde_json::from_str(
+        r#"{"id":"p1","channel_id":"c1","create_at":10,"update_at":10,
+            "metadata":{"reactions":[
+              {"post_id":"p1","user_id":"u-me","emoji_name":"eyes","create_at":20},
+              {"post_id":"p1","user_id":"u-other","emoji_name":"+1","create_at":30}]}}"#,
+    )
+    .expect("parses");
+    store.apply_ws(&WsEvent::Posted {
+        post,
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    });
+
+    let p1 = PostId::new("p1");
+    assert!(store.reacted(&p1, "eyes"));
+    // Somebody else's reaction is not this reader's.
+    assert!(!store.reacted(&p1, "+1"));
+    // An emoji nobody used, and a post nobody reacted to.
+    assert!(!store.reacted(&p1, "tada"));
+    assert!(!store.reacted(&PostId::new("p2"), "eyes"));
+}

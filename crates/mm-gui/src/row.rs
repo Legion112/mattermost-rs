@@ -70,6 +70,8 @@ pub struct AttachmentView {
 /// list does not jump when it lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attachment {
+    /// Which file this is, so a click can ask for the full-size copy.
+    pub file: mm_types::FileId,
     pub texture: Option<gtk::gdk::Texture>,
     pub width: i32,
     pub height: i32,

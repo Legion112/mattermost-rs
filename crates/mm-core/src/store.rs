@@ -517,6 +517,20 @@ impl Store {
         ))
     }
 
+    /// Whether this reader has already reacted to a post with an emoji.
+    ///
+    /// What makes a one-click reaction a toggle rather than an
+    /// add-only button: there is no separate "take it back" affordance
+    /// anywhere in Mattermost, so every way of reacting has to be able
+    /// to unreact.
+    #[must_use]
+    pub fn reacted(&self, post: &PostId, emoji: &str) -> bool {
+        self.reactions.get(post).is_some_and(|held| {
+            held.keys()
+                .any(|(name, user)| name == emoji && *user == self.me)
+        })
+    }
+
     /// A post's reactions, grouped for display.
     ///
     /// Ordered by when each emoji was *first* used on the post, which is the
