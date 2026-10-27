@@ -63,6 +63,35 @@ fn participants(display_name: &str) -> Option<i64> {
     (named > 0).then(|| i64::try_from(named).unwrap_or(i64::MAX))
 }
 
+/// How well a person answers `@prefix`: 0 is best, `None` is no match.
+///
+/// The username leads because it is what the mention actually becomes;
+/// the human name matters because it is what the reader is thinking of.
+fn mention_rank(user: &User, wanted: &str) -> Option<u8> {
+    if wanted.is_empty() {
+        return Some(0);
+    }
+    let username = user.username.to_lowercase();
+    if username.starts_with(wanted) {
+        return Some(0);
+    }
+    let human = [
+        user.first_name.as_str(),
+        user.last_name.as_str(),
+        user.nickname.as_str(),
+    ];
+    if human
+        .iter()
+        .any(|part| part.to_lowercase().starts_with(wanted))
+    {
+        return Some(1);
+    }
+    if username.contains(wanted) {
+        return Some(2);
+    }
+    None
+}
+
 /// How well a channel's name answers what was typed: 0 is best.
 ///
 /// `None` means it does not match at all. A word start counts because
@@ -298,6 +327,34 @@ impl Store {
         // `sort_by` is stable, so ranking by tier alone keeps both.
         rows.sort_by_key(|(tier, _)| *tier);
         rows.into_iter().map(|(_, row)| row).take(limit).collect()
+    }
+
+    /// The people who might be meant by `@prefix`, best first.
+    ///
+    /// Only people this client has heard of: the authors of the open
+    /// channel's messages, DM partners, thread participants. Mattermost
+    /// asks the server, which knows every member of the channel; this
+    /// does not, so somebody who has not spoken recently will not be
+    /// offered. In a channel being read that is nearly always the set
+    /// worth offering, and it costs no request per keystroke.
+    ///
+    /// Ranked the way a reader means it: the username they are typing
+    /// first, then a name that begins with it, then anything containing
+    /// it. Deactivated people are left out -- mentioning one does
+    /// nothing -- and so are bots, which do not read their mentions.
+    #[must_use]
+    pub fn mention_candidates(&self, prefix: &str, limit: usize) -> Vec<&User> {
+        let wanted = prefix.trim().to_lowercase();
+        let mut found: Vec<(u8, &User)> = self
+            .users
+            .values()
+            .filter(|u| u.delete_at.is_zero() && !u.is_bot && !u.username.is_empty())
+            .filter_map(|u| mention_rank(u, &wanted).map(|tier| (tier, u)))
+            .collect();
+        found.sort_by(|(tier, a), (other, b)| {
+            tier.cmp(other).then_with(|| a.username.cmp(&b.username))
+        });
+        found.into_iter().map(|(_, u)| u).take(limit).collect()
     }
 
     /// Fold a category shut, or open it again.

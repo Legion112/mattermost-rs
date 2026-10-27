@@ -83,6 +83,7 @@ real server yet.
 | `ws.live_events` | partial | 12.0.1 | posted / post_edited / post_deleted confirmed live, including the `post` payload being a JSON document inside a JSON string. A hello carrying a NEW connection id is treated as lost events; an event-sequence hole is treated the same way. NOT yet done: acting on either signal with a REST resync -- the GUI currently re-syncs the sidebar but does not close a post gap, which is why mm-core::Timeline refuses to merge a page whose adjacency it cannot establish. |
 | `posts.timeline_gaps` | partial | — | The timeline holds one contiguous run and REFUSES to merge a page whose adjacency cannot be established, rather than joining two disjoint runs and letting the reader scroll past messages with nothing on screen to say so. The plan's full multi-segment model is not built, which is what `since`-based backfill needs. Until then every fetch is anchored to what is held. |
 | `posts.reactions` | done | 12.0.1 | Reactions on the message and one-click reactions on the hover toolbar, both toggles: there is no separate way to take a reaction back, here or anywhere in Mattermost. The one-click buttons are ranked by what this reader uses most. Custom emoji are NOT fetched, so one resolves to its shortcode rather than an image. |
+| `posts.mention_autocomplete` | partial | 12.0.1 | Typing `@` offers the channel's members, with the name beside the username the way Mattermost shows it: the username is what the mention becomes, the name is what the reader was thinking of. Tab or Return completes, Up and Down move, Escape dismisses. In both composers. Ranked locally -- the username being typed first, then somebody whose human name begins with it, then a username merely containing it -- over the channel's roster, fetched once when the channel opens rather than per keystroke the way the web app does it. Verified on a live account: `@ar` offers aragorn, alukard, lowroar and yaarny, and Tab completes to `@aragorn `. NOT built: `@all`, `@channel` and `@here`, and anybody outside the open channel -- there is no `/users/autocomplete` call, so mentioning somebody who is not a member is typed out in full. |
 | `posts.warm_channels` | done | 12.0.1 | The thirty most recently active channels are fetched in the background once the sync is done, two at a time with a gap between starts, so that clicking one does not cost a round trip. Opening a channel draws what is already held first and splices in the answer when it comes, which is what removes the wait -- measured on a live account: 31 pages warmed within twenty seconds of launch, and a click then draws 95 rows in 99 ms with no request in the path. Bounded on purpose: a channel outside the thirty, or one silent for months, is still fetched the ordinary way. |
 | `posts.edit` | partial | — | Edit message, on the reader's own messages, opening the markdown they wrote in a window of its own rather than turning the row into a text box: a recycled `ListView` row is taken out from under the caret the moment anything else arrives. NOT verified against a live server -- doing so means editing a real message in a real channel -- so what is confirmed is the request shape and the dialog, not the round trip. `PostEditTimeLimit` is not read either, so a message too old to edit is refused by the server rather than by the menu. |
 
@@ -107,6 +108,12 @@ real server yet.
 - `DELETE /api/v4/users/{user_id}/posts/{post_id}/reactions/{emoji_name}`
 - ws `reaction_added`
 - ws `reaction_removed`
+
+</details>
+
+<details><summary><code>posts.mention_autocomplete</code> wire</summary>
+
+- `GET /api/v4/users`
 
 </details>
 

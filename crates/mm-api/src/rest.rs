@@ -576,6 +576,23 @@ pub fn parse_users(resp: &HttpResponse) -> Result<Vec<User>, ApiError> {
     parse_json(resp, "POST /users/ids")
 }
 
+/// Everyone in a channel, which is who `@` may mean while reading it.
+///
+/// Fetched when the channel is opened rather than per keystroke: the
+/// answer is a page of users and it is the same answer for every letter
+/// typed, so asking once is both faster and quieter than the
+/// autocomplete endpoint Mattermost's web app calls.
+#[must_use]
+pub fn users_in_channel(channel: &ChannelId, per_page: u32) -> HttpRequest {
+    HttpRequest::get(format!("{API}/users"))
+        .q("in_channel", channel)
+        .q("per_page", per_page)
+}
+
+pub fn parse_users_in_channel(resp: &HttpResponse) -> Result<Vec<User>, ApiError> {
+    parse_json(resp, "GET /users?in_channel")
+}
+
 // ---------------------------------------------------------------- prefs
 
 #[must_use]

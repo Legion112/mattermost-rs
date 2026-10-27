@@ -248,6 +248,27 @@ download to disk, and any non-image attachment, which shows as a line of text. \
 An animated GIF renders its first frame."""
 
 [[feature]]
+id       = "posts.mention_autocomplete"
+area     = "posts"
+upstream = "webapp"
+status   = "partial"
+endpoints = ["GET /api/v4/users"]
+verified_against = "12.0.1"
+notes = """
+Typing `@` offers the channel's members, with the name beside the username \
+the way Mattermost shows it: the username is what the mention becomes, the \
+name is what the reader was thinking of. Tab or Return completes, Up and Down \
+move, Escape dismisses. In both composers. Ranked locally -- the username \
+being typed first, then somebody whose human name begins with it, then a \
+username merely containing it -- over the channel's roster, fetched once when \
+the channel opens rather than per keystroke the way the web app does it. \
+Verified on a live account: `@ar` offers aragorn, alukard, lowroar and \
+yaarny, and Tab completes to `@aragorn `. NOT built: `@all`, `@channel` and \
+`@here`, and anybody outside the open channel -- there is no \
+`/users/autocomplete` call, so mentioning somebody who is not a member is \
+typed out in full."""
+
+[[feature]]
 id       = "posts.warm_channels"
 area     = "posts"
 upstream = "webapp"

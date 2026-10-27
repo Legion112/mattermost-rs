@@ -2014,3 +2014,70 @@ fn finding_a_channel_puts_the_unread_ones_first_within_a_tier() {
         .collect();
     assert_eq!(names, ["beta team", "alpha team"]);
 }
+
+/// `@` offers the username being typed first, then somebody whose human
+/// name begins with it, then a username that merely contains it. That
+/// order is what makes the first suggestion the one meant.
+#[test]
+fn mention_candidates_rank_username_then_name_then_anywhere() {
+    let mut store = store();
+    let person = |id: &str, username: &str, first: &str| User {
+        id: UserId::new(id),
+        username: username.to_owned(),
+        first_name: first.to_owned(),
+        ..User::default()
+    };
+    store.apply_users(vec![
+        person("u1", "presenceaura", "Roman"),
+        person("u2", "diogen", "Presley"),
+        person("u3", "supreme", ""),
+        person("u4", "quant", "Olga"),
+    ]);
+
+    let names: Vec<&str> = store
+        .mention_candidates("pre", 10)
+        .into_iter()
+        .map(|u| u.username.as_str())
+        .collect();
+    // presenceaura's username starts with it; diogen's first name does;
+    // supreme only contains it; quant matches nothing.
+    assert_eq!(names, ["presenceaura", "diogen", "supreme"]);
+
+    // Case does not matter, and no query offers everybody.
+    assert_eq!(store.mention_candidates("PRE", 10).len(), 3);
+    assert_eq!(store.mention_candidates("", 10).len(), 4);
+    assert_eq!(store.mention_candidates("", 2).len(), 2);
+    assert!(store.mention_candidates("zzz", 10).is_empty());
+}
+
+/// A deactivated person and a bot are not offered: mentioning the first
+/// does nothing, and the second does not read its mentions.
+#[test]
+fn mention_candidates_skip_deactivated_people_and_bots() {
+    let mut store = store();
+    store.apply_users(vec![
+        User {
+            id: UserId::new("u1"),
+            username: "gone".into(),
+            delete_at: Timestamp(5),
+            ..User::default()
+        },
+        User {
+            id: UserId::new("u2"),
+            username: "goodbot".into(),
+            is_bot: true,
+            ..User::default()
+        },
+        User {
+            id: UserId::new("u3"),
+            username: "good".into(),
+            ..User::default()
+        },
+    ]);
+    let names: Vec<&str> = store
+        .mention_candidates("go", 10)
+        .into_iter()
+        .map(|u| u.username.as_str())
+        .collect();
+    assert_eq!(names, ["good"]);
+}

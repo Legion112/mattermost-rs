@@ -295,6 +295,30 @@ fn editing_a_post_sends_the_id_and_the_new_message() {
     assert!(body.contains(r#""message":"a second thought""#), "{body}");
 }
 
+/// Who is in a channel, which is who `@` may mean while reading it.
+/// Asked once when the channel opens, not per keystroke: the answer is
+/// the same for every letter typed.
+#[test]
+fn users_in_channel_is_one_page_per_channel() {
+    let request = users_in_channel(&ChannelId::new("c1"), 200);
+    assert_eq!(request.path, "/api/v4/users");
+    assert!(
+        request
+            .query
+            .contains(&("in_channel".to_owned(), "c1".to_owned()))
+    );
+    assert!(
+        request
+            .query
+            .contains(&("per_page".to_owned(), "200".to_owned()))
+    );
+    let users = parse_users_in_channel(&ok(
+        r#"[{"id":"u1","username":"presenceaura","first_name":"Roman"}]"#,
+    ))
+    .unwrap();
+    assert_eq!(users[0].username, "presenceaura");
+}
+
 /// The stats endpoint feeds the member count in the channel header.
 #[test]
 fn channel_stats_reads_the_member_count() {

@@ -768,6 +768,11 @@ async fn resolve_settings(
     (config, preferences)
 }
 
+/// How many of a channel's members to fetch when it opens, for `@`.
+/// Mattermost's own autocomplete pages at a hundred; two hundred covers
+/// every channel on this server with one request and is still one page.
+const CHANNEL_ROSTER: u32 = 200;
+
 /// How much of the account to warm in the background, and how fast.
 ///
 /// A channel fetched only when it is clicked costs a round trip the
@@ -1006,12 +1011,23 @@ async fn open_channel(
     // shows the channel's name without one.
     let stats_request = rest::channel_stats(channel);
     let posts_request = rest::posts_for_channel(channel, &PostQuery::first(), collapsed);
-    let (stats, posts) = tokio::join!(
+    // Who is in it, which is who `@` may mean while reading it. One page
+    // when the channel opens, rather than a request per keystroke the
+    // way the web app does it: the answer is the same for every letter
+    // typed, and it rides a round trip already being made.
+    let members_request = rest::users_in_channel(channel, CHANNEL_ROSTER);
+    let (stats, posts, members) = tokio::join!(
         fetch(client, &stats_request, rest::parse_channel_stats),
         fetch(client, &posts_request, rest::parse_post_list),
+        fetch(client, &members_request, rest::parse_users_in_channel),
     );
     if let Ok(stats) = stats {
         let _ = events.send(Event::Stats(stats)).await;
+    }
+    // Not worth a complaint: without it `@` offers only the people who
+    // have spoken, which is a smaller list rather than a broken one.
+    if let Ok(members) = members {
+        let _ = events.send(Event::Users(members)).await;
     }
 
     match posts {

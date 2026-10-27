@@ -433,14 +433,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     // in the same space. The status line and the composer stay put under
     // all three -- the composer insensitive for the two that have nothing
     // to send to.
-    let (threads_list, threads_scroll) = build_view_list();
-    let (unreads_tab, threads_page) = build_threads_page(&threads_scroll);
-    let (drafts_list, drafts_page) = build_view_list();
-    let middle = gtk::Stack::new();
-    middle.add_named(&scroller, Some("channel"));
-    middle.add_named(&threads_page, Some("threads"));
-    middle.add_named(&drafts_page, Some("drafts"));
-    middle.set_vexpand(true);
+    let (threads_list, drafts_list, unreads_tab, middle) = build_middle(&scroller);
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&middle);
@@ -516,6 +509,9 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     wire_views(&ui);
     wire_switcher(&ui, &window);
     wire_unread_filter(&ui, &unread_only);
+    attach_mentions(&ui, &composer);
+    attach_mentions(&ui, &thread_composer);
+
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
     ui
@@ -697,6 +693,22 @@ fn empty_view(what: &str) -> gtk::ListBoxRow {
         .selectable(false)
         .activatable(false)
         .build()
+}
+
+/// The three things that take turns in the middle of the window: the
+/// conversation, the Threads view and the Drafts view.
+fn build_middle(
+    scroller: &gtk::ScrolledWindow,
+) -> (gtk::ListBox, gtk::ListBox, gtk::ToggleButton, gtk::Stack) {
+    let (threads_list, threads_scroll) = build_view_list();
+    let (unreads_tab, threads_page) = build_threads_page(&threads_scroll);
+    let (drafts_list, drafts_page) = build_view_list();
+    let middle = gtk::Stack::new();
+    middle.add_named(scroller, Some("channel"));
+    middle.add_named(&threads_page, Some("threads"));
+    middle.add_named(&drafts_page, Some("drafts"));
+    middle.set_vexpand(true);
+    (threads_list, drafts_list, unreads_tab, middle)
 }
 
 /// The Threads view's two tabs over its list, the way Mattermost puts
@@ -945,6 +957,199 @@ fn wire_unread_filter(ui: &Ui, button: &gtk::ToggleButton) {
         ui.sidebar_stale.set(true);
         ui.refresh_sidebar();
     });
+}
+
+/// The `@` the caret is sitting at the end of, if it is.
+///
+/// Only a mention being typed *now*: the run has to reach the caret,
+/// start at a word boundary -- an address has an `@` in the middle and
+/// is not a mention -- and carry no space, since a mention is one word.
+fn mention_being_typed(text: &str, caret: usize) -> Option<(usize, String)> {
+    let upto: String = text.chars().take(caret).collect();
+    let at = upto.rfind('@')?;
+    let before = upto[..at].chars().next_back();
+    if before.is_some_and(|c| !c.is_whitespace()) {
+        return None;
+    }
+    let prefix = &upto[at + 1..];
+    if prefix.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((upto[..at].chars().count(), prefix.to_owned()))
+}
+
+/// Offer the people a half-typed `@` might mean, and complete it.
+///
+/// Both composers get one: a mention is as likely in a reply as in a
+/// message, and Mattermost offers it in both.
+fn attach_mentions(ui: &Ui, entry: &gtk::Entry) {
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Browse)
+        .css_classes(["navigation-sidebar"])
+        .build();
+    let heading = gtk::Label::builder()
+        .label("CHANNEL MEMBERS")
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_top(6)
+        .margin_bottom(2)
+        .css_classes(["dim-label", "caption-heading"])
+        .build();
+    // Sized to what is in it, not to the space available: a popover
+    // over one name should be one name tall.
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&list)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(MENTIONS_HEIGHT)
+        .build();
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.set_size_request(MENTIONS_WIDTH, -1);
+    column.append(&heading);
+    column.append(&scroll);
+
+    let popup = gtk::Popover::builder()
+        .child(&column)
+        .autohide(false)
+        .position(gtk::PositionType::Top)
+        .has_arrow(false)
+        .build();
+    popup.set_parent(entry);
+
+    {
+        let ui = ui.clone();
+        let list = list.clone();
+        let popup = popup.clone();
+        entry.connect_changed(move |entry| {
+            let caret = usize::try_from(entry.position().max(0)).unwrap_or(0);
+            let Some((_, prefix)) = mention_being_typed(entry.text().as_str(), caret) else {
+                popup.popdown();
+                return;
+            };
+            fill_mentions(&ui, &list, &prefix);
+            if list.row_at_index(0).is_none() {
+                popup.popdown();
+            } else {
+                popup.popup();
+            }
+        });
+    }
+    {
+        let entry = entry.clone();
+        let popup = popup.clone();
+        list.connect_row_activated(move |_, row| {
+            accept_mention(&entry, &row.widget_name());
+            popup.popdown();
+        });
+    }
+    entry.add_controller(mention_keys(entry, &list, &popup));
+}
+
+/// The popup's keys, while it is up: move, accept, dismiss.
+///
+/// Capture phase, like the switcher's: a `GtkEntry` with the focus
+/// takes Up, Down, Tab and Return for itself, and the caret is in one.
+/// Everything is passed through when the popup is down, so typing is
+/// untouched.
+fn mention_keys(
+    entry: &gtk::Entry,
+    list: &gtk::ListBox,
+    popup: &gtk::Popover,
+) -> gtk::EventControllerKey {
+    let keys = gtk::EventControllerKey::new();
+    let entry = entry.clone();
+    let list = list.clone();
+    let popup = popup.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if !popup.is_visible() {
+            return glib::Propagation::Proceed;
+        }
+        match key {
+            gdk::Key::Escape => {
+                popup.popdown();
+                glib::Propagation::Stop
+            }
+            gdk::Key::Tab | gdk::Key::Return | gdk::Key::KP_Enter => {
+                if let Some(row) = list.selected_row() {
+                    accept_mention(&entry, &row.widget_name());
+                }
+                popup.popdown();
+                glib::Propagation::Stop
+            }
+            gdk::Key::Down | gdk::Key::Up => {
+                let at = list.selected_row().map_or(0, |r| r.index());
+                let next = if key == gdk::Key::Down {
+                    at + 1
+                } else {
+                    at - 1
+                };
+                if let Some(row) = list.row_at_index(next.max(0)) {
+                    list.select_row(Some(&row));
+                }
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        }
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys
+}
+
+/// Draw the people who match, with the name beside the username the way
+/// Mattermost does: the username is what the mention becomes, the name
+/// is what the reader was thinking of.
+fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str) {
+    while let Some(old) = list.first_child() {
+        list.remove(&old);
+    }
+    let store = ui.store.borrow();
+    for user in store.mention_candidates(prefix, MENTIONS_OFFERED) {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        line.set_margin_start(12);
+        line.set_margin_end(12);
+        line.set_margin_top(2);
+        line.set_margin_bottom(2);
+        let face = adw::Avatar::new(20, Some(&user.username), true);
+        face.set_custom_image(ui.avatars.borrow().get(&user.id));
+        line.append(&face);
+        line.append(
+            &gtk::Label::builder()
+                .label(format!("@{}", user.username))
+                .css_classes(["heading"])
+                .build(),
+        );
+        let human = format!("{} {}", user.first_name, user.last_name);
+        if !human.trim().is_empty() {
+            line.append(
+                &gtk::Label::builder()
+                    .label(human.trim())
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
+        let row = gtk::ListBoxRow::builder().child(&line).build();
+        row.set_widget_name(&user.username);
+        list.append(&row);
+    }
+    if let Some(first) = list.row_at_index(0) {
+        list.select_row(Some(&first));
+    }
+}
+
+/// Put the chosen username where the half-typed one was, and a space
+/// after it, which is what somebody mid-sentence wants next.
+fn accept_mention(entry: &gtk::Entry, username: &str) {
+    let caret = usize::try_from(entry.position().max(0)).unwrap_or(0);
+    let text = entry.text().to_string();
+    let Some((at, prefix)) = mention_being_typed(&text, caret) else {
+        return;
+    };
+    let head: String = text.chars().take(at).collect();
+    let tail: String = text.chars().skip(at + 1 + prefix.chars().count()).collect();
+    let filled = format!("{head}@{username} {tail}");
+    entry.set_text(&filled);
+    let put = at + username.chars().count() + 2;
+    entry.set_position(i32::try_from(put).unwrap_or(i32::MAX));
 }
 
 /// Ctrl+K, the way Mattermost binds the quick switcher.
@@ -2518,6 +2723,12 @@ fn bind_post_row(
 /// How big the edit window opens: a few lines of message, not a page.
 const EDITOR_WIDTH: i32 = 560;
 const EDITOR_HEIGHT: i32 = 260;
+
+/// How many people the mention popup offers before the reader should
+/// type another letter rather than scroll a list.
+const MENTIONS_OFFERED: usize = 8;
+const MENTIONS_WIDTH: i32 = 340;
+const MENTIONS_HEIGHT: i32 = 260;
 
 /// The quick switcher's shape, and how many channels it offers before
 /// the reader should type another letter rather than scroll.
