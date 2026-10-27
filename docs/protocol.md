@@ -403,6 +403,16 @@ waiting in this one. A draft carries `root_id` when it is a reply, and
 the server keeps one whose text has been deleted while it still has
 `file_ids`.
 
+**A reply's `channel_id` and its `root_id` have to agree.** The server
+checks that the root post really is in the channel the reply names and
+answers `400 Invalid ChannelId for RootId parameter`
+(`api.post.create_post.channel_root_id.app_error`) when it does not.
+Confirmed on 2026-10-27 by sending one that disagreed. Take the channel
+from the root post rather than from whatever the window thinks is open:
+a client that can open a thread without opening its channel -- a
+Threads view, a search result, a permalink -- will otherwise address
+replies to the wrong one.
+
 ## Reactions
 
 Verified against 12.0.1 on 2026-10-26.

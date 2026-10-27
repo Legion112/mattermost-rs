@@ -605,15 +605,31 @@ fn wire_thread(
 
     let commands = commands.clone();
     let root = Rc::clone(&ui.thread_root);
-    let selected = Rc::clone(&ui.selected);
+    let store = Rc::clone(&ui.store);
     composer.connect_activate(move |entry| {
         let text = entry.text().to_string();
         if text.trim().is_empty() {
             return;
         }
-        // Both are needed: a reply carries the thread it belongs to *and*
-        // the channel it is posted in.
-        let (Some(channel), Some(root)) = (selected.borrow().clone(), root.borrow().clone()) else {
+        let Some(root) = root.borrow().clone() else {
+            return;
+        };
+        // The channel comes from the root post, never from the sidebar's
+        // selection. A reply carries both, and they have to agree: the
+        // server checks that the root really is in the channel and
+        // answers 400 when it is not.
+        //
+        // They stopped agreeing the moment a thread could be opened from
+        // the Threads view, which opens a conversation without changing
+        // which channel is selected -- so every reply sent from there
+        // was addressed to whatever channel happened to be open and was
+        // refused. Asking the post is right either way.
+        let Some(channel) = store
+            .borrow()
+            .posts
+            .get(&root)
+            .map(|post| post.channel_id.clone())
+        else {
             return;
         };
         commands
