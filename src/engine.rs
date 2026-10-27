@@ -119,6 +119,7 @@ async fn refused_as_read_only(
         Command::React { .. } => "read-only: not reacting",
         Command::Pin { .. } => "read-only: not pinning",
         Command::Delete(_) => "read-only: not deleting",
+        Command::Edit { .. } => "read-only: not editing",
         // Saving and marking unread change only the reader's own state,
         // like marking a channel read, so they are allowed.
         _ => return false,
@@ -205,6 +206,27 @@ fn spawn_sync(a: &Active, events: &async_channel::Sender<Event>) {
     tokio::spawn(async move {
         sync(&client, &session, &events, &collapsed).await;
     });
+}
+
+/// The commands that do one thing to one post.
+///
+/// None of them applies anything here: every one of them comes back
+/// over the WebSocket -- a `post_edited`, a `post_deleted`, a changed
+/// membership -- and that is the path that updates the window. Applying
+/// the answer too would be two ways to learn the same fact, which is
+/// how a client ends up disagreeing with itself.
+async fn act_on_post(a: &Active, command: Command, events: &async_channel::Sender<Event>) {
+    let user = UserId::new(&a.session.user_id);
+    let request = match command {
+        Command::Pin { post, pinned } => rest::set_pinned(&post, pinned),
+        Command::Save { post, saved } => rest::set_saved(&user, &post, saved),
+        Command::MarkUnread(post) => rest::set_unread(&user, &post, a.collapsed()),
+        Command::Edit { post, message } => rest::edit_post(&post, &message),
+        Command::Delete(post) => rest::delete_post(&post),
+        // `handle` sends nothing else here.
+        _ => return,
+    };
+    best_effort(a, &request, events).await;
 }
 
 /// Record a category as the window now draws it -- folded shut or open.
@@ -341,23 +363,11 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Sync => spawn_sync(a, events),
         Command::OpenChannel(channel) => spawn_open_channel(a, channel, events),
         Command::SetCategory(category) => set_category(a, &category, events).await,
-        Command::Pin { post, pinned } => {
-            best_effort(a, &rest::set_pinned(&post, pinned), events).await;
-        }
-        Command::Save { post, saved } => {
-            let user = UserId::new(&a.session.user_id);
-            best_effort(a, &rest::set_saved(&user, &post, saved), events).await;
-        }
-        Command::MarkUnread(post) => {
-            let user = UserId::new(&a.session.user_id);
-            let request = rest::set_unread(&user, &post, a.collapsed());
-            best_effort(a, &request, events).await;
-        }
-        Command::Delete(post) => {
-            // The removal reaches the store as a `post_deleted` event, so
-            // nothing is applied here: one path owns it.
-            best_effort(a, &rest::delete_post(&post), events).await;
-        }
+        Command::Pin { .. }
+        | Command::Save { .. }
+        | Command::MarkUnread(_)
+        | Command::Edit { .. }
+        | Command::Delete(_) => act_on_post(a, command, events).await,
         Command::OpenThread(root) => {
             match fetch(
                 &a.client,

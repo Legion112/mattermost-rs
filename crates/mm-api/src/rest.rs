@@ -360,6 +360,22 @@ pub fn set_pinned(post: &PostId, pinned: bool) -> HttpRequest {
     HttpRequest::post(format!("{API}/posts/{post}/{verb}"))
 }
 
+/// Change what a post says.
+///
+/// `PUT`, not `PATCH`: the patch form takes a sparse body and is the
+/// one the webapp uses for props, while this replaces the message and
+/// is what "edit" means. The server stamps `edit_at`, and the edited
+/// post comes back over the WebSocket as a `post_edited`, which is what
+/// actually updates the window -- the same shape as deleting.
+///
+/// `PostEditTimeLimit` in the client config may forbid it; the server
+/// answers 403 and the window says so rather than guessing the rule.
+#[must_use]
+pub fn edit_post(post: &PostId, message: &str) -> HttpRequest {
+    let body = serde_json::json!({ "id": post.to_string(), "message": message });
+    HttpRequest::put(format!("{API}/posts/{post}")).json(&body)
+}
+
 /// Delete a post. The server soft-deletes; the post comes back over the
 /// WebSocket as a `post_deleted`, which is what actually removes it here.
 #[must_use]

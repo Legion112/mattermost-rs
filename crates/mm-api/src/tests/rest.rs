@@ -280,6 +280,21 @@ fn no_drafts_comes_back_as_null_not_an_empty_array() {
     );
 }
 
+/// Editing carries the post's own id in the body as well as the path,
+/// which is what the server's model expects: it deserializes a whole
+/// Post and checks the two agree.
+#[test]
+fn editing_a_post_sends_the_id_and_the_new_message() {
+    let request = edit_post(&PostId::new("p1"), "a second thought");
+    assert_eq!(request.method, Method::Put);
+    assert_eq!(request.path, "/api/v4/posts/p1");
+    let Body::Json(body) = &request.body else {
+        panic!("expected JSON")
+    };
+    assert!(body.contains(r#""id":"p1""#), "{body}");
+    assert!(body.contains(r#""message":"a second thought""#), "{body}");
+}
+
 /// The stats endpoint feeds the member count in the channel header.
 #[test]
 fn channel_stats_reads_the_member_count() {

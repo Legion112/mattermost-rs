@@ -50,6 +50,8 @@ pub enum Command {
     MarkUnread(PostId),
     /// Delete a post. Only ever the reader's own.
     Delete(PostId),
+    /// Change what a post says. Only ever the reader's own.
+    Edit { post: PostId, message: String },
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
     /// Fold a sidebar category shut, or open it again.

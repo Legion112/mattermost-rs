@@ -2188,29 +2188,27 @@ fn fill_message_menu(
         &entry("mail-unread-symbolic", "Mark as unread"),
         Command::MarkUnread(post.clone()),
     );
+    // Both read "undo what is already true" when it is: there is no
+    // separate unsave or unpin anywhere in Mattermost.
+    let saving = if saved {
+        "Remove from saved"
+    } else {
+        "Save message"
+    };
     add(
-        &entry(
-            "bookmark-new-symbolic",
-            if saved {
-                "Remove from saved"
-            } else {
-                "Save message"
-            },
-        ),
+        &entry("bookmark-new-symbolic", saving),
         Command::Save {
             post: post.clone(),
             saved: !saved,
         },
     );
+    let pinning = if pinned {
+        "Unpin from channel"
+    } else {
+        "Pin to channel"
+    };
     add(
-        &entry(
-            "view-pin-symbolic",
-            if pinned {
-                "Unpin from channel"
-            } else {
-                "Pin to channel"
-            },
-        ),
+        &entry("view-pin-symbolic", pinning),
         Command::Pin {
             post: post.clone(),
             pinned: !pinned,
@@ -2227,10 +2225,120 @@ fn fill_message_menu(
 
     if mine {
         actions.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let edit = entry("document-edit-symbolic", "Edit message");
+        // What the author typed, not what is drawn: an edit starts from
+        // the markdown they wrote.
+        wire_edit(&edit, popover, &post, &data.plain_body(), commands);
+        actions.append(&edit);
+
         let delete = entry("user-trash-symbolic", "Delete message");
         delete.add_css_class("mmrs-destructive");
         add(&delete, Command::Delete(post));
     }
+}
+
+/// Connect the menu's Edit entry to the window that does the editing.
+fn wire_edit(
+    edit: &gtk::Button,
+    popover: &gtk::Popover,
+    post: &PostId,
+    was: &str,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    let commands = commands.clone();
+    let popover = popover.clone();
+    let post = post.clone();
+    let was = was.to_owned();
+    edit.connect_clicked(move |button| {
+        popover.popdown();
+        open_editor(button, &post, &was, &commands);
+    });
+}
+
+/// Edit a message: the text as it was written, in a window of its own.
+///
+/// A window rather than editing in place. Mattermost turns the row into
+/// a text box, which a `ListView` makes awkward -- the row is recycled
+/// out from under the caret the moment anything else arrives -- and the
+/// thing that matters is that the author sees the markdown they wrote
+/// and can change it.
+fn open_editor(
+    near: &gtk::Button,
+    post: &PostId,
+    was: &str,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    let view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(8)
+        .right_margin(8)
+        .build();
+    view.buffer().set_text(was);
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .build();
+
+    let save = gtk::Button::with_label("Save");
+    save.add_css_class("suggested-action");
+    let cancel = gtk::Button::with_label("Cancel");
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_end(12);
+    buttons.set_margin_bottom(12);
+    buttons.append(&cancel);
+    buttons.append(&save);
+
+    let window = adw::Window::builder()
+        .title("Edit message")
+        .modal(true)
+        .default_width(EDITOR_WIDTH)
+        .default_height(EDITOR_HEIGHT)
+        .build();
+    if let Some(parent) = near.root().and_downcast::<gtk::Window>() {
+        window.set_transient_for(Some(&parent));
+    }
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    layout.append(&adw::HeaderBar::new());
+    layout.append(&scroll);
+    layout.append(&buttons);
+    window.set_content(Some(&layout));
+
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| window.close());
+    }
+    {
+        let commands = commands.clone();
+        let post = post.clone();
+        let view = view.clone();
+        let window = window.clone();
+        let was = was.to_owned();
+        save.connect_clicked(move |_| {
+            let buffer = view.buffer();
+            let (from, to) = buffer.bounds();
+            let message = buffer.text(&from, &to, false).to_string();
+            window.close();
+            // An edit that changes nothing is a request the server does
+            // not need, and it would stamp `edit_at` for no reason.
+            if message.trim().is_empty() || message == was {
+                return;
+            }
+            commands
+                .send(Command::Edit {
+                    post: post.clone(),
+                    message,
+                })
+                .ok();
+        });
+    }
+
+    window.present();
+    view.grab_focus();
 }
 
 /// Hide the hover toolbar and relabel its one-click reactions for the row
@@ -2384,6 +2492,10 @@ fn bind_post_row(
         reactions.append(&reaction_chip(&data.id(), &chip, commands));
     }
 }
+
+/// How big the edit window opens: a few lines of message, not a page.
+const EDITOR_WIDTH: i32 = 560;
+const EDITOR_HEIGHT: i32 = 260;
 
 /// The quick switcher's shape, and how many channels it offers before
 /// the reader should type another letter rather than scroll.
@@ -3236,6 +3348,7 @@ impl Ui {
             self.sidebar.append(&section_header(section));
             for row in showing {
                 let list_row = self.channel_row(row);
+                self.sidebar.append(&list_row);
                 if keep.as_ref() == Some(&row.channel) {
                     to_select = Some(list_row);
                 }

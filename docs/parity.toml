@@ -248,6 +248,23 @@ download to disk, and any non-image attachment, which shows as a line of text. \
 An animated GIF renders its first frame."""
 
 [[feature]]
+id       = "posts.edit"
+area     = "posts"
+upstream = "server-api"
+status   = "partial"
+endpoints = ["PUT /api/v4/posts/{post_id}"]
+ws_events = ["post_edited"]
+notes = """
+Edit message, on the reader's own messages, opening the markdown they \
+wrote in a window of its own rather than turning the row into a text box: \
+a recycled `ListView` row is taken out from under the caret the moment \
+anything else arrives. NOT verified against a live server -- doing so means \
+editing a real message in a real channel -- so what is confirmed is the \
+request shape and the dialog, not the round trip. `PostEditTimeLimit` is not \
+read either, so a message too old to edit is refused by the server rather \
+than by the menu."""
+
+[[feature]]
 id       = "search.quick_switcher"
 area     = "search"
 upstream = "webapp"
