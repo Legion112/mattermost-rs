@@ -40,6 +40,20 @@ pub enum Change {
     Drafts,
 }
 
+/// Where a dragged channel lands in its new category.
+///
+/// Expressed against a neighbour rather than as an index, because the
+/// sidebar can be showing fewer rows than the category holds -- a
+/// folded category shows none, and the unread filter hides the rest --
+/// so the position on screen is not the position in `channel_ids`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// At the top, which is what dropping on the heading means.
+    Front,
+    /// Just above this channel.
+    Before(ChannelId),
+}
+
 /// What the window's title bar says about the open channel.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Heading {
@@ -457,6 +471,66 @@ impl Store {
             users.iter().map(|u| u.id.clone()).collect(),
         );
         self.apply_users(users)
+    }
+
+    /// Move a channel into a category, and say which categories changed.
+    ///
+    /// Applied here and sent on, like folding: the sidebar has to follow
+    /// the drag under the pointer rather than when the server answers.
+    /// A sync overwrites it, which is what keeps the server's copy the
+    /// one that matters.
+    ///
+    /// The returned categories are what to send back -- the one it left
+    /// and the one it joined, or just one when it moved within a single
+    /// category. Empty means nothing moved, which is the common case of
+    /// dropping a channel exactly where it already was.
+    pub fn move_channel(
+        &mut self,
+        channel: &ChannelId,
+        into: &str,
+        place: &Place,
+    ) -> Vec<ChannelCategory> {
+        // Found once, as an index, so that putting the channel in has
+        // no "category not found" branch left to be unreachable.
+        let Some(target) = self.categories.iter().position(|c| c.id == into) else {
+            return Vec::new();
+        };
+        // Dropped on itself. Taking it out and putting it back would
+        // land it at the end of its own category, which is a move the
+        // reader did not ask for.
+        if *place == Place::Before(channel.clone()) {
+            return Vec::new();
+        }
+        let before: Vec<Vec<ChannelId>> = self
+            .categories
+            .iter()
+            .map(|c| c.channel_ids.clone())
+            .collect();
+
+        // Out of wherever it was -- every category, because a channel in
+        // two of them is a server state this client should heal rather
+        // than preserve.
+        for category in &mut self.categories {
+            category.channel_ids.retain(|id| id != channel);
+        }
+        // And into the new one, at the asked-for spot.
+        let target = &mut self.categories[target];
+        let at = match place {
+            Place::Front => 0,
+            Place::Before(neighbour) => target
+                .channel_ids
+                .iter()
+                .position(|id| id == neighbour)
+                .unwrap_or(target.channel_ids.len()),
+        };
+        target.channel_ids.insert(at, channel.clone());
+
+        self.categories
+            .iter()
+            .zip(before)
+            .filter(|(now, then)| now.channel_ids != *then)
+            .map(|(now, _)| now.clone())
+            .collect()
     }
 
     /// Fold a category shut, or open it again.

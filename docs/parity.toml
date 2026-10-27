@@ -500,3 +500,29 @@ Verified on a live account: aragorn's card reads his full name, \
 NOT built: the "Message" button that opens or creates a DM, custom \
 statuses, and the card over a `@mention` in message text rather than over \
 the author's name."""
+
+[[feature]]
+id       = "sidebar.drag_between_categories"
+area     = "sidebar"
+upstream = "webapp"
+status   = "partial"
+endpoints = ["PUT /api/v4/users/{user_id}/teams/{team_id}/channels/categories"]
+verified_against = "12.0.1"
+notes = """
+A channel or DM can be dragged from one category to another, and to a \
+different place within one. Dropping it on a heading puts it at the top of \
+that category, which is what a folded category needs: it shows no rows to \
+aim between. Dropping it on a channel puts it just above that channel. \
+Both categories go back in **one** request -- the bulk endpoint the web \
+app's own drag-and-drop uses -- because sending them separately leaves a \
+window in which the server has the channel in both categories or in \
+neither, and the next sync reads that back as the truth. Applied locally \
+first, like folding, so the sidebar follows the pointer rather than the \
+round trip. Where it lands is expressed against a neighbouring channel \
+rather than as an index, because the sidebar can be showing fewer rows \
+than the category holds -- a folded category shows none, the unread filter \
+hides the rest -- so a position on screen is not a position in \
+`channel_ids`. Verified on a live account: a DM dragged out of QA onto the \
+ALLERT heading moved, and dragging it back above quant restored the \
+sidebar exactly. NOT built: dragging a category heading to reorder the \
+categories themselves, and dragging a channel out of the sidebar."""

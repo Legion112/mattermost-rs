@@ -166,11 +166,18 @@ real server yet.
 |---|---|---|---|
 | `sidebar.hide_departed` | done | 12.0.1 | A one-to-one conversation with somebody who has left the server is kept out of the sidebar, and out of the quick switcher, which is drawn from the same list. Mentions never offered them. Verified on a live account: 7 of 27 direct messages were with deactivated people -- royo, madrunner, aiksandr, blossom, bozon, insmurfi, yachaha -- and all seven left, taking the HR category with them, since blossom was its only member. Hidden only when the roster actually says so: somebody this client has not fetched is shown, because "not known" must never be drawn as "gone". Their posts still render wherever they appear. NOTE: with no message search yet, a hidden conversation cannot be reopened from this client at all. |
 | `sidebar.categories` | done | 12.0.1 | The server's grouping and ordering, including Favorites, Direct Messages and the user's own categories, with the stacking taken from `order` rather than from the array. Folding a category is written back: verified on a live server by folding one from the client and reading the flag back, false then true then false. A folded category still shows its unread channels and whichever channel is open, which is what folding means in Mattermost. An empty `sorting` -- what the server sends for a category nobody has reordered -- is drawn alphabetically, which is inferred from the web app rather than read from the server. |
+| `sidebar.drag_between_categories` | partial | 12.0.1 | A channel or DM can be dragged from one category to another, and to a different place within one. Dropping it on a heading puts it at the top of that category, which is what a folded category needs: it shows no rows to aim between. Dropping it on a channel puts it just above that channel. Both categories go back in **one** request -- the bulk endpoint the web app's own drag-and-drop uses -- because sending them separately leaves a window in which the server has the channel in both categories or in neither, and the next sync reads that back as the truth. Applied locally first, like folding, so the sidebar follows the pointer rather than the round trip. Where it lands is expressed against a neighbouring channel rather than as an index, because the sidebar can be showing fewer rows than the category holds -- a folded category shows none, the unread filter hides the rest -- so a position on screen is not a position in `channel_ids`. Verified on a live account: a DM dragged out of QA onto the ALLERT heading moved, and dragging it back above quant restored the sidebar exactly. NOT built: dragging a category heading to reorder the categories themselves, and dragging a channel out of the sidebar. |
 
 <details><summary><code>sidebar.categories</code> wire</summary>
 
 - `GET /api/v4/users/{user_id}/teams/{team_id}/channels/categories`
 - `PUT /api/v4/users/{user_id}/teams/{team_id}/channels/categories/{category_id}`
+
+</details>
+
+<details><summary><code>sidebar.drag_between_categories</code> wire</summary>
+
+- `PUT /api/v4/users/{user_id}/teams/{team_id}/channels/categories`
 
 </details>
 

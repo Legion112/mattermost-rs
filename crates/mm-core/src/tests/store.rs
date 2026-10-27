@@ -2302,3 +2302,69 @@ fn a_dm_with_yourself_is_named_after_you() {
     let their_row = rows.iter().find(|r| r.channel == theirs.id).unwrap();
     assert_eq!(their_row.avatar_user, Some(UserId::new("u2")));
 }
+
+/// Dragging a channel from one category to another takes it out of the
+/// first and puts it in the second, and says that both have to be sent
+/// back -- in one request, so the server never sees it in both.
+#[test]
+fn moving_a_channel_changes_the_category_it_left_and_the_one_it_joined() {
+    let mut store = store();
+    let category = |id: &str, channels: &[&str]| ChannelCategory {
+        id: id.to_owned(),
+        display_name: id.to_owned(),
+        channel_ids: channels.iter().map(|c| ChannelId::new(*c)).collect(),
+        ..ChannelCategory::default()
+    };
+    store.categories = vec![
+        category("favorites", &["c1", "c2"]),
+        category("qa", &["c3", "c4"]),
+    ];
+
+    let changed = store.move_channel(&ChannelId::new("c4"), "favorites", &Place::Front);
+    let names: Vec<&str> = changed.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(names, ["favorites", "qa"]);
+    assert_eq!(store.categories[0].channel_ids, ids(&["c4", "c1", "c2"]));
+    assert_eq!(store.categories[1].channel_ids, ids(&["c3"]));
+
+    // Dropping it above a particular channel puts it there.
+    let changed = store.move_channel(
+        &ChannelId::new("c4"),
+        "qa",
+        &Place::Before(ChannelId::new("c3")),
+    );
+    assert_eq!(changed.len(), 2);
+    assert_eq!(store.categories[1].channel_ids, ids(&["c4", "c3"]));
+
+    // Within one category only that category changes.
+    let changed = store.move_channel(
+        &ChannelId::new("c4"),
+        "qa",
+        &Place::Before(ChannelId::new("c4")),
+    );
+    assert!(
+        changed.is_empty(),
+        "dropping it where it already is moves nothing"
+    );
+
+    let changed = store.move_channel(&ChannelId::new("c3"), "qa", &Place::Front);
+    assert_eq!(changed.len(), 1);
+    assert_eq!(store.categories[1].channel_ids, ids(&["c3", "c4"]));
+
+    // A neighbour that is not there, and a category that is not there.
+    let changed = store.move_channel(
+        &ChannelId::new("c1"),
+        "qa",
+        &Place::Before(ChannelId::new("nope")),
+    );
+    assert_eq!(store.categories[1].channel_ids, ids(&["c3", "c4", "c1"]));
+    assert_eq!(changed.len(), 2);
+    assert!(
+        store
+            .move_channel(&ChannelId::new("c1"), "no-such-category", &Place::Front)
+            .is_empty()
+    );
+}
+
+fn ids(of: &[&str]) -> Vec<ChannelId> {
+    of.iter().map(|c| ChannelId::new(*c)).collect()
+}

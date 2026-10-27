@@ -1385,16 +1385,21 @@ fn local_time(user: &mm_types::User) -> Option<(String, String)> {
 /// replacements on a right-click.
 fn watch_spelling(ui: &Ui, view: &gtk::TextView) {
     let buffer = view.buffer();
-    buffer.tag_table().add(
-        &gtk::TextTag::builder()
-            .name(MISSPELLED)
-            // Pango's error underline is the squiggle every other text
-            // box on the desktop draws, and it is coloured explicitly
-            // because the default follows the text and would be white.
-            .underline(gtk::pango::Underline::Error)
-            .underline_rgba(&gdk::RGBA::new(0.86, 0.30, 0.31, 1.0))
-            .build(),
-    );
+    // Only once per buffer. GTK logs a warning and drops the second
+    // one, which is harmless but is noise in a log that should be
+    // quiet enough for a real problem to stand out.
+    if buffer.tag_table().lookup(MISSPELLED).is_none() {
+        buffer.tag_table().add(
+            &gtk::TextTag::builder()
+                .name(MISSPELLED)
+                // Pango's error underline is the squiggle every other text
+                // box on the desktop draws, and it is coloured explicitly
+                // because the default follows the text and would be white.
+                .underline(gtk::pango::Underline::Error)
+                .underline_rgba(&gdk::RGBA::new(0.86, 0.30, 0.31, 1.0))
+                .build(),
+        );
+    }
 
     let pending = Rc::new(std::cell::Cell::new(0u64));
     let ui_for_changes = ui.clone();
@@ -1764,14 +1769,27 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
 
 /// Connect folding a category shut and opening it again.
 fn wire_categories(ui: &Ui, sidebar: &gtk::ListBox) {
-    let ui = ui.clone();
+    let folding = ui.clone();
     sidebar.connect_row_activated(move |_, row| {
         // Channel rows are activatable too -- that is how a click opens
         // one -- so this has to say which kind it was handed.
         if row.has_css_class("mmrs-section") {
-            ui.toggle_category(&row.widget_name());
+            folding.toggle_category(&row.widget_name());
         }
     });
+
+    // One drop target for the whole list rather than one per row: the
+    // interesting question is *where* in the list the pointer let go,
+    // and that is a height, which only the list knows.
+    let drop = gtk::DropTarget::new(glib::types::Type::STRING, gdk::DragAction::MOVE);
+    let ui = ui.clone();
+    drop.connect_drop(move |_, value, _, y| {
+        let Ok(channel) = value.get::<String>() else {
+            return false;
+        };
+        ui.drop_channel(&ChannelId::new(channel.as_str()), y)
+    });
+    sidebar.add_controller(drop);
 }
 
 /// Connect choosing a channel: what it opens, and what it closes.
@@ -4284,6 +4302,58 @@ impl Ui {
     ///
     /// Split out so `refresh_sidebar` stays about which rows to draw
     /// rather than what one looks like.
+    /// A channel was dropped somewhere in the sidebar.
+    ///
+    /// Answers whether the drop was taken, which is what tells GTK to
+    /// finish the drag rather than snap it back.
+    fn drop_channel(&self, channel: &ChannelId, y: f64) -> bool {
+        let Some((category, place)) = self.landing(y) else {
+            return false;
+        };
+        let moved = self
+            .store
+            .borrow_mut()
+            .move_channel(channel, &category, &place);
+        if moved.is_empty() {
+            return false;
+        }
+        self.commands.send(Command::SetCategories(moved)).ok();
+        // The grouping changed without any channel's unread changing,
+        // and the sidebar's redraw check compares sections, so say
+        // outright that it has moved.
+        self.sidebar_stale.set(true);
+        self.sidebar_soon();
+        true
+    }
+
+    /// Which category a drop at this height lands in, and where in it.
+    ///
+    /// On a heading: the top of that category, which is what dropping on
+    /// a folded one has to mean, since a folded category shows no rows
+    /// to aim between. On a channel: above that channel, in whichever
+    /// category the nearest heading above it names.
+    fn landing(&self, y: f64) -> Option<(String, mm_core::Place)> {
+        let row = self.sidebar.row_at_y(pixels(y))?;
+        if row.has_css_class("mmrs-section") {
+            return Some((row.widget_name().to_string(), mm_core::Place::Front));
+        }
+        let name = row.widget_name();
+        // Threads and Drafts are not channels and have no category.
+        if name.starts_with("mmrs:") {
+            return None;
+        }
+        let place = mm_core::Place::Before(ChannelId::new(name.as_str()));
+        let mut at = row.index() - 1;
+        while at >= 0 {
+            let above = self.sidebar.row_at_index(at)?;
+            if above.has_css_class("mmrs-section") {
+                return Some((above.widget_name().to_string(), place));
+            }
+            at -= 1;
+        }
+        None
+    }
+
     fn channel_row(&self, row: &mm_core::SidebarRow) -> gtk::ListBoxRow {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         line.append(&self.channel_mark(row));
@@ -4321,6 +4391,24 @@ impl Ui {
         // The channel id travels on the widget name, so selection does not
         // need a parallel index that could drift from the sidebar.
         list_row.set_widget_name(row.channel.as_str());
+
+        // Draggable into another category, which is how Mattermost lets
+        // the sidebar be rearranged. The id is the whole payload: where
+        // it came from is a question the store can answer at drop time,
+        // and carrying it would be a second copy to go stale.
+        let drag = gtk::DragSource::builder()
+            .actions(gdk::DragAction::MOVE)
+            .build();
+        let carried = row.channel.to_string();
+        drag.set_content(Some(&gdk::ContentProvider::for_value(&carried.to_value())));
+        // The row itself as the drag image, so what is being moved is
+        // visible under the pointer rather than a generic icon.
+        let dragged = line.clone();
+        drag.connect_drag_begin(move |source, _| {
+            let icon = gtk::WidgetPaintable::new(Some(&dragged)).current_image();
+            source.set_icon(Some(&icon), 0, 0);
+        });
+        list_row.add_controller(drag);
         list_row
     }
 

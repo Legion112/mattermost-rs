@@ -236,6 +236,30 @@ pub fn parse_category(resp: &HttpResponse) -> Result<ChannelCategory, ApiError> 
     )
 }
 
+/// Replace several sidebar categories at once.
+///
+/// What moving a channel between categories needs: the one it left and
+/// the one it joined have to change together, and sending them as two
+/// requests leaves a window in which the server believes the channel is
+/// in both or in neither. This is the endpoint the web app's own
+/// drag-and-drop uses, for the same reason.
+#[must_use]
+pub fn update_categories(
+    user: &UserId,
+    team: &TeamId,
+    categories: &[ChannelCategory],
+) -> HttpRequest {
+    let body = serde_json::to_value(categories).unwrap_or_default();
+    HttpRequest::put(format!(
+        "{API}/users/{user}/teams/{team}/channels/categories"
+    ))
+    .json(&body)
+}
+
+pub fn parse_updated_categories(resp: &HttpResponse) -> Result<Vec<ChannelCategory>, ApiError> {
+    parse_json(resp, "PUT /users/{user}/teams/{team}/channels/categories")
+}
+
 /// The threads this reader follows, newest reply first.
 ///
 /// `extended=false`: participants come back as objects carrying only an

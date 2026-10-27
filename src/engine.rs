@@ -261,6 +261,25 @@ async fn set_category(
     best_effort(a, &request, events).await;
 }
 
+/// Write several categories back together.
+///
+/// One request rather than two, because a channel moving between
+/// categories leaves one and joins another: sent separately, there is a
+/// window in which the server has it in both or in neither, and the
+/// next sync would read that back as the truth.
+async fn set_categories(
+    a: &Active,
+    categories: &[mm_types::ChannelCategory],
+    events: &async_channel::Sender<Event>,
+) {
+    let Some(team) = categories.first().map(|c| c.team_id.clone()) else {
+        return;
+    };
+    let user = UserId::new(&a.session.user_id);
+    let request = rest::update_categories(&user, &team, categories);
+    best_effort(a, &request, events).await;
+}
+
 /// Fetch the first page of the channels the reader is most likely to
 /// open, while they are not asking for anything.
 ///
@@ -442,6 +461,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Sync => spawn_sync(a, events),
         Command::OpenChannel(channel) => spawn_open_channel(a, channel, events),
         Command::SetCategory(category) => set_category(a, &category, events).await,
+        Command::SetCategories(categories) => set_categories(a, &categories, events).await,
         Command::Pin { .. }
         | Command::Save { .. }
         | Command::MarkUnread(_)

@@ -59,6 +59,10 @@ pub enum Command {
     /// Carries the whole category because that is what the server takes:
     /// it replaces a category rather than patching one.
     SetCategory(mm_types::ChannelCategory),
+    /// Replace several categories at once, which is what moving a
+    /// channel between two of them needs: the one it left and the one it
+    /// joined have to change together.
+    SetCategories(Vec<mm_types::ChannelCategory>),
     /// Fetch the page of history immediately before `before`, which is the
     /// oldest post currently held.
     LoadOlder { channel: ChannelId, before: PostId },

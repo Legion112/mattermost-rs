@@ -786,3 +786,44 @@ fn statuses_for_sends_the_ids_in_the_body() {
     assert_eq!(statuses[0].presence(), mm_types::Presence::Online);
     assert!(parse_statuses(&ok("not json")).is_err());
 }
+
+/// Moving a channel between categories sends both of them in one
+/// request. Two requests would leave a window in which the server
+/// believes the channel is in both categories, or in neither, and the
+/// sidebar that comes back from the next sync would say so.
+#[test]
+fn moving_a_channel_updates_both_categories_at_once() {
+    let user = UserId::new("u1");
+    let team = TeamId::new("t1");
+    let category = |id: &str, channels: &[&str]| mm_types::ChannelCategory {
+        id: id.into(),
+        display_name: id.into(),
+        channel_ids: channels.iter().map(|c| ChannelId::new(*c)).collect(),
+        ..mm_types::ChannelCategory::default()
+    };
+    let request = update_categories(
+        &user,
+        &team,
+        &[category("favorites_u1_t1", &["c1"]), category("qa", &[])],
+    );
+    assert_eq!(request.method, Method::Put);
+    assert_eq!(
+        request.path,
+        "/api/v4/users/u1/teams/t1/channels/categories"
+    );
+    let Body::Json(body) = &request.body else {
+        panic!("expected JSON")
+    };
+    // An array, not an object: the endpoint takes the whole set.
+    assert!(body.starts_with('['), "{body}");
+    assert!(body.contains(r#""channel_ids":["c1"]"#), "{body}");
+    assert!(body.contains(r#""channel_ids":[]"#), "{body}");
+
+    let back = parse_updated_categories(&ok(
+        r#"[{"id":"favorites_u1_t1","type":"favorites","sorting":"",
+             "display_name":"Favorites","collapsed":false,"channel_ids":["c1"]}]"#,
+    ))
+    .unwrap();
+    assert_eq!(back[0].channel_ids, [ChannelId::new("c1")]);
+    assert!(parse_updated_categories(&ok("not json")).is_err());
+}
