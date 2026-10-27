@@ -1,0 +1,81 @@
+name: release
+
+# A tag is the trigger, and the tag is the version: `xtask version-check`
+# refuses to go on if `v1.2.3` and the manifest's `1.2.3` disagree. Without
+# that the release's name and the binary's `--version` drift apart, and the
+# first person to notice is somebody filing a bug against the wrong build.
+on:
+  push:
+    tags: ["v*"]
+  # So the whole thing can be rehearsed on a throwaway tag before it is
+  # ever needed for a real one.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (must already exist)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  release:
+    name: build and publish
+    # Pinned for the same reason ci.yml pins it, and here it matters more:
+    # the runner's glibc is the oldest glibc the published binary will run
+    # against, and ubuntu-latest rolling forward would silently drop support
+    # for every distribution older than the new one.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install the pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-24.04-1.92.0-build
+          # Releases read the build job's cache and never write it: a tag
+          # build is rare, and letting it evict main's entries would make
+          # every ordinary run after a release slow.
+          save-if: false
+
+      - name: install system build dependencies
+        run: cargo run -q -p xtask -- apt-deps
+
+      - name: the tag and the manifest must agree
+        run: cargo run -q -p xtask -- version-check --tag "${{ github.event.inputs.tag || github.ref_name }}"
+
+      - run: cargo build --release --locked --bin mattermost-rs
+
+      # The same command a workstation runs: strip, assert the binary reports
+      # the manifest's version, assert it links nothing out of Homebrew's
+      # prefix, build the .deb, write SHA256SUMS.
+      - name: package
+        run: cargo run -q -p xtask -- package --out dist --deb
+
+      - name: inspect the package
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          dpkg-deb --fsys-tarfile dist/*.deb | tar -xO ./usr/share/applications/dev.legion.mattermost_rs.desktop > entry.desktop
+          desktop-file-validate entry.desktop
+
+      # A draft, not a published release. The last look before something is
+      # public belongs to a person, and the notes are worth writing by hand.
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/mattermost-rs
+            dist/*.deb
+            dist/SHA256SUMS

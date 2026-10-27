@@ -855,13 +855,23 @@ what the field means and is wrong in half the hand-written control files \
 anywhere. Every mode is normalised to 0755/0644 after staging, or the \
 build machine's umask ships group-writable files into `/usr/share`.
 
+CI builds and inspects the package on every run, not only on a tag: a \
+packaging step that runs once a release is a packaging step that is broken \
+on the day it matters. A `v*` tag runs `release.yml`, which refuses to go on \
+unless the tag and the manifest agree -- otherwise the release's name and \
+the binary's `--version` drift apart, and the first person to notice is \
+somebody filing a bug against the wrong build -- and leaves a **draft** \
+release carrying the binary, the package and `SHA256SUMS`, because the last \
+look before something is public belongs to a person.
+
 Verified on this machine: the package builds, `dpkg-deb --info` reads the \
 stanza back, the payload is the four expected paths with root ownership and \
 standard modes, `desktop-file-validate` passes the entry out of the package, \
-and the extracted binary reports its version. NOT verified: an actual \
-`dpkg -i` and the dependency solve, which needs root. NOT built: an `.rpm`, \
-a Flatpak, a repository to install from, and a release workflow that \
-attaches the package to a tag."""
+and the extracted binary reports its version; `version-check` accepts \
+`v0.1.0` and refuses `v9.9.9`. NOT verified: an actual `dpkg -i` and the \
+dependency solve, which needs root, and the release workflow itself, which \
+has never had a tag to run on. NOT built: an `.rpm`, a Flatpak, and a \
+repository to install from."""
 
 [[feature]]
 id       = "desktop.badge"

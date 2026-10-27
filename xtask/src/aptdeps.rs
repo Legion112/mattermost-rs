@@ -1,8 +1,9 @@
 //! `cargo xtask apt-deps` — install the system build dependencies.
 //!
 //! One list, in one place, so the CI runner, the README and a fresh
-//! workstation cannot drift apart. These are *build* dependencies; the `.deb`'s
-//! runtime dependencies come from `cargo-deb`'s `$auto` resolution.
+//! workstation cannot drift apart. These are *build* dependencies; what
+//! the `.deb` depends on at runtime is a separate, deliberately shorter
+//! list in `mm_desktop::control`.
 //!
 //! The spelling dictionaries are the exception, and are listed here
 //! because nothing else would list them: they are data, not a linked
@@ -30,6 +31,10 @@ const PACKAGES: &[(&str, &str)] = &[
     (
         "musl-tools",
         "builds the static mm-headless the Docker lab injects",
+    ),
+    (
+        "desktop-file-utils",
+        "validates the .desktop entry the package ships",
     ),
     ("hunspell-en-us", "spell-checking the composer in English"),
     ("hunspell-ru", "and in Russian"),

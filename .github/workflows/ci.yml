@@ -164,9 +164,22 @@ jobs:
       - run: cargo build --release --locked --bin mattermost-rs
 
       # Strips, asserts the binary reports the manifest's version, asserts it
-      # links nothing out of Homebrew's prefix, and writes SHA256SUMS.
-      - name: strip, smoke-test and checksum
-        run: cargo run -q -p xtask -- package --out dist
+      # links nothing out of Homebrew's prefix, builds the .deb and writes
+      # SHA256SUMS. `--deb` here and not only in the release workflow, because
+      # a packaging step that runs once a release is a packaging step that is
+      # broken on the day it matters.
+      - name: strip, smoke-test, package and checksum
+        run: cargo run -q -p xtask -- package --out dist --deb
+
+      # Reads the stanza back out of the built package and validates the
+      # .desktop entry inside it -- the two things that are wrong in a
+      # hand-made .deb and that nothing in the Rust tests can see.
+      - name: inspect the package
+        run: |
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+          dpkg-deb --fsys-tarfile dist/*.deb | tar -xO ./usr/share/applications/dev.legion.mattermost_rs.desktop > entry.desktop
+          desktop-file-validate entry.desktop
 
       - uses: actions/upload-artifact@v7
         with:
