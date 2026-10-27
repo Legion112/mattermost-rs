@@ -329,7 +329,13 @@ fn install_styles() {
 fn build_window(
     app: &adw::Application,
     split: &gtk::Paned,
-) -> (adw::WindowTitle, gtk::Button, Rc<LoginPage>, gtk::Stack) {
+) -> (
+    adw::WindowTitle,
+    gtk::Button,
+    Rc<LoginPage>,
+    gtk::Stack,
+    adw::ApplicationWindow,
+) {
     let title = adw::WindowTitle::new("mattermost-rs", "connecting…");
     let header = adw::HeaderBar::builder().title_widget(&title).build();
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
@@ -370,7 +376,7 @@ fn build_window(
         .build();
     window.present();
 
-    (title, refresh, login, stack)
+    (title, refresh, login, stack, window)
 }
 
 fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
@@ -441,7 +447,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         .position(260)
         .build();
 
-    let (title, refresh, login, stack) = build_window(app, &split);
+    let (title, refresh, login, stack, window) = build_window(app, &split);
 
     let ui = Ui {
         store,
@@ -488,6 +494,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
 
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_views(&ui);
+    wire_switcher(&ui, &window);
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
     ui
@@ -842,6 +849,72 @@ fn wire_views(ui: &Ui) {
             ui.show_channel(&channel);
         });
     }
+}
+
+/// The switcher's keys: Escape closes, Return goes, Up and Down move
+/// the selection.
+///
+/// Capture phase, for the reason Ctrl+K needs it: the entry has the
+/// focus, and a `GtkSearchEntry` takes Return, Up and Down for itself
+/// before a controller on the window would ever see them.
+fn switcher_keys(
+    window: &adw::Window,
+    list: &gtk::ListBox,
+    go: impl Fn(&gtk::ListBoxRow) + 'static,
+) -> gtk::EventControllerKey {
+    let keys = gtk::EventControllerKey::new();
+    let window = window.clone();
+    let list = list.clone();
+    keys.connect_key_pressed(move |_, key, _, _| match key {
+        gdk::Key::Escape => {
+            window.close();
+            glib::Propagation::Stop
+        }
+        // Return acts on the selection even though the caret is in the
+        // entry, which is where somebody typing expects it to be.
+        gdk::Key::Return | gdk::Key::KP_Enter => {
+            if let Some(row) = list.selected_row() {
+                go(&row);
+            }
+            glib::Propagation::Stop
+        }
+        gdk::Key::Down | gdk::Key::Up => {
+            let at = list.selected_row().map_or(0, |r| r.index());
+            let next = if key == gdk::Key::Down {
+                at + 1
+            } else {
+                at - 1
+            };
+            if let Some(row) = list.row_at_index(next.max(0)) {
+                list.select_row(Some(&row));
+            }
+            glib::Propagation::Stop
+        }
+        _ => glib::Propagation::Proceed,
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys
+}
+
+/// Ctrl+K, the way Mattermost binds the quick switcher.
+///
+/// On the window rather than on a widget, so it works wherever the
+/// focus is -- including inside the composer, which is where a reader's
+/// caret usually is when they decide to go somewhere else.
+fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
+    let keys = gtk::EventControllerKey::new();
+    let ui = ui.clone();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if key == gdk::Key::k && state.contains(gdk::ModifierType::CONTROL_MASK) {
+            ui.open_switcher();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    // Capture, not bubble: a `GtkEntry` with the focus consumes key
+    // presses, and the composer has the focus most of the time.
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    window.add_controller(keys);
 }
 
 /// Connect folding a category shut and opening it again.
@@ -2277,6 +2350,12 @@ fn bind_post_row(
     }
 }
 
+/// The quick switcher's shape, and how many channels it offers before
+/// the reader should type another letter rather than scroll.
+const SWITCHER_WIDTH: i32 = 520;
+const SWITCHER_HEIGHT: i32 = 460;
+const SWITCHER_RESULTS: usize = 30;
+
 /// How big the image window opens. Large enough to be worth opening,
 /// small enough not to fill a 4K screen with somebody's screenshot.
 const IMAGE_WINDOW_WIDTH: i32 = 1100;
@@ -2731,6 +2810,104 @@ impl Ui {
                 false,
             ));
         }
+    }
+
+    /// The quick switcher: type a few letters, press Return, be there.
+    ///
+    /// Ctrl+K, which is what Mattermost binds it to. A reader with a
+    /// hundred channels does not find one by scrolling the sidebar, and
+    /// this is the one piece of searching that needs no endpoint at all
+    /// -- every channel they are in is already in the store.
+    fn open_switcher(&self) {
+        let entry = gtk::SearchEntry::builder()
+            .placeholder_text("Find channel…")
+            .margin_start(12)
+            .margin_end(12)
+            .margin_top(12)
+            .build();
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::Browse)
+            .css_classes(["navigation-sidebar"])
+            .build();
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&list)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .build();
+
+        let window = adw::Window::builder()
+            .title("Find channel")
+            .modal(true)
+            .default_width(SWITCHER_WIDTH)
+            .default_height(SWITCHER_HEIGHT)
+            .build();
+        if let Some(parent) = self.sidebar.root().and_downcast::<gtk::Window>() {
+            window.set_transient_for(Some(&parent));
+        }
+        let layout = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        layout.append(&entry);
+        layout.append(&scroll);
+        window.set_content(Some(&layout));
+
+        let fill = {
+            let ui = self.clone();
+            let list = list.clone();
+            move |query: &str| {
+                while let Some(old) = list.first_child() {
+                    list.remove(&old);
+                }
+                for found in ui.store.borrow().find_channels(query, SWITCHER_RESULTS) {
+                    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    line.append(&ui.channel_mark(&found));
+                    line.append(
+                        &gtk::Label::builder()
+                            .label(&found.display_name)
+                            .xalign(0.0)
+                            .hexpand(true)
+                            .ellipsize(gtk::pango::EllipsizeMode::End)
+                            .css_classes(if found.is_unread() {
+                                ["heading"]
+                            } else {
+                                ["dim-label"]
+                            })
+                            .build(),
+                    );
+                    let row = gtk::ListBoxRow::builder().child(&line).build();
+                    row.set_widget_name(found.channel.as_str());
+                    list.append(&row);
+                }
+                // So Return goes somewhere without arrowing down first.
+                if let Some(first) = list.row_at_index(0) {
+                    list.select_row(Some(&first));
+                }
+            }
+        };
+        fill("");
+        {
+            let fill = fill.clone();
+            entry.connect_search_changed(move |entry| fill(entry.text().as_str()));
+        }
+
+        let go = {
+            let ui = self.clone();
+            let window = window.clone();
+            move |row: &gtk::ListBoxRow| {
+                let channel = ChannelId::new(row.widget_name().as_str());
+                window.close();
+                if !channel.as_str().is_empty() {
+                    ui.show_channel(&channel);
+                }
+            }
+        };
+        {
+            let go = go.clone();
+            list.connect_row_activated(move |_, row| go(row));
+        }
+
+        window.add_controller(switcher_keys(&window, &list, go));
+
+        window.present();
+        entry.grab_focus();
     }
 
     /// Show one of the three views, and draw it.

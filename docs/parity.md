@@ -112,7 +112,8 @@ real server yet.
 
 | feature | status | verified | notes |
 |---|---|---|---|
-| `search` | planned | — | No search of any kind: not messages, not channels, not people. The largest single gap against the Electron client, and the one most likely to send a reader back to it. |
+| `search.quick_switcher` | done | 12.0.1 | Ctrl+K, the way Mattermost binds it: type a few letters, press Return, be there. The one piece of searching that needs no endpoint -- every channel the reader is in is already in the store -- so it is ranked locally: a name that starts with what was typed, then one where a word does, then one that merely contains it, and unread first within each tier. Verified on a live account by typing `env` and landing in Prod-environment. |
+| `search.messages` | planned | — | No message search, and no searching for people or for channels the reader is not already in. The largest remaining gap against the Electron client, and the one most likely to send a reader back to it. |
 
 ## sidebar
 

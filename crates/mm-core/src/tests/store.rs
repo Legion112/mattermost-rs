@@ -1933,3 +1933,84 @@ fn reacted_asks_about_this_reader_and_this_emoji() {
     assert!(!store.reacted(&p1, "tada"));
     assert!(!store.reacted(&PostId::new("p2"), "eyes"));
 }
+
+/// The switcher ranks a name that starts with what was typed above one
+/// where a word starts with it, above one that merely contains it. That
+/// order is what makes the first result the one somebody meant.
+#[test]
+fn finding_a_channel_prefers_the_start_then_a_word_then_anywhere() {
+    let mut store = store();
+    let open = |id: &str, name: &str| Channel {
+        id: ChannelId::new(id),
+        display_name: name.to_owned(),
+        kind: ChannelType::Open,
+        ..Channel::default()
+    };
+    store.apply_channels(vec![
+        open("c1", "Prod-environment"),
+        open("c2", "environment notes"),
+        open("c3", "Greenvale"),
+        open("c4", "Stage-environment"),
+    ]);
+    store.apply_members(vec![
+        member("c1", 0, 0, 0),
+        member("c2", 0, 0, 0),
+        member("c3", 0, 0, 0),
+        member("c4", 0, 0, 0),
+    ]);
+
+    let names: Vec<String> = store
+        .find_channels("env", 10)
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    // "environment notes" starts with it; the two hyphenated ones have a
+    // word starting with it; "Greenvale" only contains it.
+    assert_eq!(
+        names,
+        [
+            "environment notes",
+            "Prod-environment",
+            "Stage-environment",
+            "Greenvale"
+        ]
+    );
+
+    // Case does not matter, and a query nobody matches finds nobody.
+    assert_eq!(store.find_channels("PROD-ENV", 10).len(), 1);
+    assert!(store.find_channels("zzz", 10).is_empty());
+
+    // No query is the sidebar as it stands, and the limit is honoured.
+    assert_eq!(store.find_channels("", 10).len(), 4);
+    assert_eq!(store.find_channels("", 2).len(), 2);
+}
+
+/// Within a tier the unread channels lead: somebody reaching for the
+/// switcher is usually going somewhere that has moved.
+#[test]
+fn finding_a_channel_puts_the_unread_ones_first_within_a_tier() {
+    let mut store = store();
+    store.apply_channels(vec![
+        Channel {
+            id: ChannelId::new("c1"),
+            display_name: "alpha team".into(),
+            total_msg_count: 5,
+            ..Channel::default()
+        },
+        Channel {
+            id: ChannelId::new("c2"),
+            display_name: "beta team".into(),
+            total_msg_count: 5,
+            ..Channel::default()
+        },
+    ]);
+    // c2 has unread, c1 is caught up.
+    store.apply_members(vec![member("c1", 5, 0, 0), member("c2", 2, 0, 0)]);
+
+    let names: Vec<String> = store
+        .find_channels("team", 10)
+        .into_iter()
+        .map(|r| r.display_name)
+        .collect();
+    assert_eq!(names, ["beta team", "alpha team"]);
+}

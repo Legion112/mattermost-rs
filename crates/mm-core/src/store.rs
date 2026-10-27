@@ -63,6 +63,27 @@ fn participants(display_name: &str) -> Option<i64> {
     (named > 0).then(|| i64::try_from(named).unwrap_or(i64::MAX))
 }
 
+/// How well a channel's name answers what was typed: 0 is best.
+///
+/// `None` means it does not match at all. A word start counts because
+/// "env" should find "Stage-environment", and the separators are the
+/// ones Mattermost names channels with.
+fn rank(name: &str, wanted: &str) -> Option<u8> {
+    if wanted.is_empty() {
+        return Some(0);
+    }
+    let name = name.to_lowercase();
+    if name.starts_with(wanted) {
+        return Some(0);
+    }
+    let at = name.find(wanted)?;
+    let word_start = name[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|c| c == ' ' || c == '-' || c == '_' || c == '.');
+    Some(if word_start { 1 } else { 2 })
+}
+
 /// How much of the Threads view wants attention, account-wide.
 ///
 /// The server's own totals rather than a count of the page in hand: one
@@ -251,6 +272,32 @@ impl Store {
                 .then_with(|| a.channel_id.cmp(&b.channel_id))
         });
         out
+    }
+
+    /// The channels matching what somebody typed into the switcher,
+    /// best match first.
+    ///
+    /// Three tiers, because they are what a reader means by "better":
+    /// a name that *starts* with what they typed, then one where a word
+    /// does, then one that merely contains it. Within a tier the unread
+    /// channels come first -- somebody reaching for the switcher is
+    /// usually going somewhere that has moved -- and then by name, so
+    /// the list is stable while they keep typing.
+    ///
+    /// An empty query is the sidebar as it stands, which is what the
+    /// switcher shows before the first keystroke.
+    #[must_use]
+    pub fn find_channels(&self, query: &str, limit: usize) -> Vec<SidebarRow> {
+        let wanted = query.trim().to_lowercase();
+        let mut rows: Vec<(u8, SidebarRow)> = self
+            .sidebar()
+            .into_iter()
+            .filter_map(|row| rank(&row.display_name, &wanted).map(|tier| (tier, row)))
+            .collect();
+        // `sidebar` is already unread-first and then alphabetical, and
+        // `sort_by` is stable, so ranking by tier alone keeps both.
+        rows.sort_by_key(|(tier, _)| *tier);
+        rows.into_iter().map(|(_, row)| row).take(limit).collect()
     }
 
     /// Fold a category shut, or open it again.
