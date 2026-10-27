@@ -155,6 +155,16 @@ Policy is implemented and fully covered in mm-desktop; delivery goes through \
 zbus in mm-desktop-xdg and returns Ok against gnome-shell 46. Whether a banner \
 is actually drawn is the shell's own policy and cannot be asserted from here \
 -- `mattermost-rs doctor` exists so a person can settle it in one command. \
+**Clicking one now goes to the channel it came from** and brings the window \
+forward: the notification carries a `default` action, without which most \
+shells treat a banner as nothing but a thing to dismiss and a click does \
+nothing, which reads as the client ignoring you. Waiting for that click \
+means waiting as long as the banner is up, so each one waits on a thread of \
+its own, ending when its banner does. The icon is the installed one's name \
+rather than the binary's, which is why the test notification used to draw a \
+generic placeholder. Verified on this machine with `dbus-monitor`: the \
+`Notify` call carries the `default` action and the right icon name. NOT \
+verified: the click itself, which needs somebody to send a mention. \
 UNVERIFIED: whether muting alone should silence notifications; see \
 NotifySettings::muted_is_silent."""
 

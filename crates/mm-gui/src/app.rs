@@ -4864,6 +4864,10 @@ impl Ui {
     /// Show a channel that has only just appeared in the sidebar.
     fn go_to_new_channel(&self, channel: &ChannelId) {
         self.set_status("");
+        // In front of the reader: this is reached by joining, by
+        // following a link, and by clicking a notification, and every
+        // one of those is somebody asking to be taken there now.
+        self.window.present();
         // Drawn now rather than on the next coalesced pass: the row has
         // to exist before `show_channel` can select it.
         self.sidebar_stale.set(true);

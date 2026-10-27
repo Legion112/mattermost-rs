@@ -359,6 +359,36 @@ async fn save_file(
     }
 }
 
+/// Show a notification, and go to the channel if it is clicked.
+///
+/// On a thread of its own, because waiting for somebody to click a
+/// banner means waiting as long as the banner is up -- minutes, on a
+/// shell that keeps them -- and the command loop has a client to run
+/// meanwhile. One thread per notification, each ending when its banner
+/// does.
+///
+/// A missing notification daemon is a normal state on a minimal
+/// desktop and not a reason for a chat client to stop working, so the
+/// failure goes to the status line and no further.
+fn notify(notification: mm_desktop::Notification, events: &async_channel::Sender<Event>) {
+    let channel = notification.channel.clone();
+    let events = events.clone();
+    std::thread::spawn(move || {
+        match mm_desktop_xdg::show_and_wait(&notification) {
+            Ok(true) => {
+                // `Opened` is what the window already uses to go
+                // somewhere and present itself, which is exactly what
+                // clicking a notification should do.
+                let _ = events.send_blocking(Event::Opened(channel));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                let _ = events.send_blocking(Event::Status(e));
+            }
+        }
+    });
+}
+
 /// Resolve a permalink and go there.
 ///
 /// The link carries a post and nothing else, so the post is fetched
@@ -830,13 +860,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             root,
             attach,
         } => send_post(a, &channel, &text, root.as_ref(), &attach, events).await,
-        Command::Notify(notification) => {
-            // A missing notification daemon is a normal state on a minimal
-            // desktop, and not a reason for a chat client to stop working.
-            if let Err(e) = mm_desktop_xdg::show(&notification) {
-                let _ = events.send(Event::Status(e)).await;
-            }
-        }
+        Command::Notify(notification) => notify(notification, events),
         Command::LogIn { .. } | Command::Quit => unreachable!("handled above"),
     }
 }
