@@ -25,6 +25,7 @@ gtk  = { package = "gtk4", version = "0.9", features = ["v4_14"] }
 async-channel = "2"
 chrono        = { version = "0.4", default-features = false, features = ["clock"] }
 tokio         = { version = "1", features = ["sync"] }
+spellbook = "0.4.2"
 
 [lints]
 workspace = true

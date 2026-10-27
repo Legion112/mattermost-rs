@@ -22,6 +22,7 @@ mod app;
 pub mod bridge;
 mod login;
 mod row;
+mod spelling;
 
 pub use app::{Wiring, run};
 pub use bridge::{Command, Event};

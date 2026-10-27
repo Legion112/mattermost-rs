@@ -8,9 +8,12 @@
 //!    buy nothing and cost determinism.
 //! 2. **`block_on` appears nowhere.** Tokio lives on its own thread and
 //!    reaches the GUI only through a channel.
-//! 3. **`glib::spawn_future_local` is called exactly once**, in [`run`]. Every
-//!    per-widget spawn is a place where a future outlives its widget, so
-//!    widgets send commands instead of spawning.
+//! 3. **No per-widget `glib::spawn_future_local`.** Every per-widget spawn is
+//!    a place where a future outlives its widget, so widgets send commands
+//!    instead of spawning. [`run`] has two, both owning an `Rc<Ui>` that
+//!    outlives the window by construction: the engine's event pump, and a
+//!    one-shot await on the spelling dictionaries, which are three and a half
+//!    megabytes of Russian and must not be parsed on this thread.
 //!
 //! On the post list: it is a `gtk::ListView` over a custom `gio::ListModel`
 //! whose items hold only an id, not a widget per post. A factory
@@ -101,6 +104,10 @@ struct Ui {
     /// Pictures fetched for link previews, shared with the post rows that
     /// draw them.
     link_images: LinkImages,
+    /// The dictionaries, once they have finished loading. `None` until
+    /// then, and on a machine with none installed, which is why nothing
+    /// waits on it.
+    spelling: Rc<RefCell<Option<crate::spelling::Spelling>>>,
     /// Decoded images attached to messages, by file id. Seeded from the
     /// `mini_preview` thumbnail that already rides in the metadata, then
     /// replaced by the real image when it arrives.
@@ -205,6 +212,17 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
                 pump.on_event(event);
             }
             pump.set_status("the engine stopped");
+        });
+
+        // The dictionaries, on a worker thread: `ru_RU.dic` is three and
+        // a half megabytes, and parsing it here would hold the window's
+        // first paint for as long as it took.
+        let reading = gio::spawn_blocking(crate::spelling::Spelling::load);
+        let dictionaries = Rc::clone(&ui);
+        glib::spawn_future_local(async move {
+            if let Ok(spelling) = reading.await {
+                dictionaries.use_spelling(spelling);
+            }
         });
     });
 
@@ -522,6 +540,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         typing: Rc::new(RefCell::new(HashMap::new())),
         typing_line,
         link_images: Rc::clone(&link_images),
+        spelling: Rc::new(RefCell::new(None)),
         images: Rc::new(RefCell::new(HashMap::new())),
         viewer: Rc::clone(&viewer),
         asked: Rc::new(RefCell::new(HashSet::new())),
@@ -1069,11 +1088,16 @@ fn face_with_dot(size: i32) -> (gtk::Overlay, adw::Avatar, gtk::Box) {
 /// Offline is drawn as nothing rather than a grey dot: Mattermost does
 /// the same, and a column of grey dots beside every old message is
 /// noise about people who are simply not at work.
-fn set_presence(dot: &gtk::Box, presence: mm_types::Presence) {
+///
+/// `shown` is whether the face it belongs to is drawn at all. The dot
+/// goes with the face and never without it: a grouped message hides the
+/// face, and hiding one without the other left a green dot floating on
+/// its own in the gutter beside the text.
+fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool) {
     for state in mm_types::Presence::ALL {
         dot.remove_css_class(state.as_str());
     }
-    if presence == mm_types::Presence::Offline {
+    if !shown || presence == mm_types::Presence::Offline {
         dot.set_visible(false);
         return;
     }
@@ -1201,6 +1225,124 @@ fn build_typing_line() -> gtk::Label {
         .build()
 }
 
+/// Underline what is not a word, once the typing stops, and offer
+/// replacements on a right-click.
+fn watch_spelling(ui: &Ui, view: &gtk::TextView) {
+    let buffer = view.buffer();
+    buffer.tag_table().add(
+        &gtk::TextTag::builder()
+            .name(MISSPELLED)
+            // Pango's error underline is the squiggle every other text
+            // box on the desktop draws, and it is coloured explicitly
+            // because the default follows the text and would be white.
+            .underline(gtk::pango::Underline::Error)
+            .underline_rgba(&gdk::RGBA::new(0.86, 0.30, 0.31, 1.0))
+            .build(),
+    );
+
+    let pending = Rc::new(std::cell::Cell::new(0u64));
+    let ui_for_changes = ui.clone();
+    buffer.connect_changed(move |buffer| {
+        // Debounced by generation: every keystroke arms a timer, and
+        // all but the last one find the count moved on and do nothing.
+        let generation = pending.get().wrapping_add(1);
+        pending.set(generation);
+        let ui = ui_for_changes.clone();
+        let pending = Rc::clone(&pending);
+        let buffer = buffer.clone();
+        glib::timeout_add_local_once(SPELL_DELAY, move || {
+            if pending.get() == generation {
+                ui.mark_mistakes(&buffer);
+            }
+        });
+    });
+
+    let menu = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .build();
+    // Capture, so the menu is filled in before the view opens its own.
+    menu.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let ui = ui.clone();
+    let on = view.clone();
+    menu.connect_pressed(move |_, _, x, y| {
+        offer_corrections(&ui, &on, x, y);
+    });
+    view.add_controller(menu);
+}
+
+/// Put the replacements for the word under the pointer into the view's
+/// own context menu, just before it opens.
+///
+/// `extra-menu` is rebuilt per click rather than kept: the entries are
+/// different for every word, and an action is attached to the view so
+/// that choosing one knows which span to replace.
+fn offer_corrections(ui: &Ui, view: &gtk::TextView, x: f64, y: f64) {
+    // Cleared first: last click's suggestions over this click's word
+    // would offer corrections for something else entirely.
+    view.set_extra_menu(None::<&gio::MenuModel>);
+    let Some((word, suggestions)) = correction_for(ui, view, x, y) else {
+        return;
+    };
+
+    let actions = gio::SimpleActionGroup::new();
+    let menu = gio::Menu::new();
+    for (at, suggestion) in suggestions.iter().enumerate() {
+        let name = format!("fix{at}");
+        let action = gio::SimpleAction::new(&name, None);
+        let buffer = view.buffer();
+        let (start, end) = (word.start, word.end);
+        let replacement = suggestion.clone();
+        action.connect_activate(move |_, _| {
+            let mut from = buffer.iter_at_offset(offset(start));
+            let mut to = buffer.iter_at_offset(offset(end));
+            buffer.delete(&mut from, &mut to);
+            buffer.insert(&mut from, &replacement);
+        });
+        actions.add_action(&action);
+        menu.append(Some(suggestion), Some(&format!("spell.{name}")));
+    }
+    view.insert_action_group("spell", Some(&actions));
+    view.set_extra_menu(Some(&menu));
+}
+
+/// The misspelled word under the pointer and what to replace it with,
+/// or `None` when the pointer is not on one.
+fn correction_for(
+    ui: &Ui,
+    view: &gtk::TextView,
+    x: f64,
+    y: f64,
+) -> Option<(mm_md::spell::Word, Vec<String>)> {
+    let spelling = ui.spelling.borrow();
+    let spelling = spelling.as_ref()?;
+    let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, pixels(x), pixels(y));
+    let at = usize::try_from(view.iter_at_location(bx, by)?.offset()).ok()?;
+    let buffer = view.buffer();
+    let (start, end) = buffer.bounds();
+    let text = buffer.text(&start, &end, false).to_string();
+    let word = spelling
+        .mistakes(&text)
+        .into_iter()
+        .find(|word| at >= word.start && at < word.end)?;
+    let suggestions = spelling.suggestions(&word.text, SUGGESTIONS_OFFERED);
+    (!suggestions.is_empty()).then_some((word, suggestions))
+}
+
+/// A pointer coordinate as a widget pixel.
+///
+/// The value came from a click inside this widget, so it is a small
+/// positive number; the clamp is there so the conversion needs no
+/// assumption rather than because the far end is reachable.
+#[allow(clippy::cast_possible_truncation)]
+fn pixels(value: f64) -> i32 {
+    value.round().clamp(0.0, f64::from(i32::MAX)) as i32
+}
+
+/// A character offset as a text-buffer iterator offset.
+fn offset(at: usize) -> i32 {
+    i32::try_from(at).unwrap_or(i32::MAX)
+}
+
 /// Give both composers their `@` popup.
 ///
 /// Each is told which conversation it is in, so the names it offers are
@@ -1208,6 +1350,9 @@ fn build_typing_line() -> gtk::Label {
 /// post, never from whatever is open behind it -- the same mistake that
 /// once sent replies to the wrong channel.
 fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gtk::TextView) {
+    for view in [composer, thread_composer] {
+        watch_spelling(ui, view);
+    }
     attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
     attach_mentions(ui, thread_composer, |ui| {
         let root = ui.thread_root.borrow().clone()?;
@@ -3104,8 +3249,6 @@ fn bind_post_row(
     else {
         return;
     };
-    set_presence(&dot, data.presence());
-
     // A separator is a day label and nothing else.
     let is_separator = data.is_separator();
     day.set_visible(is_separator);
@@ -3129,6 +3272,7 @@ fn bind_post_row(
     // hidden with opacity still claims its 32 pixels of height, which pushed
     // every line of a block a row apart and undid the grouping entirely.
     face.set_visible(!grouped);
+    set_presence(&dot, data.presence(), !grouped);
     main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
     face.set_text(Some(&data.author()));
     face.set_custom_image(data.avatar().as_ref());
@@ -3217,6 +3361,17 @@ const TYPING_LIFETIME: std::time::Duration = std::time::Duration::from_secs(7);
 /// How tall the composer grows before it starts scrolling: about six
 /// lines, after which the conversation would start losing the window.
 const COMPOSER_MAX_HEIGHT: i32 = 160;
+/// The tag carrying the red squiggle, by the name its buffer knows it by.
+const MISSPELLED: &str = "mmrs-misspelled";
+/// How long the typing has to stop before the dictionary is asked.
+///
+/// Checking on every keystroke would run both dictionaries over the
+/// whole message once per letter of it, and mark a word wrong while it
+/// is still half written, which is the thing that makes spell-checking
+/// feel like being nagged.
+const SPELL_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+/// How many replacements the right-click menu offers.
+const SUGGESTIONS_OFFERED: usize = 6;
 const PREVIEW_WIDTH: i32 = 520;
 const PREVIEW_IMAGE: i32 = 80;
 const MENTIONS_WIDTH: i32 = 340;
@@ -4548,6 +4703,40 @@ impl Ui {
         self.typing_line.set_text(&said);
     }
 
+    /// Underline every word in a composer that no dictionary knows.
+    ///
+    /// The whole buffer each time rather than the word just typed: a
+    /// message is a few hundred characters, checking it is microseconds,
+    /// and tracking which span changed is how a stale underline survives
+    /// an edit three words to its left.
+    fn mark_mistakes(&self, buffer: &gtk::TextBuffer) {
+        let spelling = self.spelling.borrow();
+        let Some(spelling) = spelling.as_ref() else {
+            return;
+        };
+        let (start, end) = buffer.bounds();
+        buffer.remove_tag_by_name(MISSPELLED, &start, &end);
+        let text = buffer.text(&start, &end, false).to_string();
+        for word in spelling.mistakes(&text) {
+            buffer.apply_tag_by_name(
+                MISSPELLED,
+                &buffer.iter_at_offset(offset(word.start)),
+                &buffer.iter_at_offset(offset(word.end)),
+            );
+        }
+    }
+
+    /// The dictionaries have finished loading on their own thread.
+    fn use_spelling(&self, spelling: crate::spelling::Spelling) {
+        let languages = spelling.languages().join(", ");
+        *self.spelling.borrow_mut() = Some(spelling);
+        if languages.is_empty() {
+            // Said once, quietly: no dictionaries installed is a thing
+            // the reader can fix, and silent absence is not a clue.
+            self.set_status("no spelling dictionaries found");
+        }
+    }
+
     /// Merge a page of history fetched because the reader reached the top.
     fn on_older_posts(&self, channel: &ChannelId, page: &mm_types::PostList) {
         self.loading_older.set(false);
@@ -4671,7 +4860,7 @@ impl Ui {
             face.set_custom_image(self.avatars.borrow().get(user));
             // The sidebar is the one place presence is actually used for
             // a decision: it is where the reader picks who to ask.
-            set_presence(&dot, self.store.borrow().presence(user));
+            set_presence(&dot, self.store.borrow().presence(user), true);
             return gutter.upcast();
         }
         // Icon names are not checked at build time: a name the theme does
