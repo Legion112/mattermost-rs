@@ -147,6 +147,12 @@ pub enum Event {
     Users(Vec<User>),
     /// The reader's preferences, which carry saved posts among much else.
     Preferences(Vec<mm_types::Preference>),
+    /// The threads this reader follows, with the account-wide totals
+    /// behind the sidebar badge.
+    Threads(mm_types::ThreadList),
+    /// This reader's unsent messages, from the server, so what was typed
+    /// in another client is waiting here too.
+    Drafts(Vec<mm_types::Draft>),
     /// Every channel the reader is in, as the server has just stated it.
     ///
     /// Sent at the end of a sync so the window can forget channels a

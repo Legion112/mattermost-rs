@@ -369,6 +369,32 @@ category, but it was not read out of the server or the webapp source. An
 empty category being hidden rather than drawn as a bare heading is the same
 kind of inference.
 
+## Followed threads and drafts
+
+Verified against the live server on 2026-10-27.
+
+`GET /users/{user_id}/teams/{team_id}/threads` returns
+`{threads, total, total_unread_threads, total_unread_mentions,
+total_unread_urgent_mentions}`.
+
+- **The totals are the account's, not the page's.** Asking for fifty of
+  961 still reports 961. That is what the sidebar badge wants: counting
+  the page would stop the badge rising at the page size.
+- **`extended=false` returns participants as objects carrying only an
+  `id`.** With `extended=true` they are full users. Both parse into the
+  same type with `#[serde(default)]`, so the cheap form costs nothing but
+  a lookup in the roster this client already has.
+- The two thread types still differ, as recorded above: the response type
+  here has `unread_replies` and `last_viewed_at`; the membership type on
+  the WebSocket has `following` and `last_view_at` and no
+  `unread_replies` at all.
+
+`GET /users/{user_id}/teams/{team_id}/drafts` returns a bare array.
+Drafts are **server-side**, so a message half-typed in the web app is
+waiting in this one. A draft carries `root_id` when it is a reply, and
+the server keeps one whose text has been deleted while it still has
+`file_ids`.
+
 ## Reactions
 
 Verified against 12.0.1 on 2026-10-26.

@@ -6,8 +6,8 @@
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
-    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, FileId, Post,
-    PostId, PostList, Preference, Reaction, Team, TeamId, User, UserId,
+    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, Draft, FileId,
+    Post, PostId, PostList, Preference, Reaction, Team, TeamId, ThreadList, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -234,6 +234,39 @@ pub fn parse_category(resp: &HttpResponse) -> Result<ChannelCategory, ApiError> 
         resp,
         "PUT /users/{user}/teams/{team}/channels/categories/{id}",
     )
+}
+
+/// The threads this reader follows, newest reply first.
+///
+/// `extended=false`: participants come back as objects carrying only an
+/// id, which the roster already knows how to name, and asking for the
+/// full users would fetch every participant of every thread on top of a
+/// sync that has already fetched most of them.
+///
+/// The totals in the answer are the account's, not the page's, which is
+/// what the sidebar badge wants.
+#[must_use]
+pub fn my_threads(user: &UserId, team: &TeamId, per_page: u32) -> HttpRequest {
+    HttpRequest::get(format!("{API}/users/{user}/teams/{team}/threads"))
+        .q("extended", "false")
+        .q("per_page", per_page)
+}
+
+pub fn parse_threads(resp: &HttpResponse) -> Result<ThreadList, ApiError> {
+    parse_json(resp, "GET /users/{user}/teams/{team}/threads")
+}
+
+/// This reader's unsent messages for a team.
+///
+/// Server-side, so they follow the reader between clients: what the web
+/// app has half-typed is what this lists.
+#[must_use]
+pub fn my_drafts(user: &UserId, team: &TeamId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/users/{user}/teams/{team}/drafts"))
+}
+
+pub fn parse_drafts(resp: &HttpResponse) -> Result<Vec<Draft>, ApiError> {
+    parse_json(resp, "GET /users/{user}/teams/{team}/drafts")
 }
 
 /// How many people are in a channel, for the channel header.

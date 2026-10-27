@@ -71,6 +71,11 @@ struct Ui {
     login: Rc<LoginPage>,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     selected: Rc<RefCell<Option<ChannelId>>>,
+    /// Which of the three views the middle of the window is showing.
+    pane: Rc<RefCell<Pane>>,
+    middle: gtk::Stack,
+    threads_list: gtk::ListBox,
+    drafts_list: gtk::ListBox,
     sidebar: gtk::ListBox,
     identity: gtk::Label,
     /// Decoded avatars, by user. A texture is a GPU-side object and must be
@@ -374,8 +379,20 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         .label("starting…")
         .build();
 
+    // The conversation, the Threads view and the Drafts view take turns
+    // in the same space. The status line and the composer stay put under
+    // all three -- the composer insensitive for the two that have nothing
+    // to send to.
+    let (threads_list, threads_page) = build_view_list();
+    let (drafts_list, drafts_page) = build_view_list();
+    let middle = gtk::Stack::new();
+    middle.add_named(&scroller, Some("channel"));
+    middle.add_named(&threads_page, Some("threads"));
+    middle.add_named(&drafts_page, Some("drafts"));
+    middle.set_vexpand(true);
+
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    content.append(&scroller);
+    content.append(&middle);
     content.append(&status);
     content.append(&composer);
 
@@ -405,6 +422,10 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         server,
         commands: commands.clone(),
         selected: Rc::new(RefCell::new(None)),
+        pane: Rc::new(RefCell::new(Pane::Channel)),
+        middle: middle.clone(),
+        threads_list: threads_list.clone(),
+        drafts_list: drafts_list.clone(),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
         thread_posts: thread_posts.clone(),
@@ -435,6 +456,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     };
 
     wire(&ui, &refresh, &sidebar, &composer, commands);
+    wire_views(&ui);
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
     ui
@@ -527,6 +549,168 @@ fn wire_thread(
 ///
 /// Separate from `build` only so neither function grows past the point where
 /// it can be read in one go.
+/// A sidebar entry for one of the two views, drawn like a channel so
+/// the list reads as one list.
+fn view_entry(name: &str, icon: &str, label: &str, count: i64, dot: bool) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.append(&gtk::Image::from_icon_name(icon));
+    line.append(
+        &gtk::Label::builder()
+            .label(label)
+            .xalign(0.0)
+            .hexpand(true)
+            .css_classes(if count > 0 {
+                ["heading"]
+            } else {
+                ["dim-label"]
+            })
+            .build(),
+    );
+    if count > 0 {
+        line.append(
+            &gtk::Label::builder()
+                .label(count.to_string())
+                .css_classes(["accent", "caption-heading"])
+                .build(),
+        );
+    } else if dot {
+        line.append(
+            &gtk::Label::builder()
+                .label("●")
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+    }
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.set_widget_name(name);
+    row
+}
+
+/// What a view says when it has nothing in it. Better than a blank
+/// pane, which reads as something that failed to load.
+fn empty_view(what: &str) -> gtk::ListBoxRow {
+    let label = gtk::Label::builder()
+        .label(what)
+        .margin_top(24)
+        .css_classes(["dim-label"])
+        .build();
+    gtk::ListBoxRow::builder()
+        .child(&label)
+        .selectable(false)
+        .activatable(false)
+        .build()
+}
+
+/// A list for one of the two views: the Threads list and the Drafts
+/// list are the same furniture with different rows in them.
+fn build_view_list() -> (gtk::ListBox, gtk::ScrolledWindow) {
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["navigation-sidebar"])
+        .build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&list)
+        // Never horizontally, for the reason the message list gives: a
+        // long line has to wrap rather than run off the edge.
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .build();
+    (list, scroll)
+}
+
+/// One row in the Threads or the Drafts view: a heading line, a preview
+/// of the message, and a line of detail under it.
+fn view_row(
+    heading: &str,
+    when: &str,
+    preview: &str,
+    detail: &str,
+    unread: bool,
+) -> gtk::ListBoxRow {
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let who = gtk::Label::builder()
+        .label(heading)
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["heading"])
+        .build();
+    top.append(&who);
+    if unread {
+        top.append(
+            &gtk::Label::builder()
+                .label("●")
+                .css_classes(["accent", "caption"])
+                .build(),
+        );
+    }
+    top.append(
+        &gtk::Label::builder()
+            .label(when)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+
+    // Two lines of the message and no more: the view is a list of things
+    // to go to, not a place to read them.
+    let body = gtk::Label::builder()
+        .label(preview)
+        .xalign(0.0)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .natural_wrap_mode(gtk::NaturalWrapMode::None)
+        .lines(2)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    column.set_margin_start(12);
+    column.set_margin_end(12);
+    column.set_margin_top(8);
+    column.set_margin_bottom(8);
+    column.append(&top);
+    column.append(&body);
+    column.append(
+        &gtk::Label::builder()
+            .label(detail)
+            .xalign(0.0)
+            .css_classes(["dim-label", "caption"])
+            .build(),
+    );
+
+    gtk::ListBoxRow::builder().child(&column).build()
+}
+
+/// Connect the two views: a row in either is a place to go.
+fn wire_views(ui: &Ui) {
+    {
+        let ui = ui.clone();
+        // The row's name is the root post, and opening a thread is what
+        // the thread pane is already for.
+        ui.threads_list
+            .clone()
+            .connect_row_activated(move |_, row| {
+                let root = PostId::new(row.widget_name().as_str());
+                if root.as_str().is_empty() {
+                    return;
+                }
+                ui.commands.send(Command::OpenThread(root)).ok();
+            });
+    }
+    {
+        let ui = ui.clone();
+        // A draft's row is named for the channel it is waiting in, and
+        // going to a draft means going to that channel.
+        ui.drafts_list.clone().connect_row_activated(move |_, row| {
+            let channel = ChannelId::new(row.widget_name().as_str());
+            if channel.as_str().is_empty() {
+                return;
+            }
+            ui.show_channel(&channel);
+        });
+    }
+}
+
 /// Connect folding a category shut and opening it again.
 fn wire_categories(ui: &Ui, sidebar: &gtk::ListBox) {
     let ui = ui.clone();
@@ -553,9 +737,23 @@ fn wire_selection(
     let thread_pane = ui.thread_pane.clone();
     let unread_from = Rc::clone(&ui.unread_from);
     let store = Rc::clone(&ui.store);
+    let ui_for_views = ui.clone();
     sidebar.connect_row_selected(move |_, row| {
         let Some(row) = row else { return };
-        let id = ChannelId::new(row.widget_name().to_string());
+        let name = row.widget_name();
+        // The two views sit in the same list as the channels and are
+        // selected the same way, but they open something else.
+        if name == THREADS_ROW {
+            ui_for_views.show_pane(&Pane::Threads);
+            ui_for_views.set_title("Threads", "");
+            return;
+        }
+        if name == DRAFTS_ROW {
+            ui_for_views.show_pane(&Pane::Drafts);
+            ui_for_views.set_title("Drafts", "");
+            return;
+        }
+        let id = ChannelId::new(name.to_string());
 
         // `refresh_sidebar` rebuilds every row and re-selects the open
         // channel, so this handler fires on its own output. Without this
@@ -578,6 +776,7 @@ fn wire_selection(
         thread_posts.remove_all();
         thread_pane.set_visible(false);
         *selected.borrow_mut() = Some(id.clone());
+        ui_for_views.show_pane(&Pane::Channel);
         commands.send(Command::OpenChannel(id.clone())).ok();
         commands.send(Command::MarkRead(id)).ok();
     });
@@ -846,6 +1045,28 @@ fn describe_day(at: mm_types::Timestamp, date: &mm_core::CivilDate) -> String {
         // rule still draws, just without a label.
         _ => String::new(),
     }
+}
+
+/// When something last moved, for a list of things rather than a
+/// conversation: the time for today, the date for anything older. A list
+/// spanning weeks reads as nonsense with nothing but clock times on it.
+fn describe_when(at: mm_types::Timestamp) -> String {
+    use chrono::{Datelike, Local, TimeZone};
+
+    let chrono::offset::LocalResult::Single(dt) = Local.timestamp_millis_opt(at.millis()) else {
+        return String::new();
+    };
+    let today = Local::now().date_naive();
+    if dt.date_naive() == today {
+        return dt.format("%H:%M").to_string();
+    }
+    if today.pred_opt() == Some(dt.date_naive()) {
+        return "Yesterday".to_owned();
+    }
+    if dt.year() == today.year() {
+        return dt.format("%-d %b").to_string();
+    }
+    dt.format("%-d %b %Y").to_string()
 }
 
 fn clock_time(millis: i64) -> String {
@@ -1818,6 +2039,26 @@ fn decode_mini_preview(encoded: &str) -> Option<gdk::Texture> {
     gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()
 }
 
+/// Which of the three things the middle of the window is showing.
+///
+/// Mattermost puts Threads and Drafts above the channel list and swaps
+/// the conversation out for them, rather than opening them in a window
+/// of their own, and a reader coming from that client expects the back
+/// of the sidebar to work the same way.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Pane {
+    #[default]
+    Channel,
+    Threads,
+    Drafts,
+}
+
+/// What the sidebar rows for the two views are called, so a click can
+/// tell them from a channel. A channel id is 26 base32 characters, so
+/// neither can collide with one.
+const THREADS_ROW: &str = "mmrs:threads";
+const DRAFTS_ROW: &str = "mmrs:drafts";
+
 /// How much of the window a thread takes when it is open.
 const THREAD_PANE_WIDTH: i32 = 380;
 
@@ -2157,6 +2398,154 @@ impl Ui {
         }
     }
 
+    /// Put Threads and Drafts above the categories, the way Mattermost
+    /// stacks them.
+    ///
+    /// Threads only when collapsed threads are on: without them there is
+    /// nothing to follow, and Mattermost hides the view for the same
+    /// reason. Drafts only when there are some, which is also what it
+    /// does -- an always-present "Drafts (0)" is a row that never does
+    /// anything.
+    fn append_view_entries(&self) {
+        let store = self.store.borrow();
+        if store.threading == Threading::Collapsed {
+            let totals = store.thread_totals;
+            self.sidebar.append(&view_entry(
+                THREADS_ROW,
+                "mail-reply-all-symbolic",
+                "Threads",
+                totals.unread_mentions,
+                totals.unread_threads > 0,
+            ));
+        }
+        let drafts = store.pending_drafts().len();
+        if drafts > 0 {
+            self.sidebar.append(&view_entry(
+                DRAFTS_ROW,
+                "document-edit-symbolic",
+                "Drafts",
+                i64::try_from(drafts).unwrap_or(i64::MAX),
+                false,
+            ));
+        }
+    }
+
+    /// Show one of the three views, and draw it.
+    ///
+    /// One place decides what the middle of the window holds, so the
+    /// composer, the stack page and the heading can never disagree about
+    /// which view is up.
+    fn show_pane(&self, pane: &Pane) {
+        *self.pane.borrow_mut() = pane.clone();
+        match pane {
+            Pane::Channel => {
+                self.middle.set_visible_child_name("channel");
+                self.composer.set_visible(true);
+                if let Some(open) = self.selected.borrow().clone() {
+                    self.refresh_heading(&open);
+                }
+            }
+            Pane::Threads => {
+                self.middle.set_visible_child_name("threads");
+                // Nothing to send to: these views are lists of places.
+                self.composer.set_visible(false);
+                self.refresh_threads_view();
+            }
+            Pane::Drafts => {
+                self.middle.set_visible_child_name("drafts");
+                self.composer.set_visible(false);
+                self.refresh_drafts_view();
+            }
+        }
+    }
+
+    /// Go to a channel from somewhere that is not the sidebar -- a draft,
+    /// so far. Selecting the row is what opens it: the sidebar's own
+    /// handler does the fetching and the mark-read, and going around it
+    /// would mean two places that know how to open a channel.
+    fn show_channel(&self, channel: &ChannelId) {
+        self.show_pane(&Pane::Channel);
+        let row = (0..)
+            .map_while(|i| self.sidebar.row_at_index(i))
+            .find(|row| row.widget_name() == channel.as_str());
+        if let Some(row) = row {
+            self.sidebar.select_row(Some(&row));
+        }
+    }
+
+    /// Draw the followed threads.
+    fn refresh_threads_view(&self) {
+        while let Some(old) = self.threads_list.first_child() {
+            self.threads_list.remove(&old);
+        }
+        let store = self.store.borrow();
+        for thread in store.followed_threads() {
+            let Some(post) = &thread.post else { continue };
+            let (author, _) = store.post_author(post);
+            let heading = match store.channels.get(&post.channel_id) {
+                Some(channel) => format!("{author} · {}", store.channel_label(channel)),
+                // A thread in a channel this sync has not described yet:
+                // the name is worth more than the id, and the id is worth
+                // more than nothing.
+                None => author,
+            };
+            let replies = if thread.reply_count == 1 {
+                "1 reply".to_owned()
+            } else {
+                format!("{} replies", thread.reply_count)
+            };
+            let detail = if thread.unread_replies > 0 {
+                format!("{replies} · {} new", thread.unread_replies)
+            } else {
+                replies
+            };
+            let row = view_row(
+                &heading,
+                &describe_when(thread.last_reply_at),
+                &mm_md::parse(&post.message).to_plain(),
+                &detail,
+                thread.is_unread(),
+            );
+            row.set_widget_name(thread.id.as_str());
+            self.threads_list.append(&row);
+        }
+        if self.threads_list.first_child().is_none() {
+            self.threads_list.append(&empty_view("No followed threads"));
+        }
+    }
+
+    /// Draw the unsent messages.
+    fn refresh_drafts_view(&self) {
+        while let Some(old) = self.drafts_list.first_child() {
+            self.drafts_list.remove(&old);
+        }
+        let store = self.store.borrow();
+        for draft in store.pending_drafts() {
+            let name = match store.channels.get(&draft.channel_id) {
+                Some(channel) => store.channel_label(channel),
+                None => draft.channel_id.to_string(),
+            };
+            let detail = match (draft.is_reply(), draft.file_ids.len()) {
+                (true, 0) => "a reply".to_owned(),
+                (true, n) => format!("a reply · {n} attached"),
+                (false, 0) => String::new(),
+                (false, n) => format!("{n} attached"),
+            };
+            let row = view_row(
+                &name,
+                &describe_when(draft.update_at),
+                &mm_md::parse(&draft.message).to_plain(),
+                &detail,
+                false,
+            );
+            row.set_widget_name(draft.channel_id.as_str());
+            self.drafts_list.append(&row);
+        }
+        if self.drafts_list.first_child().is_none() {
+            self.drafts_list.append(&empty_view("No drafts"));
+        }
+    }
+
     /// Fold a category shut, or open it again.
     ///
     /// Applied here and sent on, rather than waited for: the server owns
@@ -2224,6 +2613,8 @@ impl Ui {
             self.sidebar.remove(&child);
         }
 
+        self.append_view_entries();
+
         let mut to_select = None;
         for section in &sections {
             self.sidebar.append(&section_header(section));
@@ -2277,10 +2668,15 @@ impl Ui {
             // first, so this lands on whatever most wants attention.
             None if keep.is_none() => {
                 // Row 0 is a section heading now, and headings are not
-                // selectable: walk to the first row that is.
+                // selectable: walk to the first row that is. Threads and
+                // Drafts are selectable and come first, and landing on
+                // one of those would open a list rather than a
+                // conversation -- a window that starts on an empty
+                // Drafts view reads as a window that failed to load.
                 let first = (0..)
                     .map_while(|i| self.sidebar.row_at_index(i))
-                    .find(gtk::ListBoxRow::is_selectable);
+                    .filter(gtk::ListBoxRow::is_selectable)
+                    .find(|row| !row.widget_name().starts_with("mmrs:"));
                 if let Some(first) = first {
                     self.sidebar.select_row(Some(&first));
                 }
@@ -2549,6 +2945,26 @@ impl Ui {
                     self.sidebar_soon();
                 }
             }
+            Event::Threads(list) => {
+                self.store.borrow_mut().apply_threads(&list);
+                // The badge is not part of the sections the sidebar
+                // compares against, so say outright that it has moved.
+                self.sidebar_stale.set(true);
+                self.sidebar_soon();
+                if *self.pane.borrow() == Pane::Threads {
+                    self.refresh_threads_view();
+                }
+            }
+            Event::Drafts(drafts) => {
+                self.store.borrow_mut().apply_drafts(&drafts);
+                // Likewise: whether there is a Drafts row at all depends
+                // on this, and the sections have not changed.
+                self.sidebar_stale.set(true);
+                self.sidebar_soon();
+                if *self.pane.borrow() == Pane::Drafts {
+                    self.refresh_drafts_view();
+                }
+            }
             Event::Preferences(prefs) => {
                 self.store.borrow_mut().apply_preferences(&prefs);
             }
@@ -2703,6 +3119,13 @@ impl Ui {
 
     /// Put the open channel's name, and how many people are in it, in the
     /// window's title bar.
+    /// What the window's title bar says. One place, so the two views and
+    /// the conversation cannot leave each other's heading up.
+    fn set_title(&self, name: &str, under: &str) {
+        self.title.set_title(name);
+        self.title.set_subtitle(under);
+    }
+
     fn refresh_heading(&self, channel: &ChannelId) {
         let heading = self.store.borrow().channel_heading(channel);
         self.title.set_title(&heading.name);

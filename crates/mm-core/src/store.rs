@@ -34,6 +34,10 @@ pub enum Change {
     Sidebar,
     /// Read state was pushed for a set of channels at once.
     ReadState,
+    /// The followed-thread list changed.
+    Threads,
+    /// The unsent-message list changed.
+    Drafts,
 }
 
 /// What the window's title bar says about the open channel.
@@ -57,6 +61,17 @@ fn participants(display_name: &str) -> Option<i64> {
         .filter(|part| !part.trim().is_empty())
         .count();
     (named > 0).then(|| i64::try_from(named).unwrap_or(i64::MAX))
+}
+
+/// How much of the Threads view wants attention, account-wide.
+///
+/// The server's own totals rather than a count of the page in hand: one
+/// page of threads is not all of them, and a badge that counted the page
+/// would stop rising at twenty-five.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreadTotals {
+    pub unread_threads: i64,
+    pub unread_mentions: i64,
 }
 
 /// One emoji's worth of reaction on a post.
@@ -125,6 +140,16 @@ pub struct Store {
     pub prefs: BTreeMap<(String, String), String>,
     /// Member counts, fetched per channel when it is opened.
     pub stats: HashMap<ChannelId, ChannelStats>,
+    /// The threads this reader follows, as the server last listed them,
+    /// and the account-wide totals that go on the sidebar badge. Replaced
+    /// wholesale rather than merged: unlike a channel's posts this is a
+    /// complete answer to one question, and a thread the reader has
+    /// stopped following has to be able to leave the list.
+    pub threads: Vec<mm_types::UserThread>,
+    pub thread_totals: ThreadTotals,
+    /// Unsent messages, from the server, so what was typed in another
+    /// client is waiting here too. Replaced wholesale for the same reason.
+    pub drafts: Vec<mm_types::Draft>,
     /// Who reacted with what, and when they first did. Keyed separately from
     /// the post because reactions do not move a post's `update_at`, so they
     /// cannot ride the newest-wins join that posts use.
@@ -156,6 +181,76 @@ impl Store {
     pub fn apply_categories(&mut self, list: &CategoryList) -> Vec<Change> {
         self.categories = list.in_order().into_iter().cloned().collect();
         vec![Change::Sidebar]
+    }
+
+    /// Take in the followed threads, and the totals behind the badge.
+    ///
+    /// The root posts are folded into the post store on the way through,
+    /// so the view can be drawn from the same rows a channel is drawn
+    /// from -- and so a thread opened from the list has its root already.
+    pub fn apply_threads(&mut self, list: &mm_types::ThreadList) -> Vec<Change> {
+        for thread in &list.threads {
+            if let Some(post) = &thread.post {
+                self.store_post(post.clone());
+            }
+        }
+        self.threads.clone_from(&list.threads);
+        self.thread_totals = ThreadTotals {
+            unread_threads: list.total_unread_threads,
+            unread_mentions: list.total_unread_mentions,
+        };
+        vec![Change::Sidebar, Change::Threads]
+    }
+
+    /// The followed threads worth drawing, the ones with new replies
+    /// first and then by when they were last replied to.
+    ///
+    /// Mattermost sorts the view by last reply alone. Unread first is a
+    /// deliberate difference and the same rule the sidebar already uses:
+    /// the reason to open this view is to find what has moved.
+    #[must_use]
+    pub fn followed_threads(&self) -> Vec<&mm_types::UserThread> {
+        let mut out: Vec<&mm_types::UserThread> = self
+            .threads
+            .iter()
+            // A thread whose root we were not given cannot be drawn, and
+            // one the server has deleted should not be.
+            .filter(|t| t.post.is_some() && t.delete_at.millis() == 0)
+            .collect();
+        out.sort_by(|a, b| {
+            b.is_unread()
+                .cmp(&a.is_unread())
+                .then_with(|| b.last_reply_at.millis().cmp(&a.last_reply_at.millis()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        out
+    }
+
+    /// Take in the unsent messages.
+    pub fn apply_drafts(&mut self, drafts: &[mm_types::Draft]) -> Vec<Change> {
+        self.drafts = drafts.to_vec();
+        vec![Change::Sidebar, Change::Drafts]
+    }
+
+    /// The drafts worth drawing, most recently touched first.
+    ///
+    /// An empty one is skipped rather than drawn as a blank row: the
+    /// server keeps a draft whose text was deleted while it still has
+    /// files, and drops it only later.
+    #[must_use]
+    pub fn pending_drafts(&self) -> Vec<&mm_types::Draft> {
+        let mut out: Vec<&mm_types::Draft> = self
+            .drafts
+            .iter()
+            .filter(|d| !d.is_empty() && d.delete_at.millis() == 0)
+            .collect();
+        out.sort_by(|a, b| {
+            b.update_at
+                .millis()
+                .cmp(&a.update_at.millis())
+                .then_with(|| a.channel_id.cmp(&b.channel_id))
+        });
+        out
     }
 
     /// Fold a category shut, or open it again.

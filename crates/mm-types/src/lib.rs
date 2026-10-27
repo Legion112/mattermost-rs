@@ -26,10 +26,12 @@
 mod attachment;
 mod category;
 mod channel;
+mod draft;
 mod ids;
 mod post;
 mod prefs;
 mod reaction;
+mod thread;
 mod time;
 mod user;
 pub mod wire;
@@ -39,9 +41,11 @@ pub use category::{CategoryKind, CategoryList, CategorySorting, ChannelCategory}
 pub use channel::{
     Channel, ChannelMember, ChannelStats, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION,
 };
+pub use draft::Draft;
 pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
 pub use post::{FileRef, Post, PostList};
 pub use prefs::{NameFormat, Preference, is_true, keys};
 pub use reaction::Reaction;
+pub use thread::{ThreadList, UserThread};
 pub use time::Timestamp;
 pub use user::{Presence, Team, User};

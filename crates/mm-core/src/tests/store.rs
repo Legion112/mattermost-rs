@@ -1801,3 +1801,105 @@ fn a_category_folds_and_unfolds_and_says_when_nothing_moved() {
             .collapsed
     );
 }
+
+/// The Threads view is ordered by what has moved: unread first, then by
+/// the most recent reply. Mattermost sorts by last reply alone; this is a
+/// deliberate difference, and the same rule the sidebar already follows.
+#[test]
+fn followed_threads_put_what_moved_first() {
+    let mut store = Store::new(UserId::new("me"), Threading::Collapsed);
+    let thread = |id: &str, at: i64, unread: i64| mm_types::UserThread {
+        id: PostId::new(id),
+        last_reply_at: Timestamp(at),
+        unread_replies: unread,
+        post: Some(Post {
+            id: PostId::new(id),
+            message: format!("root {id}"),
+            ..Post::default()
+        }),
+        ..mm_types::UserThread::default()
+    };
+    let changes = store.apply_threads(&mm_types::ThreadList {
+        threads: vec![
+            thread("p1", 300, 0),
+            thread("p2", 100, 2),
+            thread("p3", 200, 0),
+        ],
+        total_unread_threads: 1,
+        total_unread_mentions: 4,
+        ..mm_types::ThreadList::default()
+    });
+    assert!(changes.contains(&Change::Threads));
+
+    let order: Vec<&str> = store
+        .followed_threads()
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    // p2 is unread so it leads despite being the oldest; the rest by reply.
+    assert_eq!(order, ["p2", "p1", "p3"]);
+
+    // The badge counts the account, not the page in hand.
+    assert_eq!(store.thread_totals.unread_threads, 1);
+    assert_eq!(store.thread_totals.unread_mentions, 4);
+
+    // The roots are folded into the post store, so opening one from the
+    // list has its root already.
+    assert_eq!(
+        store
+            .posts
+            .get(&PostId::new("p1"))
+            .expect("the root")
+            .message,
+        "root p1"
+    );
+}
+
+/// A thread with no root, and a deleted one, are not drawn: the first
+/// cannot be, and the second should not be.
+#[test]
+fn a_rootless_or_deleted_thread_is_not_drawn() {
+    let mut store = Store::new(UserId::new("me"), Threading::Collapsed);
+    store.apply_threads(&mm_types::ThreadList {
+        threads: vec![
+            mm_types::UserThread {
+                id: PostId::new("p1"),
+                ..mm_types::UserThread::default()
+            },
+            mm_types::UserThread {
+                id: PostId::new("p2"),
+                delete_at: Timestamp(5),
+                post: Some(Post::default()),
+                ..mm_types::UserThread::default()
+            },
+        ],
+        ..mm_types::ThreadList::default()
+    });
+    assert!(store.followed_threads().is_empty());
+}
+
+/// Drafts are listed most recently touched first, and an empty one is
+/// skipped rather than drawn as a blank row.
+#[test]
+fn drafts_are_newest_first_and_never_blank() {
+    let mut store = Store::new(UserId::new("me"), Threading::Flat);
+    let draft = |channel: &str, at: i64, text: &str| mm_types::Draft {
+        channel_id: ChannelId::new(channel),
+        update_at: Timestamp(at),
+        message: text.to_owned(),
+        ..mm_types::Draft::default()
+    };
+    let changes = store.apply_drafts(&[
+        draft("c1", 100, "older"),
+        draft("c2", 300, "newest"),
+        draft("c3", 200, "   "),
+    ]);
+    assert!(changes.contains(&Change::Drafts));
+
+    let order: Vec<&str> = store
+        .pending_drafts()
+        .iter()
+        .map(|d| d.channel_id.as_str())
+        .collect();
+    assert_eq!(order, ["c2", "c1"]);
+}

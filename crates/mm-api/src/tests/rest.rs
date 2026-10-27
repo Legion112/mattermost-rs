@@ -214,6 +214,56 @@ fn updating_a_category_sends_all_of_it_back() {
     assert!(back.collapsed);
 }
 
+/// The threads endpoint, and the totals that feed the sidebar badge --
+/// which are the account's, not the page's, so asking for one page and
+/// counting it would under-report.
+#[test]
+fn the_threads_endpoint_reports_account_wide_totals() {
+    let user = UserId::new("u1");
+    let team = TeamId::new("t1");
+    let request = my_threads(&user, &team, 25);
+    assert_eq!(request.path, "/api/v4/users/u1/teams/t1/threads");
+    assert!(
+        request
+            .query
+            .contains(&("per_page".to_owned(), "25".to_owned()))
+    );
+    // Participants are asked for unextended: the roster already names them.
+    assert!(
+        request
+            .query
+            .contains(&("extended".to_owned(), "false".to_owned()))
+    );
+
+    let list = parse_threads(&ok(
+        r#"{"total":9,"total_unread_threads":2,"total_unread_mentions":1,
+            "threads":[{"id":"p1","reply_count":3,"unread_replies":2,
+                        "participants":[{"id":"u2"}],
+                        "post":{"id":"p1","message":"root"}}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(list.total_unread_threads, 2);
+    assert_eq!(list.threads.len(), 1);
+    assert_eq!(list.threads[0].unread_replies, 2);
+}
+
+/// Drafts are server-side, so this lists what was typed in any client.
+#[test]
+fn the_drafts_endpoint_lists_unsent_messages() {
+    let user = UserId::new("u1");
+    let team = TeamId::new("t1");
+    assert_eq!(
+        my_drafts(&user, &team).path,
+        "/api/v4/users/u1/teams/t1/drafts"
+    );
+    let drafts = parse_drafts(&ok(
+        r#"[{"channel_id":"c1","message":"half a thought","update_at":5}]"#,
+    ))
+    .unwrap();
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].message, "half a thought");
+}
+
 /// The stats endpoint feeds the member count in the channel header.
 #[test]
 fn channel_stats_reads_the_member_count() {

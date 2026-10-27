@@ -624,6 +624,12 @@ async fn resolve_settings(
     (config, preferences)
 }
 
+/// How many followed threads to ask for. The view shows the ones that
+/// have moved, and a reader with more than this many followed threads is
+/// not going to read past it; the totals for the badge come back whole
+/// however few are asked for.
+const THREAD_PAGE: u32 = 50;
+
 /// The client-config keys `apply_settings` reads.
 const SETTING_KEYS: [&str; 3] = [
     "CollapsedThreads",
@@ -720,12 +726,29 @@ async fn sync(
         let member_request = rest::my_channel_members(&team.id);
         // Addressed by explicit user id: there is no `/users/me/` form
         // for categories.
-        let category_request = rest::my_categories(&UserId::new(&session.user_id), &team.id);
-        let (channels, members, categories) = tokio::join!(
+        let me = UserId::new(&session.user_id);
+        let category_request = rest::my_categories(&me, &team.id);
+        // The followed threads and the unsent messages ride along: both
+        // are per-team, both are one request, and both are wanted before
+        // the reader can click the view that shows them.
+        let thread_request = rest::my_threads(&me, &team.id, THREAD_PAGE);
+        let draft_request = rest::my_drafts(&me, &team.id);
+        let (channels, members, categories, threads, drafts) = tokio::join!(
             fetch(client, &channel_request, rest::parse_channels),
             fetch(client, &member_request, rest::parse_channel_members),
             fetch(client, &category_request, rest::parse_categories),
+            fetch(client, &thread_request, rest::parse_threads),
+            fetch(client, &draft_request, rest::parse_drafts),
         );
+        // Neither is worth a failure the reader has to read: the view
+        // they feed is empty until the next sync, and the channel list
+        // beside them is the thing they came for.
+        if let Ok(threads) = threads {
+            let _ = events.send(Event::Threads(threads)).await;
+        }
+        if let Ok(drafts) = drafts {
+            let _ = events.send(Event::Drafts(drafts)).await;
+        }
 
         match channels {
             Ok(channels) => {
