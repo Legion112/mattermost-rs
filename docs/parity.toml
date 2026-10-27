@@ -384,7 +384,20 @@ there. The one piece of searching that needs no endpoint -- every channel the \
 reader is in is already in the store -- so it is ranked locally: a name that \
 starts with what was typed, then one where a word does, then one that merely \
 contains it, and unread first within each tier. Verified on a live account by \
-typing `env` and landing in Prod-environment."""
+typing `env` and landing in Prod-environment.
+
+**A channel with no row in the sidebar used to be unreachable from here.** \
+Going somewhere was done by finding its row and selecting it, and letting \
+the sidebar's own handler do the work -- so a channel in a folded category, \
+or one hidden by the unread filter, was found by the switcher, selected \
+nothing, and left the window where it was with nothing on screen admitting \
+it. Opening a channel is its own thing now and the sidebar's selection \
+reflects it, which is the right way round; and the category it is in is \
+unfolded, because arriving somewhere the reader cannot see in the sidebar is \
+disorienting. The unfolding is sent to the server too, so it follows them to \
+their other clients. Verified on a live account: `tech_team`, in a folded \
+FAVORITES, opened and the category came open with it -- where before, \
+clicking the row and pressing Return had both done nothing at all."""
 
 [[feature]]
 id       = "search.people_and_channels"
