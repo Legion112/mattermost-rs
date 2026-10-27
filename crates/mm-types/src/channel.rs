@@ -83,9 +83,18 @@ pub struct Channel {
     pub kind: ChannelType,
     /// The URL-safe name. For a DM this is the two user ids joined by `__`,
     /// which is why DM display names have to be derived from the roster.
+    ///
+    /// Every string here tolerates `null`, like the ones on `User`:
+    /// `#[serde(default)]` covers a missing key, not a present one
+    /// holding null, and one null in one channel would otherwise empty
+    /// the whole sidebar.
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub name: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub display_name: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub header: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub purpose: String,
     pub last_post_at: Timestamp,
     pub last_root_post_at: Timestamp,
@@ -163,6 +172,24 @@ pub struct ChannelStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every string on a channel tolerates `null`, for the same reason
+    /// the ones on `User` do: `#[serde(default)]` covers a missing key,
+    /// not a present one holding null, and one null in one channel
+    /// would empty the entire sidebar rather than spoil one row.
+    #[test]
+    fn a_null_string_on_a_channel_is_not_a_parse_failure() {
+        let channel: Channel = serde_json::from_str(
+            r#"{"id":"c1","type":"O","name":null,"display_name":null,
+                "header":null,"purpose":null}"#,
+        )
+        .unwrap();
+        assert_eq!(channel.id, ChannelId::new("c1"));
+        assert!(channel.name.is_empty());
+        assert!(channel.display_name.is_empty());
+        assert!(channel.header.is_empty());
+        assert!(channel.purpose.is_empty());
+    }
 
     #[test]
     fn known_channel_types_round_trip_through_their_letters() {

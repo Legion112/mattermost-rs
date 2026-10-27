@@ -369,6 +369,31 @@ category, but it was not read out of the server or the webapp source. An
 empty category being hidden rather than drawn as a bare heading is the same
 kind of inference.
 
+## `null` where a string is expected
+
+Verified the hard way, twice, on 2026-10-27.
+
+**`#[serde(default)]` does not cover a `null`.** It applies when a key is
+*absent*; a key that is present and holds `null` is still a type error, and in
+serde that error fails the whole document rather than the one field. Mattermost
+sends explicit nulls for fields that were never set.
+
+- `mini_preview` is `null` on every attachment that is not an image. One text
+  file in a channel made the entire upload response fail to parse, so the
+  message was never sent.
+- A user's `position` is `null` for somebody who never set a job title. Adding
+  that field emptied the **followed-threads list** on a live account: a
+  `ThreadList` carries its participants as `User`s, so one null in one
+  participant took a page of threads with it.
+
+Both failures look like a feature that does not work rather than like a parse
+error, which is what makes them expensive to find.
+
+The rule for this tree: **every string and map field on a wire type is read
+through `mm_types::wire::null_default`**, not `#[serde(default)]` alone. It is
+applied to `User`, `Channel` and `FileRef`. Adding a field to a wire type means
+adding the attribute at the same time.
+
 ## Followed threads and drafts
 
 Verified against the live server on 2026-10-27.

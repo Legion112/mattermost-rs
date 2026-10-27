@@ -13,15 +13,23 @@ use std::collections::BTreeMap;
 #[serde(default)]
 pub struct User {
     pub id: UserId,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub username: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub nickname: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub first_name: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub last_name: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub email: String,
     /// Job title, as the person set it. Public: the server does not
     /// strip it the way it strips `email`.
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub position: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub roles: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub locale: String,
     pub create_at: Timestamp,
     pub update_at: Timestamp,
@@ -32,10 +40,12 @@ pub struct User {
     /// automatic.
     pub last_picture_update: Timestamp,
     pub is_bot: bool,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub notify_props: BTreeMap<String, String>,
     /// `useAutomaticTimezone`, `automaticTimezone`, `manualTimezone` --
     /// a map because every value is a string on the wire, the boolean
     /// included, which is the same wart as the client config.
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub timezone: BTreeMap<String, String>,
 }
 
@@ -267,6 +277,35 @@ mod tests {
         assert_eq!(u.username, "a");
         assert_eq!(u.email, "");
         assert!(!u.is_bot);
+    }
+
+    /// **Every string on a user tolerates `null`.**
+    ///
+    /// `#[serde(default)]` covers a missing key, not a present one
+    /// holding null, and the server sends explicit nulls for fields
+    /// that were never set. This is not hypothetical: adding
+    /// `position` and `timezone` to this struct made the followed-
+    /// threads list go empty on a real account, because one
+    /// participant somewhere in it had a null `position` and the
+    /// failure took the whole `ThreadList` with it. A parse error in
+    /// one person must not cost a page of threads.
+    #[test]
+    fn a_null_anywhere_on_a_user_is_not_a_parse_failure() {
+        let user: User = serde_json::from_str(
+            r#"{"id":"u1","username":"legion","nickname":null,"first_name":null,
+                "last_name":null,"email":null,"position":null,"roles":null,
+                "locale":null,"notify_props":null,"timezone":null}"#,
+        )
+        .unwrap();
+        assert_eq!(user.id, UserId::new("u1"));
+        assert_eq!(user.username, "legion");
+        assert!(user.position.is_empty());
+        assert!(user.notify_props.is_empty());
+        assert_eq!(user.timezone_name(), None);
+
+        // And the whole thing missing is still fine.
+        let bare: User = serde_json::from_str(r#"{"id":"u2"}"#).unwrap();
+        assert!(bare.username.is_empty());
     }
 
     /// A person's timezone is whichever of the two they are using, and
