@@ -20,6 +20,6 @@ mod parse;
 pub mod emoji;
 pub mod spell;
 
-pub use emoji::glyph;
+pub use emoji::{Choice, glyph, search as search_emoji};
 pub use pango::{escape, to_pango};
 pub use parse::{Block, Document, Inline, Mentioned, Roster, mark_mentions, parse};

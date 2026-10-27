@@ -1,30 +1,31 @@
-//! Remembering how big the window was.
+//! Remembering how the window was left: its size, and the channel
+//! that was open.
 //!
 //! The decision about what is worth restoring is pure and lives in
 //! `mm-desktop` at 100%; this is the file on disk.
 
-use mm_desktop::Geometry;
+use mm_desktop::Restored;
 use std::path::PathBuf;
 
-/// Read the size the window had last time, or the default.
-pub(crate) fn load() -> Geometry {
+/// Read how the window was left, or the defaults.
+pub(crate) fn load() -> Restored {
     path()
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str::<Geometry>(&text).ok())
+        .and_then(|text| serde_json::from_str::<Restored>(&text).ok())
         .unwrap_or_default()
         .sane()
 }
 
-/// Write it down, if it is worth writing down.
-pub(crate) fn store(geometry: Geometry) {
-    if !geometry.worth_saving() {
+/// Write it down, if the size is worth writing down.
+pub(crate) fn store(state: &Restored) {
+    if !state.geometry.worth_saving() {
         return;
     }
     let Some(path) = path() else { return };
     if let Some(folder) = path.parent() {
         let _ = std::fs::create_dir_all(folder);
     }
-    if let Ok(text) = serde_json::to_string(&geometry) {
+    if let Ok(text) = serde_json::to_string(state) {
         // Best effort: a client that refused to close because it could
         // not write down its own size would be worse than one that
         // opens at the default next time.

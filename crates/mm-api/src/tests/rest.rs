@@ -918,3 +918,24 @@ fn a_file_is_uploaded_before_the_post_that_names_it() {
     };
     assert!(!body.contains("file_ids"), "{body}");
 }
+
+/// There is no mute flag: `mark_unread` is `"mention"` for a muted
+/// channel and `"all"` for one that is not. The endpoint patches, so
+/// the reader's other notification props are left alone.
+#[test]
+fn muting_sets_mark_unread_and_nothing_else() {
+    let c = ChannelId::new("c1");
+    let u = UserId::new("u1");
+    let on = set_channel_muted(&c, &u, true);
+    assert_eq!(on.method, Method::Put);
+    assert_eq!(on.path, "/api/v4/channels/c1/members/u1/notify_props");
+    let Body::Json(body) = &on.body else {
+        panic!("expected JSON")
+    };
+    assert_eq!(body, r#"{"mark_unread":"mention"}"#);
+
+    let Body::Json(off) = &set_channel_muted(&c, &u, false).body else {
+        panic!("expected JSON")
+    };
+    assert_eq!(off, r#"{"mark_unread":"all"}"#);
+}

@@ -2512,3 +2512,37 @@ fn the_channel_roster_is_people_in_name_order() {
         .insert(ChannelId::new("c3"), [UserId::new("ghost")].into());
     assert!(store.channel_roster(&ChannelId::new("c3")).is_empty());
 }
+
+/// Muting is not a flag on the wire: `mark_unread` is `"mention"` for a
+/// muted channel and `"all"` for one that is not. That is the single
+/// thing most likely to be got wrong by somebody looking for a boolean,
+/// so both ends of it are pinned here.
+#[test]
+fn muting_a_channel_writes_mark_unread_rather_than_a_flag() {
+    let mut store = store();
+    let c1 = ChannelId::new("c1");
+    store.apply_channels(vec![channel("c1", 10, 10)]);
+    store.apply_members(vec![member("c1", 0, 0, 0)]);
+    assert!(!store.is_muted(&c1));
+
+    let changed = store.set_muted(&c1, true);
+    assert_eq!(changed, [Change::Unread(c1.clone()), Change::Sidebar]);
+    assert!(store.is_muted(&c1));
+    assert_eq!(
+        store.my_member[&c1].notify_props.get("mark_unread"),
+        Some(&"mention".to_owned())
+    );
+
+    // Muting what is already muted changes nothing, so nothing is sent.
+    assert!(store.set_muted(&c1, true).is_empty());
+
+    assert_eq!(store.set_muted(&c1, false).len(), 2);
+    assert!(!store.is_muted(&c1));
+    assert_eq!(
+        store.my_member[&c1].notify_props.get("mark_unread"),
+        Some(&"all".to_owned())
+    );
+
+    // A channel this reader is not in has no membership to change.
+    assert!(store.set_muted(&ChannelId::new("c9"), true).is_empty());
+}

@@ -63,3 +63,47 @@ fn only_a_usable_size_is_restored() {
     let json = serde_json::to_string(&big).unwrap();
     assert_eq!(serde_json::from_str::<Geometry>(&json).unwrap(), big);
 }
+
+/// The window comes back where the reader left it: the same size, and
+/// the same channel. A channel id that no longer exists must read as
+/// "no channel" rather than fail the whole file, and an old file with
+/// no channel in it at all still restores the size.
+#[test]
+fn the_open_channel_travels_with_the_size() {
+    let left = Restored {
+        geometry: Geometry {
+            width: 1_280,
+            height: 1_400,
+            maximized: false,
+        },
+        channel: "c1".to_owned(),
+    };
+    let json = serde_json::to_string(&left).unwrap();
+    // Flattened, so the file reads as one object rather than nesting
+    // the size under a key nobody would guess.
+    assert!(json.contains(r#""width":1280"#), "{json}");
+    assert!(json.contains(r#""channel":"c1""#), "{json}");
+    assert_eq!(serde_json::from_str::<Restored>(&json).unwrap(), left);
+    assert_eq!(left.clone().sane(), left);
+
+    // A file written before the channel was remembered.
+    let older: Restored =
+        serde_json::from_str(r#"{"width":1280,"height":1400,"maximized":false}"#).unwrap();
+    assert_eq!(older.geometry.width, 1_280);
+    assert!(older.channel.is_empty());
+
+    // And an unusable size is still replaced, channel kept.
+    let broken = Restored {
+        geometry: Geometry {
+            width: 1,
+            height: 1,
+            maximized: false,
+        },
+        channel: "c2".to_owned(),
+    }
+    .sane();
+    assert_eq!(broken.geometry, Geometry::default());
+    assert_eq!(broken.channel, "c2");
+    assert!(!format!("{broken:?}").is_empty());
+    assert_eq!(Restored::default().channel, "");
+}

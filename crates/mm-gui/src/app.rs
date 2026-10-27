@@ -61,17 +61,17 @@ pub struct Wiring {
     /// where this client lives -- half a screen, usually -- and opening
     /// at a default size every launch means dragging it into place
     /// every launch.
-    pub geometry: mm_desktop::Geometry,
+    pub restored: mm_desktop::Restored,
     /// Where to write the size back to. A closure rather than a path,
     /// because which file and which directory is the binary's business
     /// and the window's only job is to say what size it ended up.
-    pub remember: Rc<dyn Fn(mm_desktop::Geometry)>,
+    pub remember: Rc<dyn Fn(mm_desktop::Restored)>,
 }
 
 impl std::fmt::Debug for Wiring {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Wiring")
-            .field("geometry", &self.geometry)
+            .field("restored", &self.restored)
             .finish_non_exhaustive()
     }
 }
@@ -185,6 +185,18 @@ struct Ui {
     /// on. The list is rebuilt rather than spliced, so without this the
     /// reader would be thrown to the top of sixty newly loaded messages.
     restore_to: Rc<RefCell<Option<PostId>>>,
+    /// The channel that was open when the window last closed, until it
+    /// has been opened again. Taken rather than read, so that a later
+    /// redraw cannot drag the reader back to it after they have moved.
+    reopen: Rc<RefCell<Option<ChannelId>>>,
+    /// Whether what is selected is only the first-channel fallback,
+    /// chosen because nothing better was known yet. A provisional
+    /// choice may be overridden when the channel being restored finally
+    /// turns up; one the reader made never is.
+    provisional: Rc<std::cell::Cell<bool>>,
+    /// The window, and where to write down how it was left.
+    window: adw::ApplicationWindow,
+    remember: Rc<dyn Fn(mm_desktop::Restored)>,
     /// Who has already been asked for. Without this, every redraw of a
     /// channel would re-request every face in it.
     asked: Rc<RefCell<HashSet<UserId>>>,
@@ -217,7 +229,7 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
         let Some(Wiring {
             commands,
             events,
-            geometry,
+            restored,
             remember,
         }) = wiring.borrow_mut().take()
         else {
@@ -232,7 +244,7 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
         // session, and asking for a second one ran every request twice --
         // two sets of answers, and the window drew the channel again for
         // each of them.
-        let ui = Rc::new(build(app, &commands, geometry, &remember));
+        let ui = Rc::new(build(app, &commands, restored, &remember));
 
         // THE one bridge. Children never spawn; they send commands.
         let pump = Rc::clone(&ui);
@@ -471,17 +483,10 @@ fn install_styles() {
 /// saved coordinates it cannot restore would be lying in its own state
 /// file -- so the window comes back the right *shape* and wherever the
 /// desktop decides to put it.
-fn remember_geometry(window: &adw::ApplicationWindow, remember: &Rc<dyn Fn(mm_desktop::Geometry)>) {
-    let remember = Rc::clone(remember);
-    window.connect_close_request(move |window| {
-        // `default_width` tracks the current size of a resizable
-        // window, and while maximized it holds the size to go back to,
-        // which is exactly what should be restored later.
-        remember(mm_desktop::Geometry {
-            width: window.default_width(),
-            height: window.default_height(),
-            maximized: window.is_maximized(),
-        });
+fn remember_geometry(ui: &Ui) {
+    let on_close = ui.clone();
+    ui.window.connect_close_request(move |_| {
+        on_close.remember_state();
         glib::Propagation::Proceed
     });
 }
@@ -573,8 +578,8 @@ fn build_window(
 fn build(
     app: &adw::Application,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    geometry: mm_desktop::Geometry,
-    remember: &Rc<dyn Fn(mm_desktop::Geometry)>,
+    restored: mm_desktop::Restored,
+    remember: &Rc<dyn Fn(mm_desktop::Restored)>,
 ) -> Ui {
     install_styles();
     let (sidebar, identity, unread_only, sidebar_pane) = build_sidebar();
@@ -585,6 +590,11 @@ fn build(
     // knows the last two.
     let store = Rc::new(RefCell::new(Store::new(UserId::default(), Threading::Flat)));
     let server = Rc::new(RefCell::new(String::new()));
+
+    // Taken apart first: the size goes to the window, the channel
+    // becomes the one to go back to, and neither outlives this.
+    let mm_desktop::Restored { geometry, channel } = restored;
+    let reopen = (!channel.is_empty()).then(|| ChannelId::new(channel.as_str()));
 
     let rows = RowContext::new(commands, &store, &server);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
@@ -622,7 +632,6 @@ fn build(
 
     let (title, refresh, [search, pinned, saved, channel_menu], login, stack, window) =
         build_window(app, &split, geometry);
-    remember_geometry(&window, remember);
 
     let ui = Ui {
         store,
@@ -652,6 +661,10 @@ fn build(
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
+        reopen: Rc::new(RefCell::new(reopen)),
+        provisional: Rc::new(std::cell::Cell::new(false)),
+        window: window.clone(),
+        remember: Rc::clone(remember),
         avatars: Rc::clone(&rows.avatars),
         typing: Rc::new(RefCell::new(HashMap::new())),
         typing_line,
@@ -686,15 +699,20 @@ fn build(
             ui.open_channel_menu(button.upcast_ref::<gtk::Widget>());
         });
     }
-    attach_both_composers(&ui, &composer.view, &thread_composer.view);
+    wire_everything(&ui, &composer, &thread_composer);
     wire(&ui, &refresh, &sidebar, &composer, commands);
-    wire_views(&ui);
-    wire_switcher(&ui, &window);
     wire_unread_filter(&ui, &unread_only);
-
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
     ui
+}
+
+/// The handlers that need nothing but the finished `Ui`.
+fn wire_everything(ui: &Ui, composer: &Composer, thread_composer: &Composer) {
+    attach_both_composers(ui, &composer.view, &thread_composer.view);
+    wire_views(ui);
+    wire_switcher(ui, &ui.window);
+    remember_geometry(ui);
 }
 
 /// Connect the sign-in form.
@@ -1685,6 +1703,129 @@ fn profile_card(
     gtk::Popover::builder().child(&column).build()
 }
 
+/// The smiley that opens the whole emoji table.
+///
+/// Mattermost puts one next to the reactions it guessed at, for
+/// everything the guesses do not cover.
+fn any_reaction_button(
+    row: &gtk::Box,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+    picking: &Rc<std::cell::Cell<bool>>,
+) -> gtk::Button {
+    let any = gtk::Button::from_icon_name("face-smile-symbolic");
+    any.add_css_class("flat");
+    any.set_tooltip_text(Some("React with any emoji"));
+    let commands = commands.clone();
+    let store = Rc::clone(store);
+    let row = row.clone();
+    let picking = Rc::clone(picking);
+    any.connect_clicked(move |button| {
+        // The post is on the row, put there at bind time, because the
+        // rows are recycled and this button is made once.
+        let post = row.widget_name();
+        if post.is_empty() {
+            return;
+        }
+        let post = PostId::new(post.as_str());
+        let commands = commands.clone();
+        let store = Rc::clone(&store);
+        let picking = Rc::clone(&picking);
+        picking.set(true);
+        open_emoji_picker(
+            button.upcast_ref::<gtk::Widget>(),
+            &picking,
+            move |shortcode| {
+                // A toggle like the quick buttons: picking one already
+                // used takes it back.
+                let add = !store.borrow().reacted(&post, shortcode);
+                commands
+                    .send(Command::React {
+                        post: post.clone(),
+                        emoji: shortcode.to_owned(),
+                        add,
+                    })
+                    .ok();
+            },
+        );
+    });
+    any
+}
+
+/// A grid of emoji with a search box, anchored under `at`.
+///
+/// Built fresh per opening rather than kept: it is a few hundred
+/// buttons, and keeping one per message row is how a chat client ends
+/// up using a gigabyte. `pick` is given the shortcode without colons,
+/// which is what both a reaction and a typed `:name:` need.
+fn open_emoji_picker(
+    at: &gtk::Widget,
+    picking: &Rc<std::cell::Cell<bool>>,
+    pick: impl Fn(&str) + 'static,
+) {
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Search emoji…")
+        .margin_start(8)
+        .margin_end(8)
+        .margin_top(8)
+        .build();
+    let grid = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .max_children_per_line(EMOJI_COLUMNS)
+        .min_children_per_line(EMOJI_COLUMNS)
+        .homogeneous(true)
+        .build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .child(&grid)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .min_content_height(EMOJI_HEIGHT)
+        .max_content_height(EMOJI_HEIGHT)
+        .build();
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    column.set_size_request(EMOJI_WIDTH, -1);
+    column.append(&search);
+    column.append(&scroll);
+
+    let popup = gtk::Popover::builder().child(&column).build();
+    popup.set_parent(at);
+    let picking = Rc::clone(picking);
+    popup.connect_closed(move |popup| {
+        // The toolbar is free to go away again now.
+        picking.set(false);
+        popup.unparent();
+    });
+
+    let pick = Rc::new(pick);
+    let fill = {
+        let grid = grid.clone();
+        let popup = popup.clone();
+        let pick = Rc::clone(&pick);
+        move |query: &str| {
+            while let Some(old) = grid.first_child() {
+                grid.remove(&old);
+            }
+            for found in mm_md::search_emoji(query, EMOJI_OFFERED) {
+                let button = gtk::Button::builder()
+                    .label(found.glyph)
+                    .css_classes(["flat"])
+                    .tooltip_text(format!(":{}:", found.shortcode))
+                    .build();
+                let pick = Rc::clone(&pick);
+                let popup = popup.clone();
+                let shortcode = found.shortcode;
+                button.connect_clicked(move |_| {
+                    pick(shortcode);
+                    popup.popdown();
+                });
+                grid.append(&button);
+            }
+        }
+    };
+    fill("");
+    search.connect_search_changed(move |entry| fill(entry.text().as_str()));
+    popup.popup();
+}
+
 /// Open the card for whoever the row under this widget is showing.
 ///
 /// Connected once, in setup, because the rows are recycled: the handler
@@ -2286,6 +2427,15 @@ fn wire_selection(
         // reader starts writing in it, and the alternative is a second
         // click at the bottom of the window before the first letter.
         ui_for_views.composer.view.grab_focus();
+        // Written down now rather than at close, so a client killed or
+        // crashed still comes back here -- but only when the reader
+        // chose this. The first-channel fallback's stand-in would
+        // otherwise overwrite the very channel being restored, which
+        // is how "reopen where I was" quietly became "reopen whatever
+        // sorts first" after one launch.
+        if !ui_for_views.provisional.replace(false) {
+            ui_for_views.remember_state();
+        }
         commands.send(Command::OpenChannel(id.clone())).ok();
         commands.send(Command::MarkRead(id)).ok();
     });
@@ -2666,6 +2816,12 @@ fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -
         tools.append(&quick_reaction_button(slot, row, commands, store));
     }
 
+    // Shared with the leave handler below: a popover opened from this
+    // toolbar must not be taken down by the leave that opening it
+    // caused. The same trap the overflow menu is guarded against.
+    let picking = Rc::new(std::cell::Cell::new(false));
+    tools.append(&any_reaction_button(row, commands, store, &picking));
+
     let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
     reply.add_css_class("flat");
     reply.set_tooltip_text(Some("Reply in thread"));
@@ -2765,8 +2921,9 @@ fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -
         // down with it -- the menu appeared and vanished in one frame.
         let more = more.clone();
         let shown = Rc::clone(shown);
+        let picking = Rc::clone(&picking);
         hover.connect_leave(move |_| {
-            if !more.is_active() {
+            if !more.is_active() && !picking.get() {
                 tools.set_visible(false);
                 let mut shown = shown.borrow_mut();
                 if shown.as_ref() == Some(&tools) {
@@ -4022,6 +4179,13 @@ const SUGGESTIONS_OFFERED: usize = 6;
 /// before it scrolls.
 const CHANNEL_MENU_WIDTH: i32 = 320;
 const CHANNEL_MENU_HEIGHT: i32 = 420;
+/// The emoji picker: how many it offers at once, and how big the grid
+/// is. Capped because the table is three thousand long and nobody
+/// scrolls that far -- the search box is the way to the rest.
+const EMOJI_OFFERED: usize = 180;
+const EMOJI_COLUMNS: u32 = 8;
+const EMOJI_WIDTH: i32 = 320;
+const EMOJI_HEIGHT: i32 = 280;
 const PREVIEW_WIDTH: i32 = 520;
 const PREVIEW_IMAGE: i32 = 80;
 const MENTIONS_WIDTH: i32 = 340;
@@ -4669,11 +4833,16 @@ impl Ui {
             );
         }
 
+        column.append(&self.mute_switch(&channel));
+
         let people = store.channel_roster(&channel);
         column.append(
             &gtk::Label::builder()
                 .label(match people.len() {
                     0 => "MEMBERS".to_owned(),
+                    // A DM with yourself really is one member, and
+                    // "1 MEMBERS" reads as a bug in the client.
+                    1 => "1 MEMBER".to_owned(),
                     n => format!("{n} MEMBERS"),
                 })
                 .xalign(0.0)
@@ -4706,6 +4875,50 @@ impl Ui {
         menu.set_parent(at);
         menu.connect_closed(gtk::Popover::unparent);
         menu.popup();
+    }
+
+    /// The mute row: a switch, and a line saying what muting does.
+    ///
+    /// Worth spelling out, because muting is not silence -- a direct
+    /// mention still shows a badge. What goes away is the unread
+    /// marker, which is the whole point in a channel of alerts.
+    fn mute_switch(&self, channel: &ChannelId) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(12);
+        let words = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        words.set_hexpand(true);
+        words.append(&gtk::Label::builder().label("Mute").xalign(0.0).build());
+        words.append(
+            &gtk::Label::builder()
+                .label("No unread marker. Mentions still show.")
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+        row.append(&words);
+
+        let switch = gtk::Switch::new();
+        switch.set_valign(gtk::Align::Center);
+        switch.set_active(self.store.borrow().is_muted(channel));
+        let ui = self.clone();
+        let channel = channel.clone();
+        switch.connect_state_set(move |_, wanted| {
+            let changed = ui.store.borrow_mut().set_muted(&channel, wanted);
+            if !changed.is_empty() {
+                ui.commands
+                    .send(Command::SetMuted {
+                        channel: channel.clone(),
+                        muted: wanted,
+                    })
+                    .ok();
+                ui.sidebar_stale.set(true);
+                ui.sidebar_soon();
+            }
+            glib::Propagation::Proceed
+        });
+        row.append(&switch);
+        row
     }
 
     /// One person in the member list: their face, their name, their dot.
@@ -4760,6 +4973,63 @@ impl Ui {
         };
         self.show_channel(&channel);
         self.commands.send(Command::OpenThread(root)).ok();
+    }
+
+    /// Put the reader back in the channel they left, once it is there
+    /// to put them in.
+    ///
+    /// Answers whether it happened, so the caller can stop. A choice
+    /// the reader made themselves is never overridden; the
+    /// first-channel fallback's is, because it was only a stand-in for
+    /// not knowing yet.
+    fn restore_reopen(&self) -> bool {
+        let Some(want) = self.reopen.borrow().clone() else {
+            return false;
+        };
+        if self.selected.borrow().is_some() && !self.provisional.get() {
+            // The reader has chosen for themselves since.
+            *self.reopen.borrow_mut() = None;
+            return false;
+        }
+        let Some(row) = (0..)
+            .map_while(|i| self.sidebar.row_at_index(i))
+            .find(|row| row.widget_name() == want.as_str())
+        else {
+            // Not in the sidebar yet, or not any more. Either way, try
+            // again on the next redraw rather than giving up here.
+            return false;
+        };
+        *self.reopen.borrow_mut() = None;
+        self.provisional.set(false);
+        self.sidebar.select_row(Some(&row));
+        true
+    }
+
+    /// Write down how the window is right now: its size, and where the
+    /// reader is.
+    ///
+    /// Called when the window closes **and** whenever the channel
+    /// changes, not only on close. A close handler alone loses
+    /// everything to a crash, a `kill`, or a session ending without
+    /// the window being closed -- and the whole point is to come back
+    /// where they were.
+    fn remember_state(&self) {
+        // `default_width` tracks the current size of a resizable
+        // window, and while maximized it holds the size to go back to,
+        // which is exactly what should be restored later.
+        (self.remember)(mm_desktop::Restored {
+            geometry: mm_desktop::Geometry {
+                width: self.window.default_width(),
+                height: self.window.default_height(),
+                maximized: self.window.is_maximized(),
+            },
+            channel: self
+                .selected
+                .borrow()
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+        });
     }
 
     /// Open the search page and put the caret in the box.
@@ -5198,11 +5468,19 @@ impl Ui {
                 }
             }
         }
+        // Back to where the reader was, as soon as that channel is in
+        // the sidebar. Tried on every redraw until it lands, because
+        // the first few draws happen before the channel list has
+        // arrived -- consuming it on the first attempt is how this
+        // silently fell back to whatever sorts first.
+        if self.restore_reopen() {
+            return;
+        }
+
         match to_select {
             Some(row) => self.sidebar.select_row(Some(&row)),
-            // Nothing selected yet: open the first channel rather than
-            // leaving the message pane blank. The sidebar is sorted unread
-            // first, so this lands on whatever most wants attention.
+            // Nothing known yet: open the first channel rather than
+            // leaving the message pane blank.
             None if keep.is_none() => {
                 // Row 0 is a section heading now, and headings are not
                 // selectable: walk to the first row that is. Threads and
@@ -5215,6 +5493,11 @@ impl Ui {
                     .filter(gtk::ListBoxRow::is_selectable)
                     .find(|row| !row.widget_name().starts_with("mmrs:"));
                 if let Some(first) = first {
+                    // Before the select, because the handler reads it:
+                    // what the fallback chose is a stand-in for not
+                    // knowing yet, and must not be written down over
+                    // the channel still being restored.
+                    self.provisional.set(self.reopen.borrow().is_some());
                     self.sidebar.select_row(Some(&first));
                 }
             }

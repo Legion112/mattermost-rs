@@ -261,6 +261,22 @@ pub fn parse_updated_categories(resp: &HttpResponse) -> Result<Vec<ChannelCatego
     parse_json(resp, "PUT /users/{user}/teams/{team}/channels/categories")
 }
 
+/// Mute a channel, or let it speak again.
+///
+/// There is no mute flag: `notify_props.mark_unread` is `"mention"` for
+/// a muted channel and `"all"` for one that is not, which is confirmed
+/// from the server and is the thing most likely to be got wrong by
+/// somebody looking for a boolean. The endpoint patches rather than
+/// replaces, so the other notify props are left alone.
+#[must_use]
+pub fn set_channel_muted(channel: &ChannelId, user: &UserId, muted: bool) -> HttpRequest {
+    let mark = if muted { "mention" } else { "all" };
+    HttpRequest::put(format!(
+        "{API}/channels/{channel}/members/{user}/notify_props"
+    ))
+    .json(&serde_json::json!({ "mark_unread": mark }))
+}
+
 /// Upload one file to a channel, before a post can refer to it.
 ///
 /// Mattermost uploads first and posts second: the message carries

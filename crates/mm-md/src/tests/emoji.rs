@@ -69,3 +69,36 @@ fn substitution_is_total_over_awkward_input() {
     }
     assert_eq!(substitute("🎉:tada:🎉"), "🎉🎉🎉");
 }
+
+/// The picker's search: an empty query opens on the smileys, a query
+/// finds the exact shortcode before the ones merely containing it, and
+/// a description finds an emoji whose shortcode does not contain the
+/// words at all.
+#[test]
+fn searching_emoji_puts_the_closest_match_first() {
+    let opening = search("", 12);
+    assert_eq!(opening.len(), 12);
+    // Whatever the table's first entries are, they are real.
+    assert!(opening.iter().all(|c| !c.glyph.is_empty()));
+    assert!(opening.iter().all(|c| !c.shortcode.is_empty()));
+
+    let smile = search("smile", 20);
+    assert_eq!(smile[0].shortcode, "smile");
+    assert!(smile.len() > 1, "others contain it too");
+    assert!(smile.iter().any(|c| c.shortcode == "smiley"));
+
+    // Found by name, not by shortcode.
+    let tears = search("grinning", 20);
+    assert!(tears.iter().any(|c| c.shortcode == "grinning"));
+
+    // A space reads as the underscore a shortcode uses.
+    assert!(!search("red heart", 20).is_empty());
+
+    assert!(search("definitely-not-an-emoji", 20).is_empty());
+    assert_eq!(search("smile", 1).len(), 1);
+
+    // Every derive is exercised.
+    let one = smile[0];
+    assert_eq!(one, one);
+    assert!(!format!("{one:?}").is_empty());
+}

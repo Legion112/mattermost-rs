@@ -304,8 +304,8 @@ fn gui() -> Result<(), String> {
     let code = mm_gui::run(mm_gui::Wiring {
         commands,
         events,
-        geometry: geometry::load(),
-        remember: std::rc::Rc::new(geometry::store),
+        restored: geometry::load(),
+        remember: std::rc::Rc::new(|state| geometry::store(&state)),
     });
     if code == mm_gui::glib_exit_success() {
         Ok(())

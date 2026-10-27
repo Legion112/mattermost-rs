@@ -38,11 +38,18 @@ real server yet.
 
 | feature | status | verified | notes |
 |---|---|---|---|
-| `channels.info_and_members` | partial | 12.0.1 | The channel's name in the header is a button, and it opens what the channel is and who is in it: the header line, then every member with their face, their presence and their name. Everything is already held -- the header came with the channel and the roster was fetched when it opened -- so it opens on the click rather than after a round trip. People who have left the server are left out, because the member count beside the channel's name leaves them out too and a list of thirty-five under a heading saying twenty-four is a window disagreeing with itself. A channel never opened says "Not loaded yet" rather than claiming it is deserted. Verified on a live account: Клиенты reads 24 in the header and 24 in the list, where the raw roster holds 35. NOT built: muting, notification preferences, adding or removing members, leaving, and the rest of Mattermost's channel menu. |
+| `channels.info_and_members` | partial | 12.0.1 | The channel's name in the header is a button, and it opens what the channel is and who is in it: the header line, then every member with their face, their presence and their name. Everything is already held -- the header came with the channel and the roster was fetched when it opened -- so it opens on the click rather than after a round trip. People who have left the server are left out, because the member count beside the channel's name leaves them out too and a list of thirty-five under a heading saying twenty-four is a window disagreeing with itself. A channel never opened says "Not loaded yet" rather than claiming it is deserted. Verified on a live account: Клиенты reads 24 in the header and 24 in the list, where the raw roster holds 35. Muting is here too -- see `channels.mute`. NOT built: notification preferences, adding or removing members, leaving, and the rest of Mattermost's channel menu. |
+| `channels.mute` | done | 12.0.1 | A switch in the channel menu, with a line saying what muting actually does: the unread marker goes, mentions still show. There is no mute flag on the wire -- `notify_props.mark_unread` is `"mention"` for a muted channel and `"all"` for one that is not -- which is the single thing most likely to be got wrong by somebody looking for a boolean. Applied locally and sent on, like folding a category, so the sidebar goes quiet under the click rather than when the server answers. The endpoint patches, so the reader's other notification settings are left alone. Verified on a live account: muting the reader's own DM put the muted icon on its sidebar row and unmuting took it off again. |
 
 <details><summary><code>channels.info_and_members</code> wire</summary>
 
 - `GET /api/v4/users`
+
+</details>
+
+<details><summary><code>channels.mute</code> wire</summary>
+
+- `PUT /api/v4/channels/{channel_id}/members/{user_id}/notify_props`
 
 </details>
 
@@ -107,6 +114,7 @@ real server yet.
 | `posts.search` | partial | 12.0.1 | Ctrl+Shift+F, or the magnifier in the header. The terms go to the server untouched: its own query language -- `from:`, `in:`, `before:`, quoted phrases, `-excluded` -- is parsed there, and a client that tried to interpret it could only get it wrong. Searched on Return rather than per keystroke, because every letter of a half-typed `from:legion` would otherwise be its own query. Results draw as the rows the Threads and Drafts views use -- who said it, where, when, the message -- since a hit is a place to go; clicking one opens its channel. The hits join the one post map but **not** a timeline: a result sits next to the result above it for reasons that have nothing to do with time, and filing them as history would be the client inventing adjacency the server never claimed. Verified on a live account: "deploy" answered with 100 hits across several channels. NOT built: paging past the first sixty, jumping to the hit's exact place in its channel's scrollback -- clicking a result opens the channel and that message's own thread beside it, which puts the message on screen without the timeline having to grow a segment around a post from a year ago -- and the match highlighting the server returns alongside the posts. |
 | `posts.pinned_and_saved` | partial | 12.0.1 | The pin and bookmark buttons in the header: what is pinned in the open channel, and what this reader has saved anywhere. Both share the search page, because from the store's side the three are one thing -- a set of posts in an order the server chose, which is not the order of any channel. A failed fetch is reported rather than swallowed: an empty pane and a failed request look identical, and the drafts list already taught that lesson once. Saved posts are still `flagged` on the wire; the web app has said "Saved" since 5.x. Verified on a live account: three saved messages came back across three channels, and a channel with no pins said so. NOT built: unpinning or unsaving from these lists, and paging. |
 | `posts.attachments` | partial | 12.0.1 | A paperclip on both composers: pick files, see them as chips above the box, take one off again, and send. Uploaded first and posted second, because a post carries file *ids* and the ids do not exist until the bytes are on the server; an upload that fails stops the send, since posting the message without the file somebody attached is worse than not posting it. A file on its own is a message, with no text, the way Mattermost sends one. Anything not drawn as a picture -- a document, an archive, an image whose size the server never stated -- gets a row naming it with its size and a button that writes it into the download folder, reporting where it landed. The name comes off the wire, so it is reduced to its last component before it is used: `../../../.bashrc` is a file name. A name already taken grows a counter rather than overwriting. Verified on a live account, in the reader's own DM: a PNG uploaded and rendered inline, a text file uploaded and saved back to ~/Downloads with its contents intact. NOT built: drag and drop onto the composer, paste-to-upload, progress for a large file, and previewing a non-image attachment in the client. |
+| `posts.emoji_picker` | partial | 12.0.1 | A smiley on the hover toolbar, beside the three reactions the client guessed at, opening the whole table with a search box. Searching matches the shortcode first and the emoji's own name second, so "smile" finds `:smile:` before `:smiley_cat:` and "grinning" finds one whose shortcode does not contain the word. Picking one toggles, like the quick buttons. The popover is built per opening rather than kept: it is a few hundred buttons and one per message row is how a client ends up using a gigabyte. Verified on a live account: searching "rocket" and picking it put a 🚀 on the message. NOT built: the server's **custom** emoji, which would have to be fetched and cached; skin-tone variants; and an emoji button on the composer for typing one into a message rather than reacting with it. |
 
 <details><summary><code>ws.live_events</code> wire</summary>
 
@@ -187,6 +195,12 @@ real server yet.
 - `POST /api/v4/files`
 - `POST /api/v4/posts`
 - `GET /api/v4/files/{file_id}`
+
+</details>
+
+<details><summary><code>posts.emoji_picker</code> wire</summary>
+
+- `POST /api/v4/reactions`
 
 </details>
 

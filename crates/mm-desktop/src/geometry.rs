@@ -66,6 +66,35 @@ impl Geometry {
     }
 }
 
+/// Everything about the window worth carrying from one launch to the
+/// next: how big it was, and where the reader was reading.
+///
+/// Reopening on the channel they left is most of what makes a client
+/// feel like it was never closed; opening on whichever channel happens
+/// to sort first means finding their place again every morning.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Restored {
+    #[serde(flatten)]
+    pub geometry: Geometry,
+    /// The channel that was open, empty when there was none. Kept as a
+    /// plain string: this file outlives any particular channel, and an
+    /// id that no longer exists must read as "no channel" rather than
+    /// fail the whole file.
+    pub channel: String,
+}
+
+impl Restored {
+    /// The same, with an unusable size replaced.
+    #[must_use]
+    pub fn sane(self) -> Self {
+        Self {
+            geometry: self.geometry.sane(),
+            channel: self.channel,
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/geometry.rs"]
 mod tests;

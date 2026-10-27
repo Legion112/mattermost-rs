@@ -22,6 +22,63 @@ pub fn glyph(name: &str) -> Option<&'static str> {
     emojis::get_by_shortcode(name).map(emojis::Emoji::as_str)
 }
 
+/// One emoji offered by the picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choice {
+    /// The name without colons, which is what a reaction is sent as.
+    pub shortcode: &'static str,
+    pub glyph: &'static str,
+}
+
+/// The emoji a picker should offer for what has been typed.
+///
+/// An empty query is the start of the table, which is the smileys --
+/// the same thing Mattermost opens its picker on, and the ones most
+/// reactions come from. A query matches the shortcode first and the
+/// emoji's own name second, so typing "smile" finds `:smile:` before
+/// `:smiley_cat:`, and typing "grinning face" finds it by description.
+///
+/// Custom emoji a server has uploaded are not here: this is the
+/// built-in table, and a server's own uploads would have to be fetched.
+#[must_use]
+pub fn search(query: &str, limit: usize) -> Vec<Choice> {
+    let wanted = query.trim().to_lowercase().replace(' ', "_");
+    let choice = |e: &'static emojis::Emoji| {
+        e.shortcode().map(|shortcode| Choice {
+            shortcode,
+            glyph: e.as_str(),
+        })
+    };
+    if wanted.is_empty() {
+        return emojis::iter().filter_map(choice).take(limit).collect();
+    }
+    let mut best: Vec<(u8, Choice)> = emojis::iter()
+        .filter_map(|e| {
+            let found = choice(e)?;
+            let name = e.name().to_lowercase().replace(' ', "_");
+            let tier = if found.shortcode == wanted {
+                0
+            } else if found.shortcode.starts_with(&wanted) {
+                1
+            } else if found.shortcode.contains(&wanted) {
+                2
+            } else if name.contains(&wanted) {
+                3
+            } else {
+                return None;
+            };
+            Some((tier, found))
+        })
+        .collect();
+    // Stable within a tier, so the table's own order -- which puts the
+    // common ones first -- survives.
+    best.sort_by_key(|(tier, _)| *tier);
+    best.into_iter()
+        .map(|(_, found)| found)
+        .take(limit)
+        .collect()
+}
+
 /// Replace every `:shortcode:` in `text` with its glyph.
 ///
 /// Scans rather than splits on `:`, because the colon that ends one

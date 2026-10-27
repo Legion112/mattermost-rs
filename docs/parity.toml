@@ -598,9 +598,9 @@ beside the channel's name leaves them out too and a list of thirty-five \
 under a heading saying twenty-four is a window disagreeing with itself. \
 A channel never opened says "Not loaded yet" rather than claiming it is \
 deserted. Verified on a live account: Клиенты reads 24 in the header and \
-24 in the list, where the raw roster holds 35. NOT built: muting, \
-notification preferences, adding or removing members, leaving, and the \
-rest of Mattermost's channel menu."""
+24 in the list, where the raw roster holds 35. Muting is here too -- see `channels.mute`. NOT built: notification \
+preferences, adding or removing members, leaving, and the rest of \
+Mattermost's channel menu."""
 
 [[feature]]
 id       = "posts.attachments"
@@ -653,3 +653,42 @@ best effort: a client that refused to close because it could not write \
 down its own size would be worse than one that opens at the default. NOT \
 built: remembering which monitor, which the display server does not let a \
 client choose anyway."""
+
+[[feature]]
+id       = "channels.mute"
+area     = "channels"
+upstream = "server-api"
+status   = "done"
+endpoints = ["PUT /api/v4/channels/{channel_id}/members/{user_id}/notify_props"]
+verified_against = "12.0.1"
+notes = """
+A switch in the channel menu, with a line saying what muting actually does: \
+the unread marker goes, mentions still show. There is no mute flag on the \
+wire -- `notify_props.mark_unread` is `"mention"` for a muted channel and \
+`"all"` for one that is not -- which is the single thing most likely to be \
+got wrong by somebody looking for a boolean. Applied locally and sent on, \
+like folding a category, so the sidebar goes quiet under the click rather \
+than when the server answers. The endpoint patches, so the reader's other \
+notification settings are left alone. Verified on a live account: muting \
+the reader's own DM put the muted icon on its sidebar row and unmuting \
+took it off again."""
+
+[[feature]]
+id       = "posts.emoji_picker"
+area     = "posts"
+upstream = "webapp"
+status   = "partial"
+endpoints = ["POST /api/v4/reactions"]
+verified_against = "12.0.1"
+notes = """
+A smiley on the hover toolbar, beside the three reactions the client \
+guessed at, opening the whole table with a search box. Searching matches \
+the shortcode first and the emoji's own name second, so "smile" finds \
+`:smile:` before `:smiley_cat:` and "grinning" finds one whose shortcode \
+does not contain the word. Picking one toggles, like the quick buttons. \
+The popover is built per opening rather than kept: it is a few hundred \
+buttons and one per message row is how a client ends up using a gigabyte. \
+Verified on a live account: searching "rocket" and picking it put a 🚀 on \
+the message. NOT built: the server's **custom** emoji, which would have to \
+be fetched and cached; skin-tone variants; and an emoji button on the \
+composer for typing one into a message rather than reacting with it."""

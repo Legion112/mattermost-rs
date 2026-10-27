@@ -81,6 +81,11 @@ pub enum Command {
     Pinned(ChannelId),
     /// Fetch this reader's saved posts.
     Saved,
+    /// Mute a channel, or let it speak again.
+    SetMuted {
+        channel: ChannelId,
+        muted: bool,
+    },
     SetCategory(mm_types::ChannelCategory),
     /// Replace several categories at once, which is what moving a
     /// channel between two of them needs: the one it left and the one it

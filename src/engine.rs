@@ -620,6 +620,11 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Search { team, terms } => search(a, &team, &terms, events).await,
         Command::Pinned(channel) => send_pinned(a, channel, events).await,
         Command::Saved => send_saved(a, events).await,
+        Command::SetMuted { channel, muted } => {
+            let user = UserId::new(&a.session.user_id);
+            let request = rest::set_channel_muted(&channel, &user, muted);
+            best_effort(a, &request, events).await;
+        }
         Command::SetCategory(category) => set_category(a, &category, events).await,
         Command::SetCategories(categories) => set_categories(a, &categories, events).await,
         Command::Pin { .. }

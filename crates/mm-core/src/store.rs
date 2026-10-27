@@ -1289,6 +1289,31 @@ impl Store {
             .is_some_and(ChannelMember::is_muted)
     }
 
+    /// Mute a channel, or let it speak again, and say what to send.
+    ///
+    /// Applied here and sent on, like folding a category: the sidebar
+    /// has to go quiet under the click rather than when the server
+    /// answers. A sync overwrites it, which is what makes the server's
+    /// copy the one that counts.
+    ///
+    /// There is no mute flag on the wire -- `mark_unread` is `"mention"`
+    /// for a muted channel and `"all"` for one that is not -- and that
+    /// is the single thing most likely to be got wrong by somebody
+    /// looking for a boolean.
+    pub fn set_muted(&mut self, channel: &ChannelId, muted: bool) -> Vec<Change> {
+        let Some(member) = self.my_member.get_mut(channel) else {
+            return Vec::new();
+        };
+        if member.is_muted() == muted {
+            return Vec::new();
+        }
+        let mark = if muted { "mention" } else { "all" };
+        member
+            .notify_props
+            .insert("mark_unread".to_owned(), mark.to_owned());
+        vec![Change::Unread(channel.clone()), Change::Sidebar]
+    }
+
     /// Total mentions across every channel — what the tray badge shows.
     ///
     /// Muted channels are included, because muting suppresses the unread
