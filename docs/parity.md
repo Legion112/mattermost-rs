@@ -141,6 +141,7 @@ real server yet.
 
 | feature | status | verified | notes |
 |---|---|---|---|
+| `sidebar.hide_departed` | done | 12.0.1 | A one-to-one conversation with somebody who has left the server is kept out of the sidebar, and out of the quick switcher, which is drawn from the same list. Mentions never offered them. Verified on a live account: 7 of 27 direct messages were with deactivated people -- royo, madrunner, aiksandr, blossom, bozon, insmurfi, yachaha -- and all seven left, taking the HR category with them, since blossom was its only member. Hidden only when the roster actually says so: somebody this client has not fetched is shown, because "not known" must never be drawn as "gone". Their posts still render wherever they appear. NOTE: with no message search yet, a hidden conversation cannot be reopened from this client at all. |
 | `sidebar.categories` | done | 12.0.1 | The server's grouping and ordering, including Favorites, Direct Messages and the user's own categories, with the stacking taken from `order` rather than from the array. Folding a category is written back: verified on a live server by folding one from the client and reading the flag back, false then true then false. A folded category still shows its unread channels and whichever channel is open, which is what folding means in Mattermost. An empty `sorting` -- what the server sends for a category nobody has reordered -- is drawn alphabetically, which is inferred from the web app rather than read from the server. |
 
 <details><summary><code>sidebar.categories</code> wire</summary>

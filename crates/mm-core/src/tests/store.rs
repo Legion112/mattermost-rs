@@ -2081,3 +2081,55 @@ fn mention_candidates_skip_deactivated_people_and_bots() {
         .collect();
     assert_eq!(names, ["good"]);
 }
+
+/// A DM with somebody who has left the server is not in the sidebar:
+/// the conversation cannot be continued, and on a server with history
+/// the list fills up with people who no longer work here.
+#[test]
+fn a_dm_with_a_departed_person_leaves_the_sidebar() {
+    let mut store = store();
+    let dm = |id: &str, other: &str| Channel {
+        id: ChannelId::new(id),
+        name: format!("{ME}__{other}"),
+        kind: ChannelType::Direct,
+        ..Channel::default()
+    };
+    store.apply_channels(vec![dm("c1", "u-here"), dm("c2", "u-gone")]);
+    store.apply_members(vec![member("c1", 0, 0, 0), member("c2", 0, 0, 0)]);
+    store.apply_users(vec![
+        User {
+            id: UserId::new("u-here"),
+            username: "here".into(),
+            ..User::default()
+        },
+        User {
+            id: UserId::new("u-gone"),
+            username: "gone".into(),
+            delete_at: Timestamp(5),
+            ..User::default()
+        },
+    ]);
+
+    let rows = store.sidebar();
+    let shown: Vec<&str> = rows.iter().map(|r| r.channel.as_str()).collect();
+    assert_eq!(shown, ["c1"]);
+
+    // And the switcher, which is drawn from the same list.
+    assert_eq!(store.find_channels("", 10).len(), 1);
+}
+
+/// Somebody this client has never fetched is shown. "Not known" must
+/// never be drawn as "gone" -- that would empty the sidebar of every DM
+/// before the roster arrives.
+#[test]
+fn a_dm_with_an_unknown_person_stays_in_the_sidebar() {
+    let mut store = store();
+    store.apply_channels(vec![Channel {
+        id: ChannelId::new("c1"),
+        name: format!("{ME}__u-stranger"),
+        kind: ChannelType::Direct,
+        ..Channel::default()
+    }]);
+    store.apply_members(vec![member("c1", 0, 0, 0)]);
+    assert_eq!(store.sidebar().len(), 1);
+}

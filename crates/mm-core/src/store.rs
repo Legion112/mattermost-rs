@@ -1052,6 +1052,25 @@ impl Store {
     }
 
     /// The other person in a one-to-one DM.
+    /// Whether this is a one-to-one conversation with somebody who has
+    /// left the server.
+    ///
+    /// Mattermost keeps those out of the sidebar, and it is right to:
+    /// the conversation cannot be continued, and on a server with any
+    /// history the list fills up with people who no longer work here.
+    /// The messages are not gone -- the channel is reachable by search
+    /// and by permalink, and a departed person's posts still render
+    /// wherever they appear.
+    ///
+    /// Only when the roster actually says so. Somebody this client has
+    /// never fetched is shown, because "not known" must never be drawn
+    /// as "gone".
+    fn is_with_departed(&self, channel: &Channel) -> bool {
+        self.other_party(channel)
+            .and_then(|id| self.users.get(&id))
+            .is_some_and(|user| !user.delete_at.is_zero())
+    }
+
     fn other_party(&self, channel: &Channel) -> Option<UserId> {
         if channel.kind != ChannelType::Direct {
             return None;
@@ -1092,6 +1111,7 @@ impl Store {
             .keys()
             .filter_map(|id| self.channels.get(id))
             .filter(|c| !c.is_deleted())
+            .filter(|c| !self.is_with_departed(c))
             .map(|c| SidebarRow {
                 channel: c.id.clone(),
                 display_name: self.channel_label(c),

@@ -163,6 +163,24 @@ plan's full multi-segment model is not built, which is what `since`-based \
 backfill needs. Until then every fetch is anchored to what is held."""
 
 [[feature]]
+id       = "sidebar.hide_departed"
+area     = "sidebar"
+upstream = "webapp"
+status   = "done"
+verified_against = "12.0.1"
+notes = """
+A one-to-one conversation with somebody who has left the server is kept out \
+of the sidebar, and out of the quick switcher, which is drawn from the same \
+list. Mentions never offered them. Verified on a live account: 7 of 27 direct \
+messages were with deactivated people -- royo, madrunner, aiksandr, blossom, \
+bozon, insmurfi, yachaha -- and all seven left, taking the HR category with \
+them, since blossom was its only member. Hidden only when the roster actually \
+says so: somebody this client has not fetched is shown, because "not known" \
+must never be drawn as "gone". Their posts still render wherever they appear. \
+NOTE: with no message search yet, a hidden conversation cannot be reopened \
+from this client at all."""
+
+[[feature]]
 id       = "sidebar.categories"
 area     = "sidebar"
 upstream = "server-api"
