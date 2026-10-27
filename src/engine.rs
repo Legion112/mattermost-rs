@@ -220,6 +220,42 @@ async fn set_category(
     best_effort(a, &request, events).await;
 }
 
+/// Hand the window the followed threads, and the people in them.
+///
+/// A thread's root was written by somebody who need not be in any DM and
+/// need not have posted in a channel this client has opened, so without
+/// the second fetch the view lists raw user ids and the strip of faces
+/// has nobody to draw.
+async fn send_threads(
+    client: &Client,
+    threads: mm_types::ThreadList,
+    events: &async_channel::Sender<Event>,
+) {
+    let mut who: Vec<String> = threads
+        .threads
+        .iter()
+        .filter_map(|t| t.post.as_ref())
+        .map(|p| p.user_id.to_string())
+        .chain(
+            threads
+                .threads
+                .iter()
+                .flat_map(|t| &t.participants)
+                .map(|u| u.id.to_string()),
+        )
+        .filter(|id| !id.is_empty())
+        .collect();
+    who.sort();
+    who.dedup();
+    let _ = events.send(Event::Threads(threads)).await;
+    if who.is_empty() {
+        return;
+    }
+    if let Ok(users) = fetch(client, &rest::users_by_ids(&who), rest::parse_users).await {
+        let _ = events.send(Event::Users(users)).await;
+    }
+}
+
 /// Fetch a channel's messages without holding up the next command.
 ///
 /// Not awaited: a sync takes a couple of seconds, and a channel opened
@@ -744,7 +780,7 @@ async fn sync(
         // they feed is empty until the next sync, and the channel list
         // beside them is the thing they came for.
         if let Ok(threads) = threads {
-            let _ = events.send(Event::Threads(threads)).await;
+            send_threads(client, threads, events).await;
         }
         if let Ok(drafts) = drafts {
             let _ = events.send(Event::Drafts(drafts)).await;

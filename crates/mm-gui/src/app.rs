@@ -75,6 +75,10 @@ struct Ui {
     pane: Rc<RefCell<Pane>>,
     middle: gtk::Stack,
     threads_list: gtk::ListBox,
+    /// Whether the Threads view is filtered to the unread ones, which is
+    /// the "Unreads" tab Mattermost puts beside "Followed threads".
+    unreads_only: Rc<std::cell::Cell<bool>>,
+    unreads_tab: gtk::ToggleButton,
     drafts_list: gtk::ListBox,
     sidebar: gtk::ListBox,
     identity: gtk::Label,
@@ -289,7 +293,12 @@ fn install_styles() {
              border-radius: 6px; \
              padding: 1px; \
          }\n\
-         .mmrs-destructive label { color: @destructive_color; }",
+         .mmrs-destructive label { color: @destructive_color; }\n\
+         .mmrs-chip { \
+             background: alpha(currentColor, 0.1); \
+             border-radius: 4px; \
+             padding: 0 6px; \
+         }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -383,7 +392,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     // in the same space. The status line and the composer stay put under
     // all three -- the composer insensitive for the two that have nothing
     // to send to.
-    let (threads_list, threads_page) = build_view_list();
+    let (threads_list, threads_scroll) = build_view_list();
+    let (unreads_tab, threads_page) = build_threads_page(&threads_scroll);
     let (drafts_list, drafts_page) = build_view_list();
     let middle = gtk::Stack::new();
     middle.add_named(&scroller, Some("channel"));
@@ -425,6 +435,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         pane: Rc::new(RefCell::new(Pane::Channel)),
         middle: middle.clone(),
         threads_list: threads_list.clone(),
+        unreads_only: Rc::new(std::cell::Cell::new(false)),
+        unreads_tab: unreads_tab.clone(),
         drafts_list: drafts_list.clone(),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
@@ -601,6 +613,37 @@ fn empty_view(what: &str) -> gtk::ListBoxRow {
         .build()
 }
 
+/// The Threads view's two tabs over its list, the way Mattermost puts
+/// them: everything followed, or only what has new replies.
+fn build_threads_page(list: &gtk::ScrolledWindow) -> (gtk::ToggleButton, gtk::Box) {
+    let followed = gtk::ToggleButton::builder()
+        .label("Followed threads")
+        .active(true)
+        .css_classes(["flat"])
+        .build();
+    let unreads = gtk::ToggleButton::builder()
+        .label("Unreads")
+        .css_classes(["flat"])
+        .group(&followed)
+        .build();
+
+    let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    tabs.set_margin_start(8);
+    tabs.set_margin_end(8);
+    tabs.set_margin_top(6);
+    tabs.set_margin_bottom(2);
+    tabs.append(&followed);
+    tabs.append(&unreads);
+
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.append(&tabs);
+    page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    page.append(list);
+    // Only the Unreads button is returned: grouping the two makes them a
+    // radio pair, so "followed" is simply "unreads off".
+    (unreads, page)
+}
+
 /// A list for one of the two views: the Threads list and the Drafts
 /// list are the same furniture with different rows in them.
 fn build_view_list() -> (gtk::ListBox, gtk::ScrolledWindow) {
@@ -618,35 +661,62 @@ fn build_view_list() -> (gtk::ListBox, gtk::ScrolledWindow) {
     (list, scroll)
 }
 
-/// One row in the Threads or the Drafts view: a heading line, a preview
-/// of the message, and a line of detail under it.
-fn view_row(
-    heading: &str,
-    when: &str,
-    preview: &str,
-    detail: &str,
+/// One row in the Threads or the Drafts view.
+///
+/// Laid out the way Mattermost lays it out: who and where on the first
+/// line with how long ago on the right, two lines of the message under
+/// it, and a footer -- the faces of the people in the thread, then the
+/// reply count.
+struct ViewRow<'a> {
+    /// Bold, first. The author for a thread; the channel for a draft,
+    /// which has no author but the reader.
+    who: &'a str,
+    /// The grey pill after the name. Empty for a draft, which has said
+    /// where it is already.
+    chip: &'a str,
+    ago: &'a str,
+    preview: &'a str,
+    /// The line under the message: "28 replies", "a reply".
+    footer: &'a str,
+    faces: Vec<Option<gdk::Texture>>,
+    /// Names for the faces, so one with no picture yet draws initials
+    /// rather than an empty circle.
+    face_names: Vec<String>,
     unread: bool,
-) -> gtk::ListBoxRow {
-    let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let who = gtk::Label::builder()
-        .label(heading)
-        .xalign(0.0)
-        .hexpand(true)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .css_classes(["heading"])
-        .build();
-    top.append(&who);
-    if unread {
+}
+
+fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    top.append(
+        &gtk::Label::builder()
+            .label(row.who)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["heading"])
+            .build(),
+    );
+    if !row.chip.is_empty() {
         top.append(
             &gtk::Label::builder()
-                .label("●")
+                .label(row.chip)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["caption", "dim-label", "mmrs-chip"])
+                .build(),
+        );
+    }
+    // Pushes the timestamp to the right-hand edge.
+    top.append(&gtk::Box::builder().hexpand(true).build());
+    if row.unread {
+        top.append(
+            &gtk::Label::builder()
+                .label("\u{25cf}")
                 .css_classes(["accent", "caption"])
                 .build(),
         );
     }
     top.append(
         &gtk::Label::builder()
-            .label(when)
+            .label(row.ago)
             .css_classes(["dim-label", "caption"])
             .build(),
     );
@@ -654,7 +724,7 @@ fn view_row(
     // Two lines of the message and no more: the view is a list of things
     // to go to, not a place to read them.
     let body = gtk::Label::builder()
-        .label(preview)
+        .label(row.preview)
         .xalign(0.0)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
@@ -663,26 +733,47 @@ fn view_row(
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
 
-    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
     column.set_margin_start(12);
     column.set_margin_end(12);
-    column.set_margin_top(8);
-    column.set_margin_bottom(8);
+    column.set_margin_top(10);
+    column.set_margin_bottom(10);
     column.append(&top);
     column.append(&body);
-    column.append(
-        &gtk::Label::builder()
-            .label(detail)
-            .xalign(0.0)
-            .css_classes(["dim-label", "caption"])
-            .build(),
-    );
+
+    if !row.footer.is_empty() || !row.faces.is_empty() {
+        let foot = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        // The faces of the people in the thread, as Mattermost shows
+        // them: who is in this conversation is most of how a reader
+        // recognises which conversation it is.
+        for (face, name) in row.faces.iter().zip(&row.face_names) {
+            let avatar = adw::Avatar::new(20, Some(name), true);
+            avatar.set_custom_image(face.as_ref());
+            foot.append(&avatar);
+        }
+        if !row.footer.is_empty() {
+            foot.append(
+                &gtk::Label::builder()
+                    .label(row.footer)
+                    .css_classes(["dim-label", "caption"])
+                    .build(),
+            );
+        }
+        column.append(&foot);
+    }
 
     gtk::ListBoxRow::builder().child(&column).build()
 }
 
 /// Connect the two views: a row in either is a place to go.
 fn wire_views(ui: &Ui) {
+    {
+        let ui = ui.clone();
+        ui.unreads_tab.clone().connect_toggled(move |tab| {
+            ui.unreads_only.set(tab.is_active());
+            ui.refresh_threads_view();
+        });
+    }
     {
         let ui = ui.clone();
         // The row's name is the root post, and opening a thread is what
@@ -1047,26 +1138,49 @@ fn describe_day(at: mm_types::Timestamp, date: &mm_core::CivilDate) -> String {
     }
 }
 
-/// When something last moved, for a list of things rather than a
-/// conversation: the time for today, the date for anything older. A list
-/// spanning weeks reads as nonsense with nothing but clock times on it.
-fn describe_when(at: mm_types::Timestamp) -> String {
-    use chrono::{Datelike, Local, TimeZone};
+/// How long ago something happened, the way Mattermost writes it in
+/// these two views: "3 minutes ago", "23 hours ago", "yesterday", "4
+/// days ago", and a date once it is far enough back to stop counting.
+///
+/// Relative rather than a clock time because the list spans weeks. A
+/// column of "14:48 / 12:42 / 23 Oct" says nothing about which of them
+/// is the one that just moved, which is the only question the view is
+/// there to answer.
+fn describe_ago(at: mm_types::Timestamp) -> String {
+    use chrono::{Local, TimeZone};
 
     let chrono::offset::LocalResult::Single(dt) = Local.timestamp_millis_opt(at.millis()) else {
         return String::new();
     };
-    let today = Local::now().date_naive();
-    if dt.date_naive() == today {
-        return dt.format("%H:%M").to_string();
+    let plural = |n: i64, unit: &str| {
+        if n == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{n} {unit}s ago")
+        }
+    };
+    let since = Local::now().signed_duration_since(dt);
+    // A clock skew between this machine and the server puts a message a
+    // few seconds in the future; "in 4 seconds" would be absurd.
+    let minutes = since.num_minutes().max(0);
+    if minutes < 1 {
+        return "just now".to_owned();
     }
-    if today.pred_opt() == Some(dt.date_naive()) {
-        return "Yesterday".to_owned();
+    if minutes < 60 {
+        return plural(minutes, "minute");
     }
-    if dt.year() == today.year() {
-        return dt.format("%-d %b").to_string();
+    let hours = since.num_hours();
+    if hours < 24 {
+        return plural(hours, "hour");
     }
-    dt.format("%-d %b %Y").to_string()
+    let days = since.num_days();
+    if days == 1 {
+        return "yesterday".to_owned();
+    }
+    if days < 7 {
+        return plural(days, "day");
+    }
+    dt.format("%-d %b").to_string()
 }
 
 fn clock_time(millis: i64) -> String {
@@ -1988,6 +2102,11 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     }
 }
 
+/// How many of a thread's participants to draw. Mattermost shows a
+/// handful and stops; a thread of forty people would otherwise be a row
+/// of forty circles.
+const FACES: usize = 5;
+
 /// How many one-click reaction buttons a message's hover toolbar carries.
 const QUICK_REACTIONS: usize = 3;
 
@@ -2312,7 +2431,9 @@ impl Ui {
                 self.store
                     .borrow_mut()
                     .apply_post_list(&channel, &page, PageAnchor::Newest);
-                if self.selected.borrow().as_ref() == Some(&channel) {
+                if self.selected.borrow().as_ref() == Some(&channel)
+                    && *self.pane.borrow() == Pane::Channel
+                {
                     self.refresh_posts(&channel);
                 }
             }
@@ -2479,38 +2600,77 @@ impl Ui {
             self.threads_list.remove(&old);
         }
         let store = self.store.borrow();
+        let only_unread = self.unreads_only.get();
+        let mut drawn = 0;
         for thread in store.followed_threads() {
+            if only_unread && !thread.is_unread() {
+                continue;
+            }
             let Some(post) = &thread.post else { continue };
             let (author, _) = store.post_author(post);
-            let heading = match store.channels.get(&post.channel_id) {
-                Some(channel) => format!("{author} · {}", store.channel_label(channel)),
-                // A thread in a channel this sync has not described yet:
-                // the name is worth more than the id, and the id is worth
-                // more than nothing.
-                None => author,
-            };
+            let chip = store
+                .channels
+                .get(&post.channel_id)
+                .map(|channel| store.channel_label(channel))
+                .unwrap_or_default();
             let replies = if thread.reply_count == 1 {
                 "1 reply".to_owned()
             } else {
                 format!("{} replies", thread.reply_count)
             };
-            let detail = if thread.unread_replies > 0 {
-                format!("{replies} · {} new", thread.unread_replies)
-            } else {
-                replies
-            };
-            let row = view_row(
-                &heading,
-                &describe_when(thread.last_reply_at),
-                &mm_md::parse(&post.message).to_plain(),
-                &detail,
-                thread.is_unread(),
-            );
+            // Who is in the conversation, in the order the server lists
+            // them, and no more than fit on a line.
+            let who: Vec<&UserId> = thread
+                .participants
+                .iter()
+                .map(|u| &u.id)
+                .take(FACES)
+                .collect();
+            self.want_avatars(&store, &who);
+            let row = view_row(&ViewRow {
+                who: &author,
+                chip: &chip,
+                ago: &describe_ago(thread.last_reply_at),
+                preview: &mm_md::parse(&post.message).to_plain(),
+                footer: &replies,
+                faces: who
+                    .iter()
+                    .map(|id| self.avatars.borrow().get(*id).cloned())
+                    .collect(),
+                face_names: who.iter().map(|id| store.user_label(id)).collect(),
+                unread: thread.is_unread(),
+            });
             row.set_widget_name(thread.id.as_str());
             self.threads_list.append(&row);
+            drawn += 1;
         }
-        if self.threads_list.first_child().is_none() {
-            self.threads_list.append(&empty_view("No followed threads"));
+        if drawn == 0 {
+            self.threads_list.append(&empty_view(if only_unread {
+                "No unread threads"
+            } else {
+                "No followed threads"
+            }));
+        }
+    }
+
+    /// Ask for the faces this view wants, once each, the way the message
+    /// list already does for the people in a channel.
+    fn want_avatars(&self, store: &Store, who: &[&UserId]) {
+        for user in who {
+            if self.avatars.borrow().contains_key(*user)
+                || !self.asked.borrow_mut().insert((*user).clone())
+            {
+                continue;
+            }
+            self.commands
+                .send(Command::FetchAvatar {
+                    user: (*user).clone(),
+                    version: store
+                        .users
+                        .get(*user)
+                        .map_or(mm_types::Timestamp::ZERO, |u| u.last_picture_update),
+                })
+                .ok();
         }
     }
 
@@ -2525,19 +2685,22 @@ impl Ui {
                 Some(channel) => store.channel_label(channel),
                 None => draft.channel_id.to_string(),
             };
-            let detail = match (draft.is_reply(), draft.file_ids.len()) {
+            let footer = match (draft.is_reply(), draft.file_ids.len()) {
                 (true, 0) => "a reply".to_owned(),
                 (true, n) => format!("a reply · {n} attached"),
                 (false, 0) => String::new(),
                 (false, n) => format!("{n} attached"),
             };
-            let row = view_row(
-                &name,
-                &describe_when(draft.update_at),
-                &mm_md::parse(&draft.message).to_plain(),
-                &detail,
-                false,
-            );
+            let row = view_row(&ViewRow {
+                who: &name,
+                chip: "",
+                ago: &describe_ago(draft.update_at),
+                preview: &mm_md::parse(&draft.message).to_plain(),
+                footer: &footer,
+                faces: Vec::new(),
+                face_names: Vec::new(),
+                unread: false,
+            });
             row.set_widget_name(draft.channel_id.as_str());
             self.drafts_list.append(&row);
         }
@@ -3009,8 +3172,18 @@ impl Ui {
     /// them -- a setting, rather than one message.
     fn redraw_everything(&self) {
         self.refresh_sidebar();
-        if let Some(open) = self.selected.borrow().clone() {
-            self.refresh_posts(&open);
+        // Whatever is actually on show. Redrawing the conversation while
+        // a view is up put the channel's name back in the title bar the
+        // moment an avatar landed -- and spent the cost of drawing a
+        // channel nobody was looking at.
+        match &*self.pane.borrow() {
+            Pane::Channel => {
+                if let Some(open) = self.selected.borrow().clone() {
+                    self.refresh_posts(&open);
+                }
+            }
+            Pane::Threads => self.refresh_threads_view(),
+            Pane::Drafts => self.refresh_drafts_view(),
         }
         self.refresh_thread();
     }
