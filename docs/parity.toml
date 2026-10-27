@@ -905,8 +905,19 @@ beside the channel's name leaves them out too and a list of thirty-five \
 under a heading saying twenty-four is a window disagreeing with itself. \
 A channel never opened says "Not loaded yet" rather than claiming it is \
 deserted. Verified on a live account: Клиенты reads 24 in the header and \
-24 in the list, where the raw roster holds 35. Muting is here too -- see `channels.mute`. NOT built: notification \
-preferences, adding or removing members, leaving, and the rest of \
+24 in the list, where the raw roster holds 35. Muting is here too -- see `channels.mute` -- and so is **how loudly the \
+channel notifies**: Default, All, Mentions, Nothing, drawn as a row of \
+linked buttons rather than a dropdown, because there are four, they are \
+short, and which one is on should be readable without opening anything. \
+Default is not a fifth state: it is the channel saying nothing and the \
+account's own setting deciding, which is what the server stores for a \
+channel nobody has touched. A separate request from muting, deliberately: \
+`mark_unread` is about the bold in the sidebar and `desktop` is about the \
+banner, and one call carrying both would mean every change to one \
+restating the other. Verified on a live account: choosing Mentions put \
+`desktop: "mention"` on the membership and choosing Default put it back.
+
+NOT built: adding or removing members, leaving, and the rest of \
 Mattermost's channel menu."""
 
 [[feature]]

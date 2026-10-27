@@ -407,6 +407,24 @@ pub fn set_channel_muted(channel: &ChannelId, user: &UserId, muted: bool) -> Htt
     .json(&serde_json::json!({ "mark_unread": mark }))
 }
 
+/// Say how loudly one channel should notify.
+///
+/// The same patching endpoint as muting, and deliberately a separate
+/// function: the two props mean different things -- `mark_unread` is
+/// about the bold in the sidebar and `desktop` is about the banner --
+/// and collapsing them into one call would mean every change to one
+/// restating the other.
+///
+/// `"default"` is how the wire says "whatever the account says", and
+/// is what the server stores for a channel nobody has configured.
+#[must_use]
+pub fn set_channel_notify(channel: &ChannelId, user: &UserId, desktop: &str) -> HttpRequest {
+    HttpRequest::put(format!(
+        "{API}/channels/{channel}/members/{user}/notify_props"
+    ))
+    .json(&serde_json::json!({ "desktop": desktop }))
+}
+
 /// Upload one file to a channel, before a post can refer to it.
 ///
 /// Mattermost uploads first and posts second: the message carries

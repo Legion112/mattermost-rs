@@ -932,6 +932,11 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::SetChannelNotify { channel, desktop } => {
+            let user = UserId::new(&a.session.user_id);
+            let request = rest::set_channel_notify(&channel, &user, &desktop);
+            best_effort(a, &request, events).await;
+        }
         Command::ReadAllThreads(team) => {
             let user = UserId::new(&a.session.user_id);
             best_effort(a, &rest::read_all_threads(&user, &team), events).await;

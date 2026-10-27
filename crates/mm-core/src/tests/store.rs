@@ -3106,3 +3106,35 @@ fn marking_every_thread_read_clears_the_badge_as_well() {
     // Again is not a change.
     assert!(store.read_all_threads_locally().is_empty());
 }
+
+/// A channel that has never been configured says nothing about
+/// notifications and the account's own setting decides, which the
+/// wire spells `default`.
+#[test]
+fn a_channels_notification_level_defaults_to_the_accounts() {
+    let mut store = store();
+    let channel = ChannelId::new("c1");
+    assert_eq!(store.channel_notify(&channel), "default");
+
+    // Nothing to change on a channel this reader is not in.
+    assert!(store.set_channel_notify(&channel, "mention").is_empty());
+
+    store.apply_member(member("c1", 0, 0, 0));
+    assert_eq!(store.channel_notify(&channel), "default");
+    assert_eq!(
+        store.set_channel_notify(&channel, "mention"),
+        [Change::Unread(channel.clone())]
+    );
+    assert_eq!(store.channel_notify(&channel), "mention");
+    // The same again is not a change.
+    assert!(store.set_channel_notify(&channel, "mention").is_empty());
+    // And back to following the account.
+    assert!(!store.set_channel_notify(&channel, "default").is_empty());
+    assert_eq!(store.channel_notify(&channel), "default");
+
+    // Muting is a different prop and does not disturb this one.
+    store.set_channel_notify(&channel, "all");
+    store.set_muted(&channel, true);
+    assert_eq!(store.channel_notify(&channel), "all");
+    assert!(store.is_muted(&channel));
+}

@@ -1223,3 +1223,23 @@ fn a_thread_is_marked_read_up_to_a_moment_in_the_path() {
     assert_eq!(all.method, Method::Put);
     assert_eq!(all.path, "/api/v4/users/u1/teams/t1/threads/read");
 }
+
+/// The same patching endpoint as muting, and deliberately a separate
+/// call: `mark_unread` is about the bold in the sidebar and `desktop`
+/// is about the banner, and one request carrying both would mean
+/// every change to one restating the other.
+#[test]
+fn a_channels_notification_level_patches_only_that_prop() {
+    let request = set_channel_notify(&ChannelId::new("c1"), &UserId::new("u1"), "mention");
+    assert_eq!(request.method, Method::Put);
+    assert_eq!(request.path, "/api/v4/channels/c1/members/u1/notify_props");
+    assert_eq!(
+        request.body,
+        Body::Json(r#"{"desktop":"mention"}"#.to_owned())
+    );
+    // Muting still says only what muting means.
+    assert_eq!(
+        set_channel_muted(&ChannelId::new("c1"), &UserId::new("u1"), true).body,
+        Body::Json(r#"{"mark_unread":"mention"}"#.to_owned())
+    );
+}

@@ -6648,6 +6648,7 @@ impl Ui {
         }
 
         column.append(&self.mute_switch(&channel));
+        column.append(&self.notify_level(&channel));
 
         let people = store.channel_roster(&channel);
         column.append(
@@ -6732,6 +6733,75 @@ impl Ui {
             glib::Propagation::Proceed
         });
         row.append(&switch);
+        row
+    }
+
+    /// How loudly this channel notifies.
+    ///
+    /// The four the server understands, drawn as a row of linked
+    /// buttons rather than a dropdown: there are four, they are short,
+    /// and which one is on should be readable without opening
+    /// anything. "Default" is not a fifth state -- it is the channel
+    /// saying nothing and the account's own setting deciding.
+    fn notify_level(&self, channel: &ChannelId) -> gtk::Box {
+        const LEVELS: &[(&str, &str)] = &[
+            ("default", "Default"),
+            ("all", "All"),
+            ("mention", "Mentions"),
+            ("none", "Nothing"),
+        ];
+
+        let row = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        row.set_margin_top(12);
+        row.append(
+            &gtk::Label::builder()
+                .label("Notify me about")
+                .xalign(0.0)
+                .build(),
+        );
+
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        buttons.add_css_class("linked");
+        let now = self.store.borrow().channel_notify(channel);
+        let mut first: Option<gtk::ToggleButton> = None;
+        for (value, label) in LEVELS {
+            let button = gtk::ToggleButton::builder()
+                .label(*label)
+                .active(now == *value)
+                .build();
+            // Grouped so they behave as one choice rather than four
+            // switches; the first one is the group.
+            match &first {
+                Some(group) => button.set_group(Some(group)),
+                None => first = Some(button.clone()),
+            }
+            let ui = self.clone();
+            let channel = channel.clone();
+            let value = (*value).to_owned();
+            button.connect_toggled(move |button| {
+                // Grouping fires the handler for the one going off as
+                // well as the one coming on.
+                if !button.is_active() {
+                    return;
+                }
+                if ui
+                    .store
+                    .borrow_mut()
+                    .set_channel_notify(&channel, &value)
+                    .is_empty()
+                {
+                    return;
+                }
+                ui.commands
+                    .send(Command::SetChannelNotify {
+                        channel: channel.clone(),
+                        desktop: value.clone(),
+                    })
+                    .ok();
+            });
+            buttons.append(&button);
+        }
+        row.append(&buttons);
         row
     }
 

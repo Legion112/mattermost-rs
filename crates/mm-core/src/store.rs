@@ -1594,6 +1594,37 @@ impl Store {
         vec![Change::Unread(channel.clone()), Change::Sidebar]
     }
 
+    /// How loudly a channel notifies, as the wire spells it.
+    ///
+    /// `"default"` means the channel has never been configured and
+    /// the account's own setting decides, which is what the server
+    /// stores for one nobody has touched.
+    #[must_use]
+    pub fn channel_notify(&self, channel: &ChannelId) -> String {
+        self.my_member
+            .get(channel)
+            .and_then(|member| member.notify_props.get("desktop"))
+            .filter(|chosen| !chosen.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "default".to_owned())
+    }
+
+    /// Record a channel's notification level.
+    pub fn set_channel_notify(&mut self, channel: &ChannelId, desktop: &str) -> Vec<Change> {
+        if self.channel_notify(channel) == desktop {
+            return Vec::new();
+        }
+        let Some(member) = self.my_member.get_mut(channel) else {
+            return Vec::new();
+        };
+        member
+            .notify_props
+            .insert("desktop".to_owned(), desktop.to_owned());
+        // Nothing on screen changes -- this decides what happens when
+        // the next message arrives -- but the menu is drawn from it.
+        vec![Change::Unread(channel.clone())]
+    }
+
     /// Total mentions across every channel — what the tray badge shows.
     ///
     /// Muted channels are included, because muting suppresses the unread
