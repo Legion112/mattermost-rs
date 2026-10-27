@@ -591,14 +591,20 @@ async fn search(
     a: &Active,
     team: &mm_types::TeamId,
     terms: &str,
+    page_no: u32,
     events: &async_channel::Sender<Event>,
 ) {
-    let request = rest::search_posts(team, terms, SEARCH_PAGE);
+    let request = rest::search_posts(team, terms, page_no, SEARCH_PAGE);
     match fetch(&a.client, &request, rest::parse_search).await {
         Ok(page) => {
+            // A full page is the only evidence that there is another
+            // one: the server states no total.
+            let full = page.order.len() >= SEARCH_PAGE as usize;
             let _ = events
                 .send(Event::SearchResults {
                     terms: terms.to_owned(),
+                    page_no,
+                    full,
                     page,
                 })
                 .await;
@@ -846,7 +852,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
     match command {
         Command::Sync => spawn_sync(a, events),
         Command::OpenChannel(channel) => spawn_open_channel(a, channel, events),
-        Command::Search { team, terms } => search(a, &team, &terms, events).await,
+        Command::Search { team, terms, page } => search(a, &team, &terms, page, events).await,
         Command::Pinned(channel) => send_pinned(a, channel, events).await,
         Command::Saved => send_saved(a, events).await,
         Command::Elsewhere { team, term } => find_elsewhere(a, &team, &term, events).await,
@@ -1231,7 +1237,15 @@ async fn resolve_settings(
 const CHANNEL_ROSTER: u32 = 200;
 /// How many hits one search asks for, and how many saved posts are
 /// fetched. Both are a screenful and then some; neither pages yet.
-const SEARCH_PAGE: u32 = 60;
+/// How many search hits to ask for at a time.
+///
+/// A hundred, because that is the ceiling Mattermost's **database**
+/// search has: measured against a live 12.0.1 server, `per_page` in the
+/// body is ignored and every page comes back with at most a hundred
+/// hits. Paging is honoured only where Elasticsearch or Bleve is
+/// configured. Asking for sixty and being handed a hundred would make
+/// the client's idea of a full page a lie in both directions.
+const SEARCH_PAGE: u32 = 100;
 const SAVED_PAGE: u32 = 60;
 /// How many people one quick-switcher query asks about.
 const ELSEWHERE_PEOPLE: u32 = 20;

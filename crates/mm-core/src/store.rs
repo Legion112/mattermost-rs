@@ -705,9 +705,26 @@ impl Store {
     }
 
     /// What a search answered, newest first as the server ordered it.
-    pub fn apply_search(&mut self, terms: &str, page: &PostList) -> Vec<Change> {
+    /// What a search answered.
+    ///
+    /// `append` is the second and later pages. Explicit rather than
+    /// inferred from the terms: the same search run again is a replace,
+    /// not a doubling of its own results, and nothing but the caller
+    /// knows which it asked for.
+    pub fn apply_search(&mut self, terms: &str, page: &PostList, append: bool) -> Vec<Change> {
         terms.clone_into(&mut self.search_terms);
-        self.search_results = self.take_found(page);
+        let found = self.take_found(page);
+        if append {
+            // Deduped, because the server pages by offset and a message
+            // posted between two requests shifts everything down one.
+            for id in found {
+                if !self.search_results.contains(&id) {
+                    self.search_results.push(id);
+                }
+            }
+        } else {
+            self.search_results = found;
+        }
         vec![Change::Found]
     }
 

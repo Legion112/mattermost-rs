@@ -546,3 +546,25 @@ comma, so counting them is exact.
 
 **A one-to-one DM shows no member count at all**, in Mattermost and now
 here. "2 members" over somebody's name tells the reader nothing.
+
+## Search does not page without Elasticsearch
+
+`POST /teams/{team}/posts/search` takes `page` and `per_page` in the body,
+and the documentation makes them look like ordinary paging. Measured
+against the live 12.0.1 server this client is developed against, with
+the default database search:
+
+- `per_page` is **ignored**. Asking for 10 and asking for 60 both answer
+  with 100 hits, and so does sending no paging parameters at all.
+- `page: 1` answers with an empty `order`, whatever `per_page` says —
+  even though the first page was full.
+
+A hundred is Mattermost's own `LIMIT` on the SQL search. Paging is
+honoured only where Elasticsearch or Bleve is configured, which is a
+licensed feature and therefore absent from most self-hosted servers.
+
+So a client cannot learn how many hits there were, and cannot reach past
+the first hundred on an ordinary server. This one asks for a hundred,
+offers "Load more results" when a page comes back full, and says **no
+more results** out loud when the next page is empty — rather than
+letting the button vanish having done nothing, which reads as a bug.

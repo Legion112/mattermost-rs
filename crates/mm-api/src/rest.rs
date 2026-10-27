@@ -407,12 +407,16 @@ pub fn parse_upload(resp: &HttpResponse) -> Result<Uploaded, ApiError> {
 /// `from:`, `in:`, `before:`, quoted phrases, `-excluded` -- is parsed
 /// there, and a client that tried to interpret it would only be able to
 /// get it wrong.
+///
+/// `page` is zero-based, and the only way to reach anything past the
+/// first `per_page` hits: search has no `before`/`after` cursor the way
+/// a channel's history does.
 #[must_use]
-pub fn search_posts(team: &TeamId, terms: &str, per_page: u32) -> HttpRequest {
+pub fn search_posts(team: &TeamId, terms: &str, page: u32, per_page: u32) -> HttpRequest {
     HttpRequest::post(format!("{API}/teams/{team}/posts/search")).json(&serde_json::json!({
         "terms": terms,
         "is_or_search": false,
-        "page": 0,
+        "page": page,
         "per_page": per_page,
     }))
 }

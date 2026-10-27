@@ -129,6 +129,11 @@ struct Ui {
     typing_line: gtk::Label,
     /// The page shared by search, pinned and saved.
     search_entry: gtk::SearchEntry,
+    /// Which page of search results is on screen, and whether the
+    /// server filled it -- the only evidence that another one exists,
+    /// since it states no total.
+    search_page: Rc<std::cell::Cell<u32>>,
+    search_more: Rc<std::cell::Cell<bool>>,
     found_title: gtk::Label,
     found_list: gtk::ListBox,
     /// Pictures fetched for link previews, shared with the post rows that
@@ -1013,6 +1018,8 @@ fn build(
         typing: Rc::new(RefCell::new(HashMap::new())),
         typing_line,
         search_entry: search_entry.clone(),
+        search_page: Rc::new(std::cell::Cell::new(0)),
+        search_more: Rc::new(std::cell::Cell::new(false)),
         found_title,
         found_list: found_list.clone(),
         link_images: Rc::clone(&rows.links),
@@ -1449,7 +1456,16 @@ fn wire_found(ui: &Ui, search: &gtk::Button, pinned: &gtk::Button, saved: &gtk::
                 return;
             };
             ui.set_status("searching…");
-            ui.commands.send(Command::Search { team, terms }).ok();
+            // A new query starts at the first page, whatever the last
+            // one had got to.
+            ui.search_page.set(0);
+            ui.commands
+                .send(Command::Search {
+                    team,
+                    terms,
+                    page: 0,
+                })
+                .ok();
         });
     }
     {
@@ -5954,9 +5970,26 @@ impl Ui {
     /// asked already moved them there.
     fn on_found(&self, event: Event) {
         let which = match event {
-            Event::SearchResults { terms, page } => {
-                self.store.borrow_mut().apply_search(&terms, &page);
-                self.set_status("");
+            Event::SearchResults {
+                terms,
+                page_no,
+                full,
+                page,
+            } => {
+                let nothing_more = page_no > 0 && page.order.is_empty();
+                self.store
+                    .borrow_mut()
+                    .apply_search(&terms, &page, page_no > 0);
+                self.search_page.set(page_no);
+                self.search_more.set(full);
+                // Said out loud rather than letting the button quietly
+                // vanish. On a server without Elasticsearch the
+                // database search caps at one page and answers the
+                // second with nothing, and a button that disappears
+                // having done nothing reads as a bug.
+                self.set_status(if nothing_more { "no more results" } else { "" });
+                // Already on the page when this is a later one, and
+                // `show_pane` redraws it either way.
                 self.show_pane(&Pane::Found(mm_core::Found::Search));
                 return;
             }
@@ -6395,7 +6428,53 @@ impl Ui {
                 mm_core::Found::Saved => "Nothing saved",
                 mm_core::Found::Pinned(_) => "Nothing pinned in this channel",
             }));
+        } else if *which == mm_core::Found::Search && self.search_more.get() {
+            drop(store);
+            self.found_list.append(&self.more_results_row());
         }
+    }
+
+    /// The row at the foot of a full page of search results.
+    ///
+    /// A button rather than scrolling to the end, because the server
+    /// states no total: a full page is the only evidence that there is
+    /// another one, and "load more" that turns out to find nothing is
+    /// a better lie than a scrollbar that promises a length it does not
+    /// know.
+    fn more_results_row(&self) -> gtk::ListBoxRow {
+        let button = gtk::Button::builder()
+            .label("Load more results")
+            .css_classes(["flat"])
+            .margin_top(6)
+            .margin_bottom(10)
+            .build();
+        let ui = self.clone();
+        button.connect_clicked(move |button| {
+            let (terms, team) = {
+                let store = ui.store.borrow();
+                let Some(team) = store.teams.first().map(|t| t.id.clone()) else {
+                    return;
+                };
+                (store.search_terms.clone(), team)
+            };
+            // Insensitive rather than removed: the row is rebuilt when
+            // the answer lands, and a button that stays clickable
+            // meanwhile asks for the same page twice.
+            button.set_sensitive(false);
+            ui.set_status("searching…");
+            ui.commands
+                .send(Command::Search {
+                    team,
+                    terms,
+                    page: ui.search_page.get() + 1,
+                })
+                .ok();
+        });
+        gtk::ListBoxRow::builder()
+            .child(&button)
+            .activatable(false)
+            .selectable(false)
+            .build()
     }
 
     /// The button that takes a post off the list it is being shown in.

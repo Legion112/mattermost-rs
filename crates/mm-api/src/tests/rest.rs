@@ -839,7 +839,7 @@ fn moving_a_channel_updates_both_categories_at_once() {
 /// client that tried to interpret it could only get it wrong.
 #[test]
 fn searching_sends_the_terms_as_typed() {
-    let request = search_posts(&TeamId::new("t1"), r#"from:legion "deploy report""#, 20);
+    let request = search_posts(&TeamId::new("t1"), r#"from:legion "deploy report""#, 0, 20);
     assert_eq!(request.method, Method::Post);
     assert_eq!(request.path, "/api/v4/teams/t1/posts/search");
     let Body::Json(body) = &request.body else {
@@ -855,6 +855,15 @@ fn searching_sends_the_terms_as_typed() {
     .unwrap();
     assert_eq!(found.order, [PostId::new("p1")]);
     assert!(parse_search(&ok("not json")).is_err());
+
+    // Zero-based, and the only way past the first page: search has no
+    // before/after cursor the way a channel's history does.
+    let second = search_posts(&TeamId::new("t1"), "deploy", 1, 20);
+    let Body::Json(body) = &second.body else {
+        panic!("expected JSON")
+    };
+    assert!(body.contains(r#""page":1"#), "{body}");
+    assert!(body.contains(r#""per_page":20"#), "{body}");
 }
 
 /// Pinned posts are per channel; saved posts are per reader, and the

@@ -106,6 +106,10 @@ pub enum Command {
     Search {
         team: mm_types::TeamId,
         terms: String,
+        /// Zero-based. Search has no cursor the way a channel's history
+        /// does, so reaching the second page means asking for it by
+        /// number.
+        page: u32,
     },
     /// Fetch a channel's pinned posts.
     Pinned(ChannelId),
@@ -336,6 +340,12 @@ pub enum Event {
     /// to a query the reader has already moved on from can be ignored.
     SearchResults {
         terms: String,
+        /// Which page this is, so the window knows whether to replace
+        /// what is on screen or add to it.
+        page_no: u32,
+        /// Whether the server filled the page, which is the only
+        /// evidence there is that more exists.
+        full: bool,
         page: PostList,
     },
     /// A channel's pinned posts.

@@ -2415,7 +2415,10 @@ fn an_answer_list_joins_the_posts_but_not_the_timeline() {
         &["p9", "p1"],
     );
 
-    assert_eq!(store.apply_search("deploy", &answer), [Change::Found]);
+    assert_eq!(
+        store.apply_search("deploy", &answer, false),
+        [Change::Found]
+    );
     assert_eq!(store.search_terms, "deploy");
     // The server's order, kept as given -- not re-sorted by time.
     let found: Vec<&str> = store
@@ -2449,8 +2452,35 @@ fn an_answer_list_joins_the_posts_but_not_the_timeline() {
             order: vec![gone.id],
             ..PostList::default()
         },
+        false,
     );
     assert!(store.found(&Found::Search).is_empty());
+
+    // A second page adds to the first rather than replacing it, and
+    // deduplicates: the server pages by offset, so a message posted
+    // between two requests shifts everything down one and the last hit
+    // of page one comes back as the first of page two.
+    let listed = |ids: &[&str]| PostList {
+        posts: ids
+            .iter()
+            .map(|id| (PostId::new(*id), post(id, "c1", 10)))
+            .collect(),
+        order: ids.iter().map(|id| PostId::new(*id)).collect(),
+        ..PostList::default()
+    };
+    let first = listed(&["q1", "q2"]);
+    let second = listed(&["q2", "q3"]);
+    store.apply_search("deploy", &first, false);
+    assert_eq!(store.apply_search("deploy", &second, true), [Change::Found]);
+    let found: Vec<&str> = store
+        .found(&Found::Search)
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    assert_eq!(found, ["q1", "q2", "q3"]);
+    // And a fresh search replaces the lot, rather than doubling it.
+    store.apply_search("deploy", &first, false);
+    assert_eq!(store.found(&Found::Search).len(), 2);
 
     // Every derive is exercised.
     assert_eq!(Found::Search, Found::Search.clone());
