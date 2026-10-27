@@ -182,3 +182,55 @@ because Adwaita has no hash icon worth approximating.
 `adw::Avatar` is the right widget for a face: it draws initials from a name
 when it has no image, so a row looks finished before the network answers,
 and it crops whatever it is given to a circle.
+
+## Drawing a channel: where 2.3 seconds went
+
+The sidebar cache made the window paint at once and exposed what had been
+hidden behind the wait: a channel of sixty messages took **2.3 seconds** to
+draw, and the launch drew it six times, so the messages arrived ten to
+fifteen seconds in. Measured end to end, with timing marks in the engine
+and around the GTK work.
+
+**The engine was not the problem.** Every request a launch makes was
+finished in 995 ms, of which the channel's own page was done at 894 ms. All
+of the rest was on the GTK thread.
+
+Three findings, each measured rather than reasoned about:
+
+**One splice, not ninety-five appends.** Filling a `gio::ListStore` with
+`append` emits `items_changed` per item, and `ListView` answers each one by
+measuring what it holds. Building the rows into a `Vec` and handing them
+over with `splice(0, n_items, &rows)` is one signal. (This did not move the
+number on its own — see below — but it is still the right way to fill the
+model, and it is what makes the remaining cost legible.)
+
+**`ListView` realizes every row it is given, not the visible ones.** With a
+601-pixel viewport and ninety-five rows it ran `setup` and `bind` ninety-five
+times, every time. Whatever the reason — and `measure_across` skipping
+unrealized tiles says it is not the obvious one — the practical consequence
+is that **the cost of a row is paid for the whole channel, not for the
+screenful on show.** Anything expensive in a row has to be lazy.
+
+**The hover toolbar was ninety-four per cent of it.** Handing `ListView`
+102 rows took **2411 ms** with the toolbar built in `setup` and **145 ms**
+with it left out. It is not any one widget in it: taking only the
+`GtkPopover` out changed nothing, and swapping the three icon buttons for
+plain labels saved about half. Six widgets, a controller and two closures,
+around 22 ms a row on this machine.
+
+So the toolbar is built the first time the pointer enters the row, from a
+`GtkEventControllerMotion` added in `setup`, and never at all for a row
+nobody hovers over. The overflow menu goes one step further: it is made
+*and* filled in `GtkMenuButton::set_create_popup_func`, which GTK calls
+just before popping it up. Filling it had been done on every bind, because
+its entries depend on the message — pin or unpin, save or unsave, delete
+only your own.
+
+Drawing a channel is now 146 ms.
+
+The matching lesson on the other side of the bridge: **coalesce redraws.**
+A sync answers with teams, channels, members, categories and the roster of
+each team in turn, and each answer redrew the sidebar and the open channel.
+`redraw_soon` (100 ms) and `sidebar_soon` (50 ms) collapse a burst into one
+redraw; the WebSocket arm uses the former too, since a reconnect replays a
+queue of events.

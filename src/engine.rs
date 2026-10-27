@@ -38,7 +38,7 @@ struct Active {
     /// a page of posts is asked for as roots only. Learned at the first
     /// sync, so it is interior-mutable: every other field is fixed when the
     /// session opens and this one is not known until the config arrives.
-    collapsed: std::sync::atomic::AtomicBool,
+    collapsed: Arc<std::sync::atomic::AtomicBool>,
     /// How many images may be downloading at once. Spawning one task per
     /// image keeps the command loop responsive; without a limit, opening a
     /// busy channel would open forty connections at once to somebody's
@@ -195,6 +195,33 @@ fn spawn_download(a: &Active, events: async_channel::Sender<Event>, what: Downlo
     });
 }
 
+/// Load everything the sidebar needs, without holding up the commands the
+/// reader is issuing meanwhile.
+fn spawn_sync(a: &Active, events: &async_channel::Sender<Event>) {
+    let client = a.client.clone();
+    let session = a.session.clone();
+    let events = events.clone();
+    let collapsed = Arc::clone(&a.collapsed);
+    tokio::spawn(async move {
+        sync(&client, &session, &events, &collapsed).await;
+    });
+}
+
+/// Fetch a channel's messages without holding up the next command.
+///
+/// Not awaited: a sync takes a couple of seconds, and a channel opened
+/// while one is running -- which is every launch, since the sidebar paints
+/// from a snapshot and picks a channel immediately -- would otherwise wait
+/// for the whole of it.
+fn spawn_open_channel(a: &Active, channel: ChannelId, events: &async_channel::Sender<Event>) {
+    let client = a.client.clone();
+    let events = events.clone();
+    let collapsed = a.collapsed();
+    tokio::spawn(async move {
+        open_channel(&client, &channel, &events, collapsed).await;
+    });
+}
+
 /// Send a request whose only interesting outcome is failure.
 ///
 /// The server's answer is not applied: every one of these comes back over
@@ -233,10 +260,8 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
     }
 
     match command {
-        Command::Sync => sync(&a.client, &a.session, events, &a.collapsed).await,
-        Command::OpenChannel(channel) => {
-            open_channel(&a.client, &channel, events, a.collapsed()).await;
-        }
+        Command::Sync => spawn_sync(a, events),
+        Command::OpenChannel(channel) => spawn_open_channel(a, channel, events),
         Command::Pin { post, pinned } => {
             best_effort(a, &rest::set_pinned(&post, pinned), events).await;
         }
@@ -354,7 +379,11 @@ async fn run(
     if active.is_none() {
         let _ = events.send(Event::NeedLogin).await;
     } else if let Some(a) = &active {
-        sync(&a.client, &a.session, &events, &a.collapsed).await;
+        // Spawned, not awaited: the command loop below does not start
+        // until this returns, so an awaited sync held every click the
+        // reader made during it -- including the channel the window opens
+        // for itself the moment the snapshot paints.
+        spawn_sync(a, &events);
     }
 
     while let Some(command) = commands.recv().await {
@@ -374,7 +403,7 @@ async fn run(
             if let Some(saved) = authenticate(&server, &login_id, password, mfa, &events).await {
                 active = activate(saved, &events).await;
                 if let Some(a) = &active {
-                    sync(&a.client, &a.session, &events, &a.collapsed).await;
+                    spawn_sync(a, &events);
                 }
             }
             continue;
@@ -536,7 +565,7 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         session,
         socket,
         read_only: is_read_only(),
-        collapsed: std::sync::atomic::AtomicBool::new(false),
+        collapsed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         downloads: Arc::new(tokio::sync::Semaphore::new(6)),
     })
 }
@@ -552,7 +581,7 @@ async fn resolve_settings(
     client: &Client,
     events: &async_channel::Sender<Event>,
     collapsed: &std::sync::atomic::AtomicBool,
-) {
+) -> (BTreeMap<String, String>, Vec<mm_types::Preference>) {
     // The config and the preferences are independent of each other, and
     // of everything before them.
     let config_request = rest::client_config();
@@ -569,6 +598,37 @@ async fn resolve_settings(
         }
     };
     let preferences = preferences.unwrap_or_default();
+    // Only the three keys the two settings are resolved from. The whole
+    // client config is a couple of hundred strings, and a snapshot that
+    // carried all of it would be mostly things nothing reads.
+    let config: BTreeMap<String, String> = SETTING_KEYS
+        .iter()
+        .filter_map(|k| config.get(*k).map(|v| ((*k).to_owned(), v.clone())))
+        .collect();
+
+    apply_settings(&config, &preferences, events, collapsed).await;
+    (config, preferences)
+}
+
+/// The client-config keys `apply_settings` reads.
+const SETTING_KEYS: [&str; 3] = [
+    "CollapsedThreads",
+    "TeammateNameDisplay",
+    "LockTeammateNameDisplay",
+];
+
+/// Work out how messages are to be read and tell the window, from config
+/// and preferences that may have come either from the server or from the
+/// snapshot. Shared so a snapshot-painted sidebar resolves them the same
+/// way a synced one does -- in particular `collapsed`, which decides what
+/// the first channel asks for and, got wrong, leaves most of a channel
+/// out of the answer.
+async fn apply_settings(
+    config: &BTreeMap<String, String>,
+    preferences: &[mm_types::Preference],
+    events: &async_channel::Sender<Event>,
+    collapsed: &std::sync::atomic::AtomicBool,
+) {
     let preference = |name: &str| {
         preferences
             .iter()
@@ -576,7 +636,7 @@ async fn resolve_settings(
             .map(|p| p.value.as_str())
     };
 
-    let _ = events.send(Event::Preferences(preferences.clone())).await;
+    let _ = events.send(Event::Preferences(preferences.to_vec())).await;
 
     let threading = mm_core::settings::threading(
         config.get("CollapsedThreads").map(String::as_str),
@@ -604,7 +664,23 @@ async fn sync(
 ) {
     let _ = events.send(Event::Status("loading…".into())).await;
 
-    resolve_settings(client, events, collapsed).await;
+    // Last time's sidebar, painted now, so the window has something in it
+    // while the requests below are in flight. It is a cache: everything
+    // here is overwritten by what follows, and the prune at the end
+    // removes whatever the server no longer has.
+    if let Some(held) = crate::snapshot::load(&session.server, &session.user_id) {
+        send_snapshot(events, held, collapsed).await;
+    }
+
+    let (config, preferences) = resolve_settings(client, events, collapsed).await;
+
+    // Collected as it arrives and written down at the end, so the next
+    // launch has a sidebar before it has a connection.
+    let mut snapshot = crate::snapshot::Snapshot {
+        preferences,
+        config,
+        ..crate::snapshot::Snapshot::default()
+    };
 
     let teams = match fetch(client, &rest::my_teams(), rest::parse_teams).await {
         Ok(t) => t,
@@ -615,6 +691,10 @@ async fn sync(
     };
 
     let mut dm_ids: Vec<String> = Vec::new();
+    // Whether every team's channel list actually arrived. The prune below
+    // deletes, so it may only run on a complete answer: one failed fetch
+    // would otherwise empty the sidebar the snapshot had just filled.
+    let mut complete = true;
     for team in &teams {
         // Together, not one after another. These three do not depend on
         // each other, and on a server a third of a second away the
@@ -646,14 +726,17 @@ async fn sync(
                         );
                     }
                 }
+                snapshot.channels.extend(channels.iter().cloned());
                 let _ = events.send(Event::Channels(channels)).await;
             }
             Err(e) => {
+                complete = false;
                 let _ = events.send(Event::Failed(e)).await;
             }
         }
         match members {
             Ok(members) => {
+                snapshot.members.extend(members.iter().cloned());
                 let _ = events.send(Event::Members(members)).await;
             }
             Err(e) => {
@@ -662,6 +745,7 @@ async fn sync(
         }
         match categories {
             Ok(list) => {
+                snapshot.categories.push(list.clone());
                 let _ = events.send(Event::Categories(list)).await;
             }
             // A sidebar grouped the server's way is better than one
@@ -672,6 +756,7 @@ async fn sync(
             }
         }
     }
+    snapshot.teams.clone_from(&teams);
     let _ = events.send(Event::Teams(teams)).await;
 
     // DM labels come from the roster: a DM's own display_name is empty and its
@@ -680,10 +765,43 @@ async fn sync(
         dm_ids.sort();
         dm_ids.dedup();
         if let Ok(users) = fetch(client, &rest::users_by_ids(&dm_ids), rest::parse_users).await {
+            snapshot.users.clone_from(&users);
             let _ = events.send(Event::Users(users)).await;
         }
     }
+    // What the server actually has, now that it has all been asked for.
+    // The only place allowed to remove a channel: every `apply_*` merges,
+    // so a channel left since the snapshot was written would otherwise
+    // stay in the sidebar for good. Only on a complete answer, and only
+    // ever written down then -- a snapshot of a partial sync would make
+    // the next launch wrong too.
+    if complete {
+        let _ = events
+            .send(Event::ChannelsAre(
+                snapshot.channels.iter().map(|c| c.id.clone()).collect(),
+            ))
+            .await;
+        crate::snapshot::store(&session.server, &session.user_id, &snapshot);
+    }
+
     let _ = events.send(Event::Status("ready".into())).await;
+}
+
+/// Replay a snapshot as the events a sync would have sent, so the window
+/// has one way to take this data in rather than two.
+async fn send_snapshot(
+    events: &async_channel::Sender<Event>,
+    held: crate::snapshot::Snapshot,
+    collapsed: &std::sync::atomic::AtomicBool,
+) {
+    apply_settings(&held.config, &held.preferences, events, collapsed).await;
+    let _ = events.send(Event::Teams(held.teams)).await;
+    let _ = events.send(Event::Channels(held.channels)).await;
+    let _ = events.send(Event::Members(held.members)).await;
+    for list in held.categories {
+        let _ = events.send(Event::Categories(list)).await;
+    }
+    let _ = events.send(Event::Users(held.users)).await;
 }
 
 async fn open_channel(

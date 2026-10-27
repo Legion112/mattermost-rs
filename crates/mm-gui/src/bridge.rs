@@ -142,6 +142,12 @@ pub enum Event {
     Users(Vec<User>),
     /// The reader's preferences, which carry saved posts among much else.
     Preferences(Vec<mm_types::Preference>),
+    /// Every channel the reader is in, as the server has just stated it.
+    ///
+    /// Sent at the end of a sync so the window can forget channels a
+    /// snapshot had and the server does not: every other event merges,
+    /// and a merge cannot remove.
+    ChannelsAre(Vec<ChannelId>),
     Posts {
         channel: ChannelId,
         page: PostList,

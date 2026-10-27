@@ -12,6 +12,7 @@
 mod avatars;
 mod engine;
 mod session;
+mod snapshot;
 
 use mm_api::ApiError;
 use mm_api::rest::{self, PostQuery};

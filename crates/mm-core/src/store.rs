@@ -289,6 +289,36 @@ impl Store {
             .is_some_and(Timeline::older_complete)
     }
 
+    /// Forget every channel but these.
+    ///
+    /// A sidebar painted from a snapshot shows what was true when the
+    /// snapshot was written. A channel left, archived or removed since
+    /// then would otherwise sit in the list forever, because every other
+    /// `apply_*` merges rather than replaces -- deliberately, since a
+    /// partial page must never delete what it does not mention. This is
+    /// the one place that may delete, and it is called with the whole
+    /// list the server just gave us.
+    pub fn retain_channels(&mut self, keep: &[ChannelId]) -> Vec<Change> {
+        let keep: BTreeSet<&ChannelId> = keep.iter().collect();
+        let gone: Vec<ChannelId> = self
+            .my_member
+            .keys()
+            .chain(self.channels.keys())
+            .filter(|id| !keep.contains(*id))
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            return Vec::new();
+        }
+        for id in &gone {
+            self.channels.remove(id);
+            self.my_member.remove(id);
+            self.timelines.remove(id);
+            self.stats.remove(id);
+        }
+        vec![Change::Sidebar]
+    }
+
     /// Whether this reader has saved a post.
     ///
     /// Saved posts are preferences in the `flagged_post` category, keyed

@@ -111,6 +111,7 @@ struct Ui {
     /// long that the previous channel's messages stayed on screen for
     /// seconds after the click. They are collected into one redraw instead.
     redraw_queued: Rc<std::cell::Cell<bool>>,
+    sidebar_queued: Rc<std::cell::Cell<bool>>,
     /// One backfill request at a time. The top edge fires repeatedly while
     /// the user sits there, and without this each firing would start another
     /// identical request.
@@ -154,8 +155,11 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
             }
             return;
         };
+        // No `Command::Sync` here. The engine syncs as soon as it has a
+        // session, and asking for a second one ran every request twice --
+        // two sets of answers, and the window drew the channel again for
+        // each of them.
         let ui = Rc::new(build(app, &commands));
-        ui.commands.send(Command::Sync).ok();
 
         // THE one bridge. Children never spawn; they send commands.
         let pump = Rc::clone(&ui);
@@ -411,6 +415,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         drawn_sidebar: Rc::new(RefCell::new(None)),
         sidebar_stale: Rc::new(std::cell::Cell::new(false)),
         redraw_queued: Rc::new(std::cell::Cell::new(false)),
+        sidebar_queued: Rc::new(std::cell::Cell::new(false)),
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
@@ -885,8 +890,10 @@ fn build_day_separator() -> gtk::Box {
 /// name at click time, for the same reason.
 fn build_message_tools(
     row: &gtk::Box,
+    item: &gtk::ListItem,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) -> gtk::Box {
     // The hover toolbar: the one-click reactions this reader uses most,
     // then save and reply, then the overflow menu. Mattermost reveals
@@ -967,40 +974,66 @@ fn build_message_tools(
         .css_classes(["flat"])
         .tooltip_text("More actions")
         .build();
-    let actions = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    actions.set_margin_top(4);
-    actions.set_margin_bottom(4);
-    let popover = gtk::Popover::builder().child(&actions).build();
-    more.set_popover(Some(&popover));
     tools.append(&more);
+
+    {
+        // The menu is made, and filled, the first time it is opened.
+        // `set_create_popup_func` is GTK's own hook for exactly that, and
+        // it runs before the menu is popped up, so the entries are laid
+        // out in time for the first frame.
+        //
+        // Not a micro-optimisation. A `GtkPopover` is a `GtkNative`, and
+        // constructing one came to about eleven milliseconds -- ninety-
+        // eight per cent of what making a row cost. Drawing a channel of
+        // sixty messages took 2.3 seconds, nearly all of it menus for
+        // messages nobody had clicked. Filling it here rather than on
+        // bind saves as much again: the entries depend on the message --
+        // pin or unpin, save or unsave, delete only your own -- so they
+        // were rebuilt for every row of every redraw. See docs/gtk-notes.md.
+        let commands = commands.clone();
+        let store = Rc::clone(store);
+        let server = Rc::clone(server);
+        let item = item.clone();
+        let tools_for_close = tools.clone();
+        let row_for_close = row.clone();
+        more.set_create_popup_func(move |more| {
+            let popover = more.popover().unwrap_or_else(|| {
+                let actions = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                actions.set_margin_top(4);
+                actions.set_margin_bottom(4);
+                let popover = gtk::Popover::builder().child(&actions).build();
+                // Hide the toolbar once the menu closes, since by then the
+                // pointer has usually moved on and no leave is coming --
+                // unless it is still on the message, in which case the
+                // toolbar belongs where it is. `closed` lives on the
+                // popover, not on the button.
+                let tools = tools_for_close.clone();
+                let row = row_for_close.clone();
+                popover.connect_closed(move |_| {
+                    if !row.state_flags().contains(gtk::StateFlags::PRELIGHT) {
+                        tools.set_visible(false);
+                    }
+                });
+                more.set_popover(Some(&popover));
+                popover
+            });
+            if let Some(data) = item.item().and_downcast::<PostRow>() {
+                fill_message_menu(&popover, &data, &commands, &store, &server);
+            }
+        });
+    }
 
     let hover = gtk::EventControllerMotion::new();
     {
         let tools = tools.clone();
-        hover.connect_enter(move |_, _, _| tools.set_visible(true));
-    }
-    {
-        let tools = tools.clone();
+        // Showing it is `first_hover`'s job, in `setup_post_row`; this
+        // only takes it away again.
         // Not while its own menu is open. Opening the popover sends the
         // pointer a leave, which hid the toolbar, which took the popover
         // down with it -- the menu appeared and vanished in one frame.
         let more = more.clone();
         hover.connect_leave(move |_| {
             if !more.is_active() {
-                tools.set_visible(false);
-            }
-        });
-    }
-    {
-        // And hide it once the menu closes, since by then the pointer has
-        // usually moved on and no leave is coming. `closed` lives on the
-        // popover rather than the button.
-        let tools = tools.clone();
-        let row = row.clone();
-        popover.connect_closed(move |_| {
-            // Unless the pointer is still on the message, in which case
-            // the toolbar belongs where it is.
-            if !row.state_flags().contains(gtk::StateFlags::PRELIGHT) {
                 tools.set_visible(false);
             }
         });
@@ -1014,6 +1047,7 @@ fn setup_post_row(
     item: &gtk::ListItem,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     row.set_margin_start(12);
@@ -1087,17 +1121,79 @@ fn setup_post_row(
     line.append(&face);
     line.append(&main);
 
-    let tools = build_message_tools(&row, commands, store);
-
     row.append(&day);
     // The reply button floats over the message rather than sitting beside
     // it: a child of the row would take width from the text, and the text
     // is what the reader came for.
     let floating = gtk::Overlay::new();
     floating.set_child(Some(&line));
-    floating.add_overlay(&tools);
     row.append(&floating);
+
+    // The hover toolbar is made the first time the pointer reaches this
+    // row, and never for a row nobody hovers over.
+    //
+    // Measured, not guessed: handing `ListView` a hundred and two rows
+    // took 2411 ms with the toolbar built here and 145 ms without it --
+    // the toolbar is ninety-four per cent of what drawing a channel
+    // costs, and it is invisible until the pointer arrives. It is not
+    // any one widget in it either: taking only the popover out changed
+    // nothing. See docs/gtk-notes.md.
+    let first_hover = gtk::EventControllerMotion::new();
+    {
+        let row = row.clone();
+        let floating = floating.clone();
+        let item = item.clone();
+        let commands = commands.clone();
+        let store = Rc::clone(store);
+        let server = Rc::clone(server);
+        first_hover.connect_enter(move |_, _, _| {
+            // The overlay's last child is the toolbar once there is one;
+            // before that it is the message itself.
+            let tools = match floating.last_child().and_downcast::<gtk::Box>() {
+                Some(tools) if tools.has_css_class("mmrs-tools") => tools,
+                _ => {
+                    let tools = build_message_tools(&row, &item, &commands, &store, &server);
+                    floating.add_overlay(&tools);
+                    tools
+                }
+            };
+            // A day separator has nothing to act on, and the row under
+            // the pointer may have been recycled since its toolbar was
+            // made.
+            if let Some(data) = item.item().and_downcast::<PostRow>() {
+                if data.is_separator() {
+                    return;
+                }
+                label_quick_reactions(&tools, &data);
+                tools.set_visible(true);
+            }
+        });
+    }
+    row.add_controller(first_hover);
+
     item.set_child(Some(&row));
+}
+
+/// Put this message's one-click reactions on the toolbar's buttons.
+///
+/// The buttons are made once and reused as rows are recycled, so the
+/// emoji is put on them here; the tooltip carries the shortcode, which is
+/// what the click handler sends.
+fn label_quick_reactions(tools: &gtk::Box, data: &PostRow) {
+    let mut button = tools.first_child();
+    for emoji in data.quick_reactions() {
+        let Some(current) = button.and_downcast::<gtk::Button>() else {
+            break;
+        };
+        if !current.widget_name().starts_with("quick") {
+            break;
+        }
+        current.set_label(
+            &mm_md::glyph(&emoji).map_or_else(|| format!(":{emoji}:"), ToOwned::to_owned),
+        );
+        current.set_tooltip_text(Some(&emoji));
+        button = current.next_sibling();
+    }
 }
 
 /// Fill a recycled row from the model item bound to it.
@@ -1512,50 +1608,22 @@ fn fill_message_menu(
 
 /// Hide the hover toolbar and relabel its one-click reactions for the row
 /// now bound to it.
-fn bind_message_tools(
-    floating: &gtk::Overlay,
-    data: &PostRow,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
-) {
-    if let Some(tools) = floating.last_child().and_downcast::<gtk::Box>() {
+fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
+    // Only a row somebody has hovered over has a toolbar at all, and one
+    // that does is being recycled onto another message, so its one-click
+    // reactions have to be relabelled. The overflow menu is made and
+    // filled when it is opened, not here: its entries depend on the
+    // message, so doing it per bind meant a menu for every row of every
+    // redraw.
+    if let Some(tools) = floating.last_child().and_downcast::<gtk::Box>()
+        && tools.has_css_class("mmrs-tools")
+    {
         tools.set_visible(false);
-        // Relabel the one-click reactions for this row. The buttons are
-        // made once in setup and reused, so the emoji has to be put on
-        // them here -- and the tooltip carries the shortcode, which is
-        // what the click handler sends.
-        // The overflow menu's entries depend on the message: pin or
-        // unpin, save or unsave, and delete only what the reader wrote.
-        if let Some(more) = tools.last_child().and_downcast::<gtk::MenuButton>()
-            && let Some(actions) = more.popover().and_downcast::<gtk::Popover>()
-        {
-            fill_message_menu(&actions, data, commands, store, server);
-        }
-
-        let mut button = tools.first_child();
-        for emoji in data.quick_reactions() {
-            let Some(current) = button.and_downcast::<gtk::Button>() else {
-                break;
-            };
-            if !current.widget_name().starts_with("quick") {
-                break;
-            }
-            current.set_label(
-                &mm_md::glyph(&emoji).map_or_else(|| format!(":{emoji}:"), ToOwned::to_owned),
-            );
-            current.set_tooltip_text(Some(&emoji));
-            button = current.next_sibling();
-        }
+        label_quick_reactions(&tools, data);
     }
 }
 
-fn bind_post_row(
-    item: &gtk::ListItem,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
-) {
+fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
     };
@@ -1646,7 +1714,7 @@ fn bind_post_row(
         body.remove_css_class("dim-label");
     }
 
-    bind_message_tools(&floating, &data, commands, store, server);
+    bind_message_tools(&floating, &data);
 
     bind_cards(&cards, &data);
     bind_images(&images, &data);
@@ -1819,19 +1887,19 @@ fn build_post_list(
 ) -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
+
     let sender = commands.clone();
     let store_for_setup = Rc::clone(store);
+    let server_for_setup = Rc::clone(server);
     factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(item, &sender, &store_for_setup);
+            setup_post_row(item, &sender, &store_for_setup, &server_for_setup);
         }
     });
     let sender = commands.clone();
-    let store_for_bind = Rc::clone(store);
-    let server_for_bind = Rc::clone(server);
     factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            bind_post_row(item, &sender, &store_for_bind, &server_for_bind);
+            bind_post_row(item, &sender);
         }
     });
     let post_view = gtk::ListView::builder()
@@ -1928,15 +1996,13 @@ impl Ui {
                 if changes.is_empty() {
                     return;
                 }
-                self.refresh_sidebar();
-                if let Some(open) = self.selected.borrow().clone() {
-                    self.refresh_posts(&open);
-                }
+                // Coalesced, because events arrive in bursts -- a reconnect
+                // replays a queue of them -- and each one would otherwise
+                // redraw the open channel, the sidebar and the thread pane.
                 // A reply to the open thread arrives as an ordinary posted
                 // event, and with collapsed threads it is in no channel
-                // timeline -- so the thread pane is the only place it can
-                // appear at all.
-                self.refresh_thread();
+                // timeline, so the thread pane has to be in that redraw.
+                self.redraw_soon();
             }
             Event::ResyncRequired(why) => {
                 self.set_status(&format!("reconnected: {why}"));
@@ -2114,7 +2180,16 @@ impl Ui {
     ///
     /// Shared so the thread pane and the channel cannot drift into
     /// rendering the same message two different ways.
-    fn row_for(&self, store: &Store, post: &mm_types::Post, grouped: bool) -> PostRow {
+    fn row_for(
+        &self,
+        store: &Store,
+        post: &mm_types::Post,
+        grouped: bool,
+        // Worked out once by the caller: it ranks every reaction this
+        // reader has ever made, and doing that per row made drawing a
+        // channel quadratic in its own history.
+        quick: &[String],
+    ) -> PostRow {
         // A webhook posting under its own name must not borrow the face of
         // the account it posts through: an alert from "Alertmanager" showing
         // your own photograph is worse than showing an initial.
@@ -2174,7 +2249,7 @@ impl Ui {
             }
         }
         let images = self.images_for(post);
-        let quick = store.favourite_emoji(QUICK_REACTIONS);
+
         let replies = store.reply_count(&post.id);
         PostRow::new(PostRowFields {
             id: post.id.as_str(),
@@ -2194,7 +2269,7 @@ impl Ui {
                 },
             },
             reactions: store.reactions_for(&post.id),
-            quick_reactions: quick.clone(),
+            quick_reactions: quick.to_vec(),
             // What the author typed, not what is drawn: "copy text" should
             // paste back as markdown, the way it was written.
             plain_body: post.message.clone(),
@@ -2271,12 +2346,13 @@ impl Ui {
             return;
         };
         let store = self.store.borrow();
-        self.thread_posts.remove_all();
         // No date separators here: a thread is one conversation and the
         // separators would say the same day over and over. Grouping still
         // applies, so a burst of replies from one person reads as one.
         let posts = store.thread_posts(&root);
+        let quick = store.favourite_emoji(QUICK_REACTIONS);
         let mut previous: Option<&mm_types::Post> = None;
+        let mut rows: Vec<PostRow> = Vec::with_capacity(posts.len());
         for post in &posts {
             let grouped = previous.is_some_and(|p| {
                 p.user_id == post.user_id
@@ -2284,10 +2360,12 @@ impl Ui {
                     && !post.is_system()
                     && post.create_at.millis() - p.create_at.millis() <= 5 * 60 * 1000
             });
-            self.thread_posts
-                .append(&self.row_for(&store, post, grouped));
+            rows.push(self.row_for(&store, post, grouped, &quick));
             previous = Some(post);
         }
+        // One signal, not one per reply: see `refresh_posts`.
+        self.thread_posts
+            .splice(0, self.thread_posts.n_items(), &rows);
         drop(store);
 
         // Place the divider the first time the pane appears, and leave it
@@ -2320,11 +2398,11 @@ impl Ui {
             Event::Teams(teams) => self.store.borrow_mut().apply_teams(teams),
             Event::Channels(channels) => {
                 self.store.borrow_mut().apply_channels(channels);
-                self.refresh_sidebar();
+                self.sidebar_soon();
             }
             Event::Members(members) => {
                 self.store.borrow_mut().apply_members(members);
-                self.refresh_sidebar();
+                self.sidebar_soon();
             }
             Event::Thread { root, page } => {
                 let _ = self.store.borrow_mut().apply_thread(&page);
@@ -2347,21 +2425,30 @@ impl Ui {
             }
             Event::Categories(list) => {
                 self.store.borrow_mut().apply_categories(&list);
-                self.refresh_sidebar();
+                self.sidebar_soon();
+            }
+            Event::ChannelsAre(channels) => {
+                let changed = !self
+                    .store
+                    .borrow_mut()
+                    .retain_channels(&channels)
+                    .is_empty();
+                if changed {
+                    self.sidebar_soon();
+                }
             }
             Event::Preferences(prefs) => {
                 self.store.borrow_mut().apply_preferences(&prefs);
             }
             Event::Users(users) => {
                 self.store.borrow_mut().apply_users(users);
-                self.refresh_sidebar();
                 // The roster arrives after the posts that needed it -- the
                 // authors of a page are fetched from the page itself -- so
                 // every row by a newly-known author is still showing a raw
-                // user id until this redraw.
-                if let Some(open) = self.selected.borrow().clone() {
-                    self.refresh_posts(&open);
-                }
+                // user id until this redraw. Coalesced: a sync answers with
+                // the roster of every team in turn, and drawing a channel
+                // costs far more than waiting out the rest of them.
+                self.redraw_soon();
             }
             // Every other variant has its own arm in `on_event`.
             _ => {}
@@ -2406,6 +2493,17 @@ impl Ui {
     /// a channel's worth of images -- where each one changes a little of
     /// the view and redrawing per arrival means redrawing the whole channel
     /// per arrival.
+    fn sidebar_soon(&self) {
+        if self.sidebar_queued.replace(true) {
+            return;
+        }
+        let ui = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+            ui.sidebar_queued.set(false);
+            ui.refresh_sidebar();
+        });
+    }
+
     fn redraw_soon(&self) {
         if self.redraw_queued.replace(true) {
             return;
@@ -2523,22 +2621,22 @@ impl Ui {
         let was_at_end = self.posts.n_items() == 0 || self.stick_to_bottom.get();
 
         let store = self.store.borrow();
-        self.posts.remove_all();
         // Date separators and author grouping are computed in mm-core, where
         // they are covered: they are calendar arithmetic and identity
         // comparisons, and both are wrong in ways only a test notices.
         let visible = store.channel_posts(channel);
         let offset = local_utc_offset_secs();
         let unread_from = *self.unread_from.borrow();
+        let quick = store.favourite_emoji(QUICK_REACTIONS);
+        let mut rows: Vec<PostRow> = Vec::with_capacity(visible.len());
         for row in mm_core::rows::project(&visible, offset, unread_from) {
             let (id, grouped) = match row {
                 mm_core::Row::Date { at, date } => {
-                    self.posts
-                        .append(&PostRow::separator(&describe_day(at, &date)));
+                    rows.push(PostRow::separator(&describe_day(at, &date)));
                     continue;
                 }
                 mm_core::Row::NewMessages => {
-                    self.posts.append(&PostRow::new_messages());
+                    rows.push(PostRow::new_messages());
                     continue;
                 }
                 mm_core::Row::Post { id, grouped } => (id, grouped),
@@ -2546,8 +2644,14 @@ impl Ui {
             let Some(post) = store.posts.get(&id) else {
                 continue;
             };
-            self.posts.append(&self.row_for(&store, post, grouped));
+            rows.push(self.row_for(&store, post, grouped, &quick));
         }
+        // Built first and handed over in one go. Appending emits
+        // `items_changed` per item, and `ListView` answers each one by
+        // measuring what it holds: a channel of sixty messages took 2.3
+        // seconds to draw that way, nearly all of it in ninety-five
+        // signals. One splice is one signal. See docs/gtk-notes.md.
+        self.posts.splice(0, self.posts.n_items(), &rows);
         self.composer.set_sensitive(true);
 
         // No bottom alignment. Resting a short channel's messages on the

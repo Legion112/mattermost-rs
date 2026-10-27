@@ -1712,3 +1712,34 @@ fn saved_and_own_posts_are_recognised() {
     assert!(store.is_saved(&PostId::new("p-mine")));
     assert!(!store.is_saved(&PostId::new("p-theirs")));
 }
+
+/// A sidebar painted from a snapshot shows what was true when it was
+/// written. A channel left since then has to go, and this is the only
+/// place allowed to delete one -- every other `apply_*` merges, because a
+/// partial page must never remove what it does not mention.
+#[test]
+fn a_channel_that_is_gone_is_forgotten() {
+    let mut store = store();
+    store.apply_channels(vec![channel("c1", 0, 0), channel("c2", 0, 0)]);
+    store.apply_members(vec![member("c1", 0, 0, 0), member("c2", 0, 0, 0)]);
+    assert_eq!(store.sidebar().len(), 2);
+
+    let changes = store.retain_channels(&[ChannelId::new("c1")]);
+    assert_eq!(changes, vec![Change::Sidebar]);
+    let rows = store.sidebar();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].channel, ChannelId::new("c1"));
+    assert!(!store.channels.contains_key(&ChannelId::new("c2")));
+    assert!(!store.my_member.contains_key(&ChannelId::new("c2")));
+}
+
+/// Keeping everything changes nothing, and says so: a redraw per sync
+/// when nothing was removed is a redraw that destroys the row under the
+/// reader's cursor.
+#[test]
+fn retaining_everything_reports_no_change() {
+    let mut store = store();
+    store.apply_channels(vec![channel("c1", 0, 0)]);
+    store.apply_members(vec![member("c1", 0, 0, 0)]);
+    assert!(store.retain_channels(&[ChannelId::new("c1")]).is_empty());
+}
