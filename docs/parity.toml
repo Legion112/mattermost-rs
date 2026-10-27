@@ -749,8 +749,21 @@ reaches it -- nor for somebody who has left, who cannot be written to. \
 Verified on a live account: the card for a colleague opened the DM with \
 them.
 
-NOT built: custom statuses, and the card over a `@mention` in message text \
-rather than over the author's name."""
+**A custom status** -- the emoji and words somebody puts beside their name \
+-- is drawn under the username. It is a JSON document inside a JSON string \
+inside `props`, the same wart as `post` and `reaction` on the WebSocket in \
+a different place, and it **expires**: on the server this was built \
+against, twenty-four people have one and every single one has run out, \
+because people set "Out for lunch" for an hour and never clear it. A \
+client that ignored `expires_at` would show last October's lunch. No \
+expiry at all is written as the year-one sentinel `0001-01-01T00:00:00Z` \
+rather than an absent field. The emoji goes through the same path a \
+message's does, so one of the server's own draws as a picture. Verified on \
+a live account: a colleague whose status has no expiry shows their emoji \
+and their words, and the two dozen expired ones show nothing.
+
+NOT built: setting your own, and the card over a `@mention` in message \
+text rather than over the author's name."""
 
 [[feature]]
 id       = "sidebar.drag_between_categories"
@@ -793,7 +806,10 @@ interpret it could only get it wrong. Searched on Return rather than per \
 keystroke, because every letter of a half-typed `from:legion` would \
 otherwise be its own query. Results draw as the rows the Threads and \
 Drafts views use -- who said it, where, when, the message -- since a hit \
-is a place to go; clicking one opens its channel. The hits join the one \
+is a place to go; clicking one opens its channel. The people who wrote \
+them are fetched with the answer: a channel's page has always done that, \
+and these three lists did not, so a hit from a channel this client had \
+never opened drew the author's raw id where a name should be. The hits join the one \
 post map but **not** a timeline: a result sits next to the result above \
 it for reasons that have nothing to do with time, and filing them as \
 history would be the client inventing adjacency the server never claimed. \

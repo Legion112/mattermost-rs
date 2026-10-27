@@ -605,6 +605,7 @@ async fn search(
             // A full page is the only evidence that there is another
             // one: the server states no total.
             let full = page.order.len() >= SEARCH_PAGE as usize;
+            let authors = authors_of(&page);
             let _ = events
                 .send(Event::SearchResults {
                     terms: terms.to_owned(),
@@ -613,10 +614,40 @@ async fn search(
                     page,
                 })
                 .await;
+            send_authors(&a.client, authors, events).await;
         }
         Err(e) => {
             let _ = events.send(Event::Failed(format!("search: {e}"))).await;
         }
+    }
+}
+
+/// Everybody who wrote something in a page of posts.
+fn authors_of(page: &mm_types::PostList) -> Vec<String> {
+    let mut who: Vec<String> = page
+        .posts
+        .values()
+        .map(|post| post.user_id.to_string())
+        .filter(|id| !id.is_empty())
+        .collect();
+    who.sort();
+    who.dedup();
+    who
+}
+
+/// Fetch the people who wrote a page, so the window has names for
+/// them.
+///
+/// A channel's page has always done this; search, pinned and saved
+/// did not, and they are the three that reach across the whole team
+/// -- so a hit from a channel this client has never opened drew the
+/// author's raw id where a name should be.
+async fn send_authors(client: &Client, who: Vec<String>, events: &async_channel::Sender<Event>) {
+    if who.is_empty() {
+        return;
+    }
+    if let Ok(users) = fetch(client, &rest::users_by_ids(&who), rest::parse_users).await {
+        let _ = events.send(Event::Users(users)).await;
     }
 }
 
@@ -630,7 +661,9 @@ async fn send_pinned(a: &Active, channel: ChannelId, events: &async_channel::Sen
     let request = rest::pinned_posts(&channel);
     match fetch(&a.client, &request, rest::parse_pinned).await {
         Ok(page) => {
+            let authors = authors_of(&page);
             let _ = events.send(Event::PinnedPosts { channel, page }).await;
+            send_authors(&a.client, authors, events).await;
         }
         Err(e) => {
             let _ = events.send(Event::Failed(format!("pinned: {e}"))).await;
@@ -644,7 +677,9 @@ async fn send_saved(a: &Active, events: &async_channel::Sender<Event>) {
     let request = rest::saved_posts(&user, SAVED_PAGE);
     match fetch(&a.client, &request, rest::parse_saved).await {
         Ok(page) => {
+            let authors = authors_of(&page);
             let _ = events.send(Event::SavedPosts(page)).await;
+            send_authors(&a.client, authors, events).await;
         }
         Err(e) => {
             let _ = events.send(Event::Failed(format!("saved: {e}"))).await;

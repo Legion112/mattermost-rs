@@ -42,6 +42,10 @@ pub struct User {
     pub is_bot: bool,
     #[serde(deserialize_with = "crate::wire::null_default")]
     pub notify_props: BTreeMap<String, String>,
+    /// Loose per-user properties. `customStatus` lives here, as a
+    /// JSON document inside a JSON string -- see [`CustomStatus`].
+    #[serde(deserialize_with = "crate::wire::null_default")]
+    pub props: BTreeMap<String, String>,
     /// `useAutomaticTimezone`, `automaticTimezone`, `manualTimezone` --
     /// a map because every value is a string on the wire, the boolean
     /// included, which is the same wart as the client config.
@@ -50,6 +54,14 @@ pub struct User {
 }
 
 impl User {
+    /// The emoji and words this person put beside their name, if they
+    /// have and it has not run out.
+    #[must_use]
+    pub fn custom_status(&self, now: crate::UtcMoment) -> Option<crate::CustomStatus> {
+        let status = crate::CustomStatus::parse(self.props.get("customStatus")?)?;
+        (!status.is_expired(now)).then_some(status)
+    }
+
     /// The IANA zone this person is in, if the server knows one.
     ///
     /// Whichever of the two the person is using: the automatic zone

@@ -2347,8 +2347,9 @@ fn profile_card(
     store: &Rc<RefCell<Store>>,
     avatars: &Avatars,
     user: &mm_types::User,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    emoji: &Emoji,
 ) -> gtk::Popover {
+    let commands = &emoji.commands;
     let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
     column.set_margin_start(18);
     column.set_margin_end(18);
@@ -2379,6 +2380,9 @@ fn profile_card(
             .css_classes(["dim-label"])
             .build(),
     );
+    if let Some(status) = user.custom_status(utc_now()) {
+        column.append(&status_line(&status, emoji));
+    }
     if !user.position.is_empty() {
         column.append(
             &gtk::Label::builder()
@@ -2626,7 +2630,7 @@ fn show_profile(
     item: &gtk::ListItem,
     store: &Rc<RefCell<Store>>,
     avatars: &Avatars,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    emoji: &Emoji,
 ) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
@@ -2640,12 +2644,49 @@ fn show_profile(
         // show, and an empty card would be worse than no card.
         return;
     };
-    let card = profile_card(store, avatars, &user, commands);
+    let card = profile_card(store, avatars, &user, emoji);
     card.set_parent(at);
     // Taken down and detached on close, or every click leaves another
     // popover parented to the same label.
     card.connect_closed(gtk::Popover::unparent);
     card.popup();
+}
+
+/// Somebody's custom status: the emoji they chose and the words
+/// beside it.
+///
+/// The emoji may be one of the server's own, so it goes through the
+/// same path a message's does -- picture if there is one, glyph if
+/// the table knows it, and the shortcode otherwise.
+fn status_line(status: &mm_types::CustomStatus, emoji: &Emoji) -> gtk::Box {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    line.set_halign(gtk::Align::Center);
+    line.set_margin_top(4);
+    if !status.emoji.is_empty() {
+        match emoji.texture(&status.emoji) {
+            Some(texture) => line.append(&Emoji::image(&texture)),
+            None => line.append(&gtk::Label::new(Some(
+                &mm_md::glyph(&status.emoji)
+                    .map_or_else(|| format!(":{}:", status.emoji), ToOwned::to_owned),
+            ))),
+        }
+    }
+    if !status.text.is_empty() {
+        line.append(
+            &gtk::Label::builder()
+                .label(&status.text)
+                .wrap(true)
+                .justify(gtk::Justification::Center)
+                .build(),
+        );
+    }
+    line
+}
+
+/// Now, as the comparison a custom status's expiry wants.
+fn utc_now() -> mm_types::UtcMoment {
+    mm_types::UtcMoment::parse(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_default()
 }
 
 /// One labelled line on the card.
@@ -4348,7 +4389,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
         let ctx = ctx.clone();
         let at = target.clone();
         click.connect_released(move |_, _, _, _| {
-            show_profile(&at, &item, &ctx.store, &ctx.avatars, &ctx.commands);
+            show_profile(&at, &item, &ctx.store, &ctx.avatars, &ctx.emoji);
         });
         target.add_controller(click);
     }
