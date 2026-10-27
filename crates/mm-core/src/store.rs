@@ -40,6 +40,9 @@ pub enum Change {
     Drafts,
     /// An answer list -- search, pinned, saved -- changed.
     Found,
+    /// The server's custom emoji list changed, which can affect any
+    /// message and every reaction on screen.
+    Emoji,
 }
 
 /// Which answer list is being asked for.
@@ -263,6 +266,14 @@ pub struct Store {
     /// "never asked", which draws the same as offline but is not the
     /// same thing, so it is not defaulted into the map.
     pub statuses: HashMap<UserId, mm_types::Presence>,
+    /// The server's own custom emoji, by name.
+    ///
+    /// Name to id, never the other way round: a reaction and a typed
+    /// `:shortcode:` both carry the name, and the id exists only to
+    /// build the image URL. Empty means the list has not been fetched,
+    /// which draws the same as a server with none -- shortcodes --
+    /// which is the right fallback either way.
+    pub custom_emoji: BTreeMap<String, mm_types::EmojiId>,
     /// The threads this reader follows, as the server last listed them,
     /// and the account-wide totals that go on the sidebar badge. Replaced
     /// wholesale rather than merged: unlike a channel's posts this is a
@@ -498,6 +509,62 @@ impl Store {
                 (known != Some(presence)).then(|| Change::User(status.user_id.clone()))
             })
             .collect()
+    }
+
+    /// Record a page of the server's custom emoji.
+    ///
+    /// Deleted ones are dropped rather than stored: the list can be
+    /// cached, and an emoji that has been removed would draw as a
+    /// broken image where its shortcode at least says what was meant.
+    pub fn apply_custom_emoji(&mut self, emoji: &[mm_types::CustomEmoji]) -> Vec<Change> {
+        let mut moved = false;
+        for one in emoji {
+            if one.is_deleted() || one.name.is_empty() {
+                moved |= self.custom_emoji.remove(&one.name).is_some();
+                continue;
+            }
+            let known = self.custom_emoji.insert(one.name.clone(), one.id.clone());
+            moved |= known.as_ref() != Some(&one.id);
+        }
+        // One change for the batch. Every message on screen may hold one
+        // of these, so the answer to "what moved" is "possibly
+        // everything", and naming each post would be a longer list than
+        // the redraw it asks for.
+        if moved {
+            vec![Change::Emoji]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// The id behind a shortcode, if the server has an emoji by that
+    /// name. `None` is the ordinary case: most shortcodes are standard.
+    #[must_use]
+    pub fn custom_emoji(&self, name: &str) -> Option<&mm_types::EmojiId> {
+        self.custom_emoji.get(name)
+    }
+
+    /// Custom emoji whose name matches what has been typed, for the
+    /// picker and the composer's `:` completion.
+    ///
+    /// Prefix matches first and then substring, which is the order
+    /// `mm_md::search` uses for the standard table -- the two lists are
+    /// shown together and a reader cannot tell which is which.
+    #[must_use]
+    pub fn custom_emoji_matching(&self, query: &str, limit: usize) -> Vec<String> {
+        let query = query.to_ascii_lowercase();
+        let mut prefix = Vec::new();
+        let mut rest = Vec::new();
+        for name in self.custom_emoji.keys() {
+            if name.starts_with(&query) {
+                prefix.push(name.clone());
+            } else if name.contains(&query) {
+                rest.push(name.clone());
+            }
+        }
+        prefix.append(&mut rest);
+        prefix.truncate(limit);
+        prefix
     }
 
     /// Where somebody is, as far as this client knows.

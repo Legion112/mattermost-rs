@@ -27,6 +27,7 @@ mod attachment;
 mod category;
 mod channel;
 mod draft;
+mod emoji;
 mod ids;
 mod post;
 mod prefs;
@@ -43,6 +44,7 @@ pub use channel::{
     Channel, ChannelMember, ChannelStats, ChannelType, MARK_UNREAD, MARK_UNREAD_MENTION,
 };
 pub use draft::Draft;
+pub use emoji::CustomEmoji;
 pub use ids::{ChannelId, EmojiId, FileId, ID_LEN, PostId, TeamId, UserId};
 pub use post::{FileRef, LinkPreview, Post, PostList};
 pub use prefs::{NameFormat, Preference, is_true, keys};

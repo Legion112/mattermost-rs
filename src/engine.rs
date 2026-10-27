@@ -147,6 +147,10 @@ enum Download {
         user: UserId,
         version: mm_types::Timestamp,
     },
+    /// A custom emoji's image. The name travels with it because that
+    /// is what the window looks the picture up by; the id is only how
+    /// it is fetched and cached.
+    Emoji { name: String, id: mm_types::EmojiId },
     /// A link preview's picture, from somebody else's web server.
     Link { url: String },
 }
@@ -202,6 +206,21 @@ fn spawn_download(a: &Active, events: async_channel::Sender<Event>, what: Downlo
                     image
                 };
                 let _ = events.send(Event::Avatar { user, image }).await;
+            }
+            Download::Emoji { name, id } => {
+                let cached = crate::avatars::load_emoji(&id);
+                let image = if let Some(image) = cached {
+                    image
+                } else {
+                    let Ok(image) =
+                        fetch(&client, &rest::custom_emoji_image(&id), rest::parse_image).await
+                    else {
+                        return;
+                    };
+                    crate::avatars::store_emoji(&id, &image);
+                    image
+                };
+                let _ = events.send(Event::EmojiImage { name, image }).await;
             }
             Download::Link { url } => {
                 // No cache and no complaint: the card still reads
@@ -902,6 +921,9 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::FetchEmoji { name, id } => {
+            spawn_download(a, events.clone(), Download::Emoji { name, id });
+        }
         Command::FetchLinkImage(url) => {
             spawn_download(a, events.clone(), Download::Link { url });
         }
@@ -1388,6 +1410,11 @@ async fn sync(
         let ids: Vec<UserId> = dm_ids.iter().map(UserId::new).collect();
         send_statuses(client, &ids, events).await;
     }
+    // The server's own emoji. After the sidebar, because nothing on
+    // screen waits for it: a message holding `:party_parrot:` reads as
+    // `:party_parrot:` until the list lands and then becomes a picture.
+    send_custom_emoji(client, events).await;
+
     // What the server actually has, now that it has all been asked for.
     // The only place allowed to remove a channel: every `apply_*` merges,
     // so a channel left since the snapshot was written would otherwise
@@ -1435,6 +1462,43 @@ async fn send_statuses(client: &Client, users: &[UserId], events: &async_channel
     }
     if let Ok(statuses) = fetch(client, &rest::statuses_for(users), rest::parse_statuses).await {
         let _ = events.send(Event::Statuses(statuses)).await;
+    }
+}
+
+/// Every custom emoji the server has, a page at a time.
+///
+/// Capped, deliberately. A server can have thousands, and the window
+/// needs the list only to recognise a shortcode it is about to draw --
+/// so the cost of the list is paid on every sync while the benefit is
+/// paid on the handful that actually appear. Two hundred at a time up
+/// to a thousand is every emoji on an ordinary server and a bounded
+/// request on an extraordinary one; past that, the rest keep their
+/// shortcodes, which is what they looked like before any of this.
+async fn send_custom_emoji(client: &Client, events: &async_channel::Sender<Event>) {
+    const PER_PAGE: u32 = 200;
+    const PAGES: u32 = 5;
+
+    let mut all = Vec::new();
+    for page in 0..PAGES {
+        let Ok(found) = fetch(
+            client,
+            &rest::custom_emoji(page, PER_PAGE),
+            rest::parse_custom_emoji,
+        )
+        .await
+        else {
+            // Not worth a complaint: without the list every shortcode
+            // stays a shortcode, which is where this started.
+            break;
+        };
+        let short = found.len() < PER_PAGE as usize;
+        all.extend(found);
+        if short {
+            break;
+        }
+    }
+    if !all.is_empty() {
+        let _ = events.send(Event::CustomEmoji(all)).await;
     }
 }
 

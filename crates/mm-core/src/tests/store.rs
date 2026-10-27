@@ -2658,3 +2658,90 @@ fn a_thread_is_followed_while_it_is_in_the_list() {
     // And again is a no-op rather than a second redraw.
     assert!(store.unfollow(&root).is_empty());
 }
+
+/// Name to id, deleted ones dropped, and one change for the batch --
+/// because every message on screen may hold one of these, so naming
+/// each affected post would be a longer list than the redraw it asks
+/// for.
+#[test]
+fn the_servers_custom_emoji_are_held_by_name() {
+    let mut store = store();
+    let emoji = |id: &str, name: &str| mm_types::CustomEmoji {
+        id: mm_types::EmojiId::new(id),
+        name: name.to_owned(),
+        ..mm_types::CustomEmoji::default()
+    };
+
+    assert_eq!(store.custom_emoji("party_parrot"), None);
+
+    let changed = store.apply_custom_emoji(&[emoji("e1", "party_parrot"), emoji("e2", "shipit")]);
+    assert_eq!(changed, [Change::Emoji]);
+    assert_eq!(
+        store.custom_emoji("party_parrot"),
+        Some(&mm_types::EmojiId::new("e1"))
+    );
+    // The same page again is not a change: a resync must not redraw
+    // every message that holds an emoji.
+    assert!(
+        store
+            .apply_custom_emoji(&[emoji("e1", "party_parrot")])
+            .is_empty()
+    );
+
+    // Re-uploaded under the same name: a new id, so a new image.
+    assert_eq!(
+        store.apply_custom_emoji(&[emoji("e9", "party_parrot")]),
+        [Change::Emoji]
+    );
+    assert_eq!(
+        store.custom_emoji("party_parrot"),
+        Some(&mm_types::EmojiId::new("e9"))
+    );
+
+    // A deleted one leaves, and its shortcode comes back -- which says
+    // what was meant, where a broken image says nothing.
+    let gone = mm_types::CustomEmoji {
+        delete_at: mm_types::Timestamp(1),
+        ..emoji("e9", "party_parrot")
+    };
+    assert_eq!(
+        store.apply_custom_emoji(std::slice::from_ref(&gone)),
+        [Change::Emoji]
+    );
+    assert_eq!(store.custom_emoji("party_parrot"), None);
+    // Deleting one that was never held is not a change either.
+    assert!(store.apply_custom_emoji(&[gone]).is_empty());
+
+    // A nameless one cannot be typed or reacted with, so it is nothing.
+    assert!(store.apply_custom_emoji(&[emoji("e3", "")]).is_empty());
+    assert_eq!(store.custom_emoji(""), None);
+}
+
+/// Prefix matches before substring ones, which is the order
+/// `mm_md::search` uses for the standard table -- the two lists are
+/// shown together and a reader cannot tell which is which.
+#[test]
+fn custom_emoji_complete_prefix_first() {
+    let mut store = store();
+    let emoji = |name: &str| mm_types::CustomEmoji {
+        id: mm_types::EmojiId::new(name),
+        name: name.to_owned(),
+        ..mm_types::CustomEmoji::default()
+    };
+    store.apply_custom_emoji(&[emoji("parrot"), emoji("party_parrot"), emoji("sad_parrot")]);
+
+    assert_eq!(
+        store.custom_emoji_matching("par", 10),
+        ["parrot", "party_parrot", "sad_parrot"]
+    );
+    // Case is not a reason to miss one: shortcodes are lowercase and
+    // what gets typed is whatever the keyboard was doing.
+    assert_eq!(store.custom_emoji_matching("PARTY", 10), ["party_parrot"]);
+    assert_eq!(
+        store.custom_emoji_matching("par", 2),
+        ["parrot", "party_parrot"]
+    );
+    assert!(store.custom_emoji_matching("nothing", 10).is_empty());
+    // An empty query is everything, which is what an opened picker wants.
+    assert_eq!(store.custom_emoji_matching("", 10).len(), 3);
+}

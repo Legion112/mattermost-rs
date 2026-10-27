@@ -769,10 +769,56 @@ the shortcode first and the emoji's own name second, so "smile" finds \
 does not contain the word. Picking one toggles, like the quick buttons. \
 The popover is built per opening rather than kept: it is a few hundred \
 buttons and one per message row is how a client ends up using a gigabyte. \
+The composer has the same picker beside its paperclip, and that one \
+inserts the **shortcode** rather than the character: that is what \
+Mattermost stores and what its own clients render, so a message written \
+here reads the same everywhere and stays editable as text. The server's \
+own custom emoji are offered too, and first -- see `posts.custom_emoji`. \
 Verified on a live account: searching "rocket" and picking it put a 🚀 on \
-the message. NOT built: the server's **custom** emoji, which would have to \
-be fetched and cached; skin-tone variants; and an emoji button on the \
-composer for typing one into a message rather than reacting with it."""
+the message. NOT built: skin-tone variants, and a `:` completion in the \
+composer, so a shortcode still has to be typed in full or picked."""
+
+[[feature]]
+id       = "posts.custom_emoji"
+area     = "posts"
+upstream = "server-api"
+status   = "partial"
+endpoints = ["GET /api/v4/emoji", "GET /api/v4/emoji/{emoji_id}/image"]
+verified_against = "12.0.1"
+notes = """
+A server's own uploads. Standard shortcodes resolve against a table \
+compiled into the binary; a custom one resolves to an image only the \
+server has, and a client that does not fetch the list shows \
+`:party_parrot:` where everyone else sees a picture. On the live server \
+this was built against that is forty-one emoji, and most of the reactions \
+in some channels.
+
+The list is fetched once per sync, sorted by name and capped at a thousand \
+-- the default order is creation time, which changes as people upload, so \
+paging through it without `sort=name` shows one emoji twice and misses \
+another. Images are fetched **per emoji actually drawn**, not up front, and \
+cached on disk by id: a name can be freed and re-used for a different \
+picture, while re-uploading produces a new id, so the id is the only key \
+that cannot go stale. The store holds name to id and never the other way \
+round, because a reaction and a typed `:shortcode:` both carry the name.
+
+Drawn on the reaction chips, on the hover toolbar's one-click reactions, \
+and in both pickers, where the server's own come before the standard table. \
+Anything without a picture -- not custom, not here yet, or a fetch that \
+failed -- draws its shortcode, which is what it drew before any of this and \
+at least says what was meant. The picker redraws itself as pictures land, \
+coalesced: opening it asks for every custom emoji at once and forty answers \
+must not be forty rebuilds of the grid.
+
+Verified on a live account with forty-one custom emoji: the picker showed \
+shortcodes for a moment and then the pictures, reacting with one put the \
+picture on the chip, taking it back removed it, and the cache directory \
+held all forty-one afterwards. NOT built: **inline in a message**, which a \
+`GtkLabel` cannot do -- the body is Pango markup, which has no way to carry \
+an image, so that needs the body to become a `TextView` with child anchors. \
+A `:party_parrot:` in a message therefore still reads as `:party_parrot:`. \
+Also not built: uploading one, and the `emoji_added` WebSocket event, so an \
+emoji uploaded while this client is running is unknown until the next sync."""
 
 [[feature]]
 id       = "desktop.install"

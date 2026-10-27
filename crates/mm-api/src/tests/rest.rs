@@ -1049,3 +1049,49 @@ fn following_a_thread_is_a_put_and_unfollowing_is_a_delete() {
     assert_eq!(off.path, on.path);
     assert!(matches!(off.body, Body::Empty));
 }
+
+/// Sorted by name, and asked for by page. The default order is creation
+/// time, which changes as people upload -- so paging through it shows
+/// the same emoji twice and misses another.
+#[test]
+fn custom_emoji_is_listed_by_name_a_page_at_a_time() {
+    let first = custom_emoji(0, 200);
+    assert_eq!(first.method, Method::Get);
+    assert!(first.path.starts_with("/api/v4/emoji?"), "{}", first.path);
+    assert!(first.path.contains("page=0"), "{}", first.path);
+    assert!(first.path.contains("per_page=200"), "{}", first.path);
+    assert!(first.path.contains("sort=name"), "{}", first.path);
+
+    assert!(custom_emoji(3, 200).path.contains("page=3"));
+}
+
+/// By id, not by name: a name is user-supplied text going into a URL
+/// path, and the list this client already holds maps one to the other.
+#[test]
+fn an_emojis_image_is_fetched_by_id() {
+    let image = custom_emoji_image(&mm_types::EmojiId::new("e1"));
+    assert_eq!(image.path, "/api/v4/emoji/e1/image");
+    assert_eq!(image.method, Method::Get);
+}
+
+/// `null` on an empty page, like the drafts endpoint. Parsing straight
+/// into a `Vec` would make a server with no custom emoji at all look
+/// like a failed request.
+#[test]
+fn an_empty_emoji_page_is_null_not_an_array() {
+    assert!(parse_custom_emoji(&ok("null")).unwrap().is_empty());
+    assert!(parse_custom_emoji(&ok("[]")).unwrap().is_empty());
+
+    let listed = parse_custom_emoji(&ok(
+        r#"[{"id":"e1","name":"party_parrot","creator_id":"u1","create_at":1,"delete_at":0}]"#,
+    ))
+    .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].name, "party_parrot");
+
+    let err = HttpResponse::new(403, r#"{"id":"api.no","message":"nope"}"#);
+    assert!(matches!(
+        parse_custom_emoji(&err),
+        Err(ApiError::Forbidden(_))
+    ));
+}

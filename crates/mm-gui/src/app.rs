@@ -132,6 +132,9 @@ struct Ui {
     /// Pictures fetched for link previews, shared with the post rows that
     /// draw them.
     link_images: LinkImages,
+    /// The server's own emoji: which names it has, and the pictures
+    /// fetched so far. Shared with the rows and both composers.
+    emoji: Emoji,
     /// The dictionaries, once they have finished loading. `None` until
     /// then, and on a machine with none installed, which is why nothing
     /// waits on it.
@@ -441,6 +444,117 @@ struct Elsewhere {
 /// Faces already fetched and decoded, by whose they are.
 type Avatars = Rc<RefCell<HashMap<UserId, gdk::Texture>>>;
 
+/// How a `:shortcode:` the standard table does not have becomes a
+/// picture.
+///
+/// Three things travel together because none of them is useful alone:
+/// the store knows which names the server has, the cache holds the ones
+/// already decoded, and the sender is how the rest are asked for. The
+/// size of the first is the reason there is a cache at all -- a row is
+/// bound every time it scrolls past, and fetching on every bind would
+/// be a request per frame.
+#[derive(Clone)]
+struct Emoji {
+    store: Rc<RefCell<Store>>,
+    /// Decoded pictures by the name they are written as. A present key
+    /// means it has been asked for; `None` is "asked, not here yet".
+    images: Rc<RefCell<HashMap<String, Option<gdk::Texture>>>>,
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    /// How to draw the open picker again, while one is open.
+    ///
+    /// A message row is redrawn when a picture lands because the whole
+    /// list is; a popover is not in that list, so it would sit there
+    /// showing shortcodes for the pictures it has just asked for. One
+    /// slot, because there is one picker: it is set when a picker opens
+    /// and cleared when it closes.
+    refill: Rc<RefCell<Option<PickerRefill>>>,
+    /// Whether a redraw of the picker is already waiting. Opening it
+    /// asks for every custom emoji at once, and forty answers must not
+    /// be forty rebuilds of the grid.
+    nudged: Rc<std::cell::Cell<bool>>,
+}
+
+impl Emoji {
+    fn new(
+        store: &Rc<RefCell<Store>>,
+        commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    ) -> Self {
+        Self {
+            store: Rc::clone(store),
+            images: Rc::new(RefCell::new(HashMap::new())),
+            commands: commands.clone(),
+            refill: Rc::new(RefCell::new(None)),
+            nudged: Rc::new(std::cell::Cell::new(false)),
+        }
+    }
+
+    /// Draw the open picker again shortly, if one is open.
+    fn nudge_picker(&self) {
+        if self.nudged.get() || self.refill.borrow().is_none() {
+            return;
+        }
+        self.nudged.set(true);
+        let me = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+            me.nudged.set(false);
+            let refill = me.refill.borrow().clone();
+            if let Some(refill) = refill {
+                refill();
+            }
+        });
+    }
+
+    /// The picture for a shortcode, asking for it the first time.
+    ///
+    /// `None` covers all three of "not a custom emoji", "asked for and
+    /// not here yet" and "the fetch failed" -- which draw the same, as
+    /// the shortcode, and that is the right answer for each of them.
+    fn texture(&self, name: &str) -> Option<gdk::Texture> {
+        let id = self.store.borrow().custom_emoji(name).cloned()?;
+        if let Some(held) = self.images.borrow().get(name) {
+            return held.clone();
+        }
+        self.images.borrow_mut().insert(name.to_owned(), None);
+        self.commands
+            .send(Command::FetchEmoji {
+                name: name.to_owned(),
+                id,
+            })
+            .ok();
+        None
+    }
+
+    /// A picture sized to sit on a line of text.
+    fn image(texture: &gdk::Texture) -> gtk::Image {
+        let image = gtk::Image::from_paintable(Some(texture));
+        image.set_pixel_size(EMOJI_PIXELS);
+        image
+    }
+
+    /// Put a decoded picture in, and say whether it is new -- a repeat
+    /// must not cost a redraw of every message on screen.
+    fn received(&self, name: String, image: Vec<u8>) -> bool {
+        let bytes = glib::Bytes::from_owned(image);
+        let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
+            return false;
+        };
+        self.images
+            .borrow_mut()
+            .insert(name, Some(texture))
+            .flatten()
+            .is_none()
+    }
+}
+
+/// Drawing the open emoji picker again with whatever is in its search
+/// box now.
+type PickerRefill = Rc<dyn Fn()>;
+
+/// How big a custom emoji is drawn. Matches the height of a line of
+/// body text closely enough that a reaction chip does not grow when one
+/// lands in it.
+const EMOJI_PIXELS: i32 = 18;
+
 /// Everything a post row's widgets need to reach, as one thing.
 ///
 /// Each field is an `Rc` or a sender the factory clones per row, and
@@ -457,6 +571,7 @@ struct RowContext {
     shown: ShownTools,
     links: LinkImages,
     avatars: Avatars,
+    emoji: Emoji,
 }
 
 impl RowContext {
@@ -466,6 +581,7 @@ impl RowContext {
         commands: &tokio::sync::mpsc::UnboundedSender<Command>,
         store: &Rc<RefCell<Store>>,
         server: &Rc<RefCell<String>>,
+        emoji: &Emoji,
     ) -> Self {
         Self {
             commands: commands.clone(),
@@ -475,6 +591,7 @@ impl RowContext {
             shown: Rc::new(RefCell::new(None)),
             links: Rc::new(RefCell::new(HashMap::new())),
             avatars: Rc::new(RefCell::new(HashMap::new())),
+            emoji: emoji.clone(),
         }
     }
 }
@@ -524,7 +641,7 @@ fn build_thread_pane(
     thread_header.append(&thread_title);
     thread_header.append(&thread_follow);
     thread_header.append(&thread_close);
-    let thread_composer = build_composer("Reply…");
+    let thread_composer = build_composer("Reply…", &ctx.emoji);
     let thread_composer_pane = thread_composer.pane.clone();
     let thread_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
     thread_pane.append(&thread_header);
@@ -772,10 +889,11 @@ fn build(
     let server = Rc::new(RefCell::new(String::new()));
     let mm_desktop::Restored { geometry, channel } = restored;
     let reopen = (!channel.is_empty()).then(|| ChannelId::new(channel.as_str()));
-    let rows = RowContext::new(commands, &store, &server);
+    let emoji = Emoji::new(&store, commands);
+    let rows = RowContext::new(commands, &store, &server, &emoji);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
 
-    let (composer, status) = build_composer_row();
+    let (composer, status) = build_composer_row(&emoji);
 
     // The conversation, the Threads view and the Drafts view take turns
     // in the same space. The status line and the composer stay put under
@@ -861,6 +979,7 @@ fn build(
         found_title,
         found_list: found_list.clone(),
         link_images: Rc::clone(&rows.links),
+        emoji: rows.emoji.clone(),
         spelling: Rc::new(RefCell::new(None)),
         images: Rc::new(RefCell::new(HashMap::new())),
         viewer: Rc::clone(&rows.viewer),
@@ -1574,8 +1693,8 @@ fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool) {
 ///
 /// Insensitive until a channel is open: a composer that accepts text
 /// with nowhere to send it is a message the reader will lose.
-fn build_composer_row() -> (Composer, gtk::Label) {
-    let composer = build_composer("Write a message…");
+fn build_composer_row(emoji: &Emoji) -> (Composer, gtk::Label) {
+    let composer = build_composer("Write a message…", emoji);
     composer.pane.set_sensitive(false);
     let status = gtk::Label::builder()
         .xalign(0.0)
@@ -1594,7 +1713,7 @@ fn build_composer_row() -> (Composer, gtk::Label) {
 /// line. Shift+Return puts in a newline and Return sends, which is the
 /// binding Mattermost uses and the one muscle memory expects -- an
 /// `Entry` can express neither, since it has no newline to insert.
-fn build_composer(placeholder: &str) -> Composer {
+fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
     let view = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
         .top_margin(8)
@@ -1639,16 +1758,16 @@ fn build_composer(placeholder: &str) -> Composer {
     attach.set_margin_bottom(4);
     attach.set_margin_end(4);
 
-    let emoji = gtk::Button::from_icon_name("face-smile-symbolic");
-    emoji.set_tooltip_text(Some("Insert an emoji"));
-    emoji.add_css_class("flat");
-    emoji.set_valign(gtk::Align::End);
-    emoji.set_margin_bottom(4);
+    let emoji_button = gtk::Button::from_icon_name("face-smile-symbolic");
+    emoji_button.set_tooltip_text(Some("Insert an emoji"));
+    emoji_button.add_css_class("flat");
+    emoji_button.set_valign(gtk::Align::End);
+    emoji_button.set_margin_bottom(4);
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.add_css_class("card");
     row.append(&scroll);
-    row.append(&emoji);
+    row.append(&emoji_button);
     row.append(&attach);
 
     // What has been chosen but not yet sent, above the box it will be
@@ -1673,7 +1792,7 @@ fn build_composer(placeholder: &str) -> Composer {
         chosen: Rc::new(RefCell::new(Vec::new())),
     };
     composer.wire_attach(&attach);
-    composer.wire_emoji(&emoji);
+    composer.wire_emoji(&emoji_button, emoji);
     composer.wire_paste();
     composer.wire_drop();
     composer
@@ -1711,17 +1830,19 @@ impl Composer {
     /// Mattermost stores and what the server's own clients render, so
     /// a message written here reads the same everywhere -- and it
     /// stays editable as text.
-    fn wire_emoji(&self, button: &gtk::Button) {
+    fn wire_emoji(&self, button: &gtk::Button, emoji: &Emoji) {
         let composer = self.clone();
         // Nothing to keep alive between openings, so the picker owns
         // no state here; `false` is a flag the hover toolbar needs and
         // a composer does not.
         let picking = Rc::new(std::cell::Cell::new(false));
+        let emoji = emoji.clone();
         button.connect_clicked(move |button| {
             let into = composer.clone();
             open_emoji_picker(
                 button.upcast_ref::<gtk::Widget>(),
                 &picking,
+                &emoji,
                 move |shortcode| into.insert_text(&format!(":{shortcode}: ")),
             );
         });
@@ -2041,10 +2162,11 @@ fn profile_card(
 /// everything the guesses do not cover.
 fn any_reaction_button(
     row: &gtk::Box,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    store: &Rc<RefCell<Store>>,
+    emoji: &Emoji,
     picking: &Rc<std::cell::Cell<bool>>,
 ) -> gtk::Button {
+    let commands = &emoji.commands;
+    let store = &emoji.store;
     let any = gtk::Button::from_icon_name("face-smile-symbolic");
     any.add_css_class("flat");
     any.set_tooltip_text(Some("React with any emoji"));
@@ -2052,6 +2174,7 @@ fn any_reaction_button(
     let store = Rc::clone(store);
     let row = row.clone();
     let picking = Rc::clone(picking);
+    let emoji = emoji.clone();
     any.connect_clicked(move |button| {
         // The post is on the row, put there at bind time, because the
         // rows are recycled and this button is made once.
@@ -2067,6 +2190,7 @@ fn any_reaction_button(
         open_emoji_picker(
             button.upcast_ref::<gtk::Widget>(),
             &picking,
+            &emoji,
             move |shortcode| {
                 // A toggle like the quick buttons: picking one already
                 // used takes it back.
@@ -2093,6 +2217,7 @@ fn any_reaction_button(
 fn open_emoji_picker(
     at: &gtk::Widget,
     picking: &Rc<std::cell::Cell<bool>>,
+    emoji: &Emoji,
     pick: impl Fn(&str) + 'static,
 ) {
     let search = gtk::SearchEntry::builder()
@@ -2128,34 +2253,78 @@ fn open_emoji_picker(
     });
 
     let pick = Rc::new(pick);
-    let fill = {
+    let fill: Rc<dyn Fn(&str)> = {
         let grid = grid.clone();
         let popup = popup.clone();
         let pick = Rc::clone(&pick);
-        move |query: &str| {
+        let emoji = emoji.clone();
+        Rc::new(move |query: &str| {
             while let Some(old) = grid.first_child() {
                 grid.remove(&old);
             }
-            for found in mm_md::search_emoji(query, EMOJI_OFFERED) {
-                let button = gtk::Button::builder()
-                    .label(found.glyph)
-                    .css_classes(["flat"])
-                    .tooltip_text(format!(":{}:", found.shortcode))
-                    .build();
-                let pick = Rc::clone(&pick);
-                let popup = popup.clone();
-                let shortcode = found.shortcode;
-                button.connect_clicked(move |_| {
-                    pick(shortcode);
-                    popup.popdown();
-                });
-                grid.append(&button);
+            // The server's own first. They are the ones a reader cannot
+            // find anywhere else, there are far fewer of them, and on a
+            // team that leans on them they are most of what gets picked.
+            let custom = emoji
+                .store
+                .borrow()
+                .custom_emoji_matching(query, EMOJI_OFFERED);
+            for name in custom {
+                grid.append(&picker_button(&emoji, &name, &pick, &popup));
             }
-        }
+            for found in mm_md::search_emoji(query, EMOJI_OFFERED) {
+                grid.append(&picker_button(&emoji, found.shortcode, &pick, &popup));
+            }
+        })
     };
     fill("");
+    // Drawing the grid asked for every custom emoji on it, and the
+    // answers arrive after it is already on screen -- so the picker has
+    // to be able to draw itself again, with whatever is in the box now.
+    *emoji.refill.borrow_mut() = Some({
+        let fill = Rc::clone(&fill);
+        let search = search.clone();
+        Rc::new(move || fill(search.text().as_str()))
+    });
+    {
+        let emoji = emoji.clone();
+        popup.connect_closed(move |_| {
+            emoji.refill.borrow_mut().take();
+        });
+    }
     search.connect_search_changed(move |entry| fill(entry.text().as_str()));
     popup.popup();
+}
+
+/// One emoji in the picker's grid.
+///
+/// A custom one draws its picture once the bytes are here and its
+/// shortcode until then, which is also what it draws if the fetch never
+/// succeeds -- the same fallback the message body has always used.
+fn picker_button(
+    emoji: &Emoji,
+    name: &str,
+    pick: &Rc<impl Fn(&str) + 'static>,
+    popup: &gtk::Popover,
+) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .css_classes(["flat"])
+        .tooltip_text(format!(":{name}:"))
+        .build();
+    if let Some(texture) = emoji.texture(name) {
+        button.set_child(Some(&Emoji::image(&texture)));
+    } else {
+        button
+            .set_label(&mm_md::glyph(name).map_or_else(|| format!(":{name}:"), ToOwned::to_owned));
+    }
+    let pick = Rc::clone(pick);
+    let popup = popup.clone();
+    let name = name.to_owned();
+    button.connect_clicked(move |_| {
+        pick(&name);
+        popup.popdown();
+    });
+    button
 }
 
 /// Open the card for whoever the row under this widget is showing.
@@ -3212,7 +3381,7 @@ fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -
     // toolbar must not be taken down by the leave that opening it
     // caused. The same trap the overflow menu is guarded against.
     let picking = Rc::new(std::cell::Cell::new(false));
-    tools.append(&any_reaction_button(row, commands, store, &picking));
+    tools.append(&any_reaction_button(row, &ctx.emoji, &picking));
 
     let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
     reply.add_css_class("flat");
@@ -3439,7 +3608,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
                 if data.is_separator() {
                     return;
                 }
-                label_quick_reactions(&tools, &data);
+                label_quick_reactions(&tools, &data, &ctx.emoji);
                 tools.set_visible(true);
                 show_only(&ctx.shown, &tools);
             }
@@ -3508,7 +3677,7 @@ fn hide_tools(item: &gtk::ListItem, shown: &ShownTools) {
 /// The buttons are made once and reused as rows are recycled, so the
 /// emoji is put on them here; the tooltip carries the shortcode, which is
 /// what the click handler sends.
-fn label_quick_reactions(tools: &gtk::Box, data: &PostRow) {
+fn label_quick_reactions(tools: &gtk::Box, data: &PostRow, emoji_cache: &Emoji) {
     let mine: Vec<String> = data
         .reactions()
         .into_iter()
@@ -3523,9 +3692,15 @@ fn label_quick_reactions(tools: &gtk::Box, data: &PostRow) {
         if !current.widget_name().starts_with("quick") {
             break;
         }
-        current.set_label(
-            &mm_md::glyph(&emoji).map_or_else(|| format!(":{emoji}:"), ToOwned::to_owned),
-        );
+        // One of the server's own draws its picture; everything else
+        // draws a glyph, or its shortcode when there is no glyph.
+        if let Some(texture) = emoji_cache.texture(&emoji) {
+            current.set_child(Some(&Emoji::image(&texture)));
+        } else {
+            current.set_label(
+                &mm_md::glyph(&emoji).map_or_else(|| format!(":{emoji}:"), ToOwned::to_owned),
+            );
+        }
         current.set_tooltip_text(Some(&emoji));
         // Lit when the reader has already used it, so the button says
         // which way it will go before it is pressed -- the same signal
@@ -4351,7 +4526,7 @@ fn open_editor(
 
 /// Hide the hover toolbar and relabel its one-click reactions for the row
 /// now bound to it.
-fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
+fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow, emoji: &Emoji) {
     // Only a row somebody has hovered over has a toolbar at all, and one
     // that does is being recycled onto another message, so its one-click
     // reactions have to be relabelled. The overflow menu is made and
@@ -4362,7 +4537,7 @@ fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
         && tools.has_css_class("mmrs-tools")
     {
         tools.set_visible(false);
-        label_quick_reactions(&tools, data);
+        label_quick_reactions(&tools, data, emoji);
     }
 }
 
@@ -4497,7 +4672,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         body.remove_css_class("dim-label");
     }
 
-    bind_message_tools(&floating, &data);
+    bind_message_tools(&floating, &data, &ctx.emoji);
 
     bind_cards(&cards, &data, commands, links);
     bind_images(&images, &data, commands, viewer);
@@ -4531,7 +4706,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         reactions.append(&open);
     }
     for chip in chips {
-        reactions.append(&reaction_chip(&data.id(), &chip, commands));
+        reactions.append(&reaction_chip(&data.id(), &chip, &ctx.emoji));
     }
 }
 
@@ -4741,20 +4916,27 @@ fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
 }
 
 /// One reaction, as a button that toggles the signed-in user's own.
-fn reaction_chip(
-    post: &str,
-    summary: &mm_core::ReactionSummary,
-    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-) -> gtk::Button {
-    // A custom or unknown emoji keeps its shortcode: `:shipit:` says what
-    // was meant, where a blank chip says nothing.
-    let face = mm_md::glyph(&summary.emoji)
-        .map_or_else(|| format!(":{}:", summary.emoji), ToOwned::to_owned);
+fn reaction_chip(post: &str, summary: &mm_core::ReactionSummary, emoji: &Emoji) -> gtk::Button {
+    let commands = &emoji.commands;
     let chip = gtk::Button::builder()
-        .label(format!("{face} {}", summary.count))
         .css_classes(["flat", "caption"])
         .tooltip_text(format!(":{}:", summary.emoji))
         .build();
+    // One of the server's own, with its picture here: the chip is the
+    // image and the count side by side. Otherwise a label -- the glyph
+    // for a standard shortcode, and the shortcode itself for a custom
+    // one whose picture has not arrived or never will, because
+    // `:shipit:` says what was meant where a blank chip says nothing.
+    if let Some(texture) = emoji.texture(&summary.emoji) {
+        let both = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        both.append(&Emoji::image(&texture));
+        both.append(&gtk::Label::new(Some(&summary.count.to_string())));
+        chip.set_child(Some(&both));
+    } else {
+        let face = mm_md::glyph(&summary.emoji)
+            .map_or_else(|| format!(":{}:", summary.emoji), ToOwned::to_owned);
+        chip.set_label(&format!("{face} {}", summary.count));
+    }
     if summary.mine {
         chip.add_css_class("suggested-action");
     }
@@ -6577,6 +6759,7 @@ impl Ui {
                     self.redraw_soon();
                 }
             }
+            Event::CustomEmoji(_) | Event::EmojiImage { .. } => self.on_emoji(event),
             Event::ChannelRoster { channel, users } => {
                 self.store
                     .borrow_mut()
@@ -6771,6 +6954,29 @@ impl Ui {
     /// Decode a face and redraw wherever it appears.
     ///
     /// `Texture::from_bytes` decodes on this thread. The plan puts image
+    /// The server's own emoji: the list, and the pictures.
+    fn on_emoji(&self, event: Event) {
+        match event {
+            // No redraw for the list. A row only asks for a picture
+            // while it is being drawn, so learning the names changes
+            // nothing on screen until something is drawn again -- and
+            // the pictures that arrive then each ask for their own.
+            Event::CustomEmoji(emoji) => {
+                self.store.borrow_mut().apply_custom_emoji(&emoji);
+            }
+            // Coalesced, and it has to be: the emoji on a busy
+            // channel's reactions all land within a few milliseconds of
+            // each other, and each one would otherwise redraw the lot.
+            Event::EmojiImage { name, image } => {
+                if self.emoji.received(name, image) {
+                    self.redraw_soon();
+                    self.emoji.nudge_picker();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// decode on the engine, and for message images it will stay there -- an
     /// avatar is at most 128px and decodes in well under a millisecond,
     /// which is cheaper than the round trip that moving it would cost.

@@ -176,6 +176,10 @@ fn normalise_endpoint(endpoint: &str) -> String {
 }
 
 fn normalise_path(path: &str) -> String {
+    // The query string is not part of the path. A builder that pages or
+    // sorts writes one; the matrix documents the endpoint, and nobody
+    // writing a row would think to copy `?page={}&per_page={}` into it.
+    let path = path.split('?').next().unwrap_or(path);
     let mut out = String::new();
     let mut in_placeholder = false;
     for ch in path.chars() {

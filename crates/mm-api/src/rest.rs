@@ -6,9 +6,9 @@
 use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
-    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, Draft, FileId,
-    FileRef, Post, PostId, PostList, Preference, Reaction, Status, Team, TeamId, ThreadList, User,
-    UserId,
+    CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, CustomEmoji,
+    Draft, EmojiId, FileId, FileRef, Post, PostId, PostList, Preference, Reaction, Status, Team,
+    TeamId, ThreadList, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -539,6 +539,41 @@ pub fn parse_image(resp: &HttpResponse) -> Result<Vec<u8>, ApiError> {
         return Err(ApiError::from_response(resp));
     }
     Ok(resp.body.clone())
+}
+
+/// A page of the server's own custom emoji.
+///
+/// Sorted by name, which the server only honours on this endpoint when
+/// asked: the default order is creation time, and a list that changes
+/// order as people upload is a list that cannot be paged through
+/// without seeing the same emoji twice and missing another.
+#[must_use]
+pub fn custom_emoji(page: u32, per_page: u32) -> HttpRequest {
+    HttpRequest::get(format!(
+        "{API}/emoji?page={page}&per_page={per_page}&sort=name"
+    ))
+}
+
+/// The emoji in one page of that list.
+///
+/// `null` rather than `[]` on an empty page, for the same reason the
+/// drafts endpoint does it -- and with the same consequence if parsed
+/// straight into a `Vec`: a server with no custom emoji at all would
+/// look like a failed request.
+pub fn parse_custom_emoji(resp: &HttpResponse) -> Result<Vec<CustomEmoji>, ApiError> {
+    let emoji: Option<Vec<CustomEmoji>> = parse_json(resp, "GET /emoji")?;
+    Ok(emoji.unwrap_or_default())
+}
+
+/// One custom emoji's image bytes.
+///
+/// By id rather than by name. The name endpoint exists, but a name is
+/// user-supplied text in a URL path, and the id is sixteen hex-ish
+/// characters that need no escaping -- and the list this client already
+/// holds maps one to the other.
+#[must_use]
+pub fn custom_emoji_image(emoji: &EmojiId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/emoji/{emoji}/image"))
 }
 
 /// An attached file's bytes.

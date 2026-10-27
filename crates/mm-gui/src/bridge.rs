@@ -163,6 +163,13 @@ pub enum Command {
         file: FileId,
         name: String,
     },
+    /// Fetch one custom emoji's image. Asked once per emoji the window
+    /// has had to draw, by id, because a name can be freed and re-used
+    /// while an id cannot.
+    FetchEmoji {
+        name: String,
+        id: mm_types::EmojiId,
+    },
     /// Fetch the picture a link preview offered, from whatever host the
     /// link points at. Asked once per URL, and never with a credential.
     FetchLinkImage(String),
@@ -255,6 +262,16 @@ pub enum Event {
     Users(Vec<User>),
     /// Where people are, for the dot on their face.
     Statuses(Vec<mm_types::Status>),
+    /// The server's own custom emoji. Everything the window needs to
+    /// turn `:party_parrot:` into a picture except the picture.
+    CustomEmoji(Vec<mm_types::CustomEmoji>),
+    /// One custom emoji's image, keyed by the name it is written as --
+    /// which is what a reaction chip and a message hold, and what the
+    /// window looks it up by.
+    EmojiImage {
+        name: String,
+        image: Vec<u8>,
+    },
     /// Who is in one channel, from the roster fetched when it opened.
     ///
     /// Separate from `Users` because the channel is the point: `users`

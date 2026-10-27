@@ -81,6 +81,23 @@ pub(crate) fn store(user: &UserId, version: Timestamp, bytes: &[u8]) {
     }
 }
 
+/// The cached image for one custom emoji.
+///
+/// Keyed on the emoji's **id**, not its name: a name can be freed and
+/// re-used for a different picture, while re-uploading produces a new
+/// id -- so the id is the only key that cannot go stale, and it is what
+/// the store holds anyway.
+#[must_use]
+pub(crate) fn load_emoji(emoji: &mm_types::EmojiId) -> Option<Vec<u8>> {
+    load_from(&cache_root()?.join("emoji"), emoji.as_str())
+}
+
+pub(crate) fn store_emoji(emoji: &mm_types::EmojiId, bytes: &[u8]) {
+    if let Some(root) = cache_root() {
+        store_in(&root.join("emoji"), emoji.as_str(), bytes);
+    }
+}
+
 /// The cached copy of an attached file.
 #[must_use]
 pub(crate) fn load_file(file: &FileId) -> Option<Vec<u8>> {
