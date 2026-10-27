@@ -444,9 +444,9 @@ notes = """
 Edit message, on the reader's own messages, opening the markdown they \
 wrote in a window of its own rather than turning the row into a text box: \
 a recycled `ListView` row is taken out from under the caret the moment \
-anything else arrives. NOT verified against a live server -- doing so means \
-editing a real message in a real channel -- so what is confirmed is the \
-request shape and the dialog, not the round trip. `PostEditTimeLimit` is not \
+anything else arrives. Verified on a live account, in the reader's own DM: \
+the editor opened with the message's own text, saving changed it, and the \
+server's copy came back with the new text and a non-zero `edit_at`. `PostEditTimeLimit` is not \
 read either, so a message too old to edit is refused by the server rather \
 than by the menu."""
 
@@ -648,8 +648,25 @@ popup is up. Verified on a live account: three lines typed with Shift+Return \
 stayed three lines, and Return cleared the box. A smiley beside the paperclip opens the same picker the hover toolbar \
 uses and inserts the **shortcode**, not the character: that is what \
 Mattermost stores and what every other client renders from, so a message \
-written here reads the same everywhere and stays editable as text. NOT \
-built: the formatting toolbar and the markdown preview eye."""
+written here reads the same everywhere and stays editable as text.
+
+**Mattermost's formatting keys** are here: Ctrl+B, Ctrl+I, Ctrl+Shift+X \
+and Ctrl+Shift+C put markers round the selection and take them off again \
+-- a toggle, the way every editor does it, so pressing bold twice leaves \
+what you started with. The markers are looked for outside the selection \
+first, which is what double-clicking the word inside `**word**` gives, and \
+then inside it, which is what dragging across them gives. With nothing \
+selected the markers go in and the caret lands between them. The \
+arithmetic is in `mm_md::wrap`, where the awkward cases are settled by \
+tests rather than by trying them in the window, and it counts characters \
+rather than bytes so a Cyrillic word is not sliced in half. Verified on a \
+live account: Ctrl+B made `**bold**`, Ctrl+B again took it back, and \
+Ctrl+Shift+C made a code span of it.
+
+NOT built: the formatting toolbar -- which is the other way to offer the \
+above, and is what Mattermost draws; for somebody who types code into chat \
+all day the keys are the thing, and a row of buttons takes height from the \
+conversation permanently -- and the markdown preview eye."""
 
 [[feature]]
 id       = "posts.spellcheck"

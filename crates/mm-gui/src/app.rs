@@ -2813,6 +2813,7 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
     for view in [composer, thread_composer] {
         attach_shortcodes(ui, view);
         watch_drafts(ui, view);
+        attach_formatting(view);
     }
     watch_typing(ui, composer, |ui| {
         Some((ui.selected.borrow().clone()?, None))
@@ -2853,6 +2854,64 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
         let store = ui.store.borrow();
         store.my_last_reply(&root).map(editable)
     });
+}
+
+/// Mattermost's formatting keys: bold, italic, strikethrough, code.
+///
+/// Markers round the selection, and off again when they are already
+/// there -- a toggle, the way every editor does it. The arithmetic is
+/// in `mm_md::wrap`, where the awkward cases are settled by tests
+/// rather than by trying it in the window.
+///
+/// A toolbar would be the other way to offer this, and is what
+/// Mattermost draws; for somebody who types code into chat all day
+/// the keys are the thing, and the toolbar is a row of buttons
+/// permanently taking height from the conversation.
+fn attach_formatting(view: &gtk::TextView) {
+    /// Each binding: the key, whether it wants Shift, and the marker.
+    const KEYS: &[(gdk::Key, bool, &str)] = &[
+        (gdk::Key::b, false, "**"),
+        (gdk::Key::i, false, "*"),
+        (gdk::Key::X, true, "~~"),
+        (gdk::Key::C, true, "`"),
+    ];
+
+    let keys = gtk::EventControllerKey::new();
+    let box_ = view.clone();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if !state.contains(gdk::ModifierType::CONTROL_MASK) {
+            return glib::Propagation::Proceed;
+        }
+        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+        let Some((_, _, marker)) = KEYS
+            .iter()
+            .find(|(wanted, with_shift, _)| *wanted == key && *with_shift == shift)
+        else {
+            return glib::Propagation::Proceed;
+        };
+        format_selection(&box_, marker);
+        glib::Propagation::Stop
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    view.add_controller(keys);
+}
+
+/// Put `marker` round what is selected, or take it off again.
+fn format_selection(view: &gtk::TextView, marker: &str) {
+    let buffer = view.buffer();
+    let (from, to) = buffer.selection_bounds().unwrap_or_else(|| {
+        (
+            buffer.iter_at_mark(&buffer.get_insert()),
+            buffer.iter_at_mark(&buffer.get_insert()),
+        )
+    });
+    let offset = |iter: &gtk::TextIter| usize::try_from(iter.offset()).unwrap_or(0);
+    let done = mm_md::wrap(&composer_text(view), offset(&from), offset(&to), marker);
+
+    buffer.set_text(&done.text);
+    let place = |at: usize| buffer.iter_at_offset(i32::try_from(at).unwrap_or(i32::MAX));
+    buffer.select_range(&place(done.start), &place(done.end));
+    view.grab_focus();
 }
 
 /// Tell the channel somebody is writing.
@@ -3493,6 +3552,10 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("at", "Offer the people in this channel"),
             ("colon", "Offer emoji, the server's own first"),
             ("Tab", "Accept what is offered"),
+            ("<Control>b", "Bold"),
+            ("<Control>i", "Italic"),
+            ("<Control><Shift>x", "Strikethrough"),
+            ("<Control><Shift>c", "Code"),
         ],
     ),
 ];
