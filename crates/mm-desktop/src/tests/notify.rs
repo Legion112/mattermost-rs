@@ -294,8 +294,8 @@ fn the_sound_setting_rides_along_without_deciding_anything() {
         ..NotifySettings::default()
     };
 
-    let loud = notification_for(&post, &me, "them", "c1", false, None, &settings(true))
-        .expect("notifies");
+    let loud =
+        notification_for(&post, &me, "them", "c1", false, None, &settings(true)).expect("notifies");
     assert!(loud.sound);
     let quiet = notification_for(&post, &me, "them", "c1", false, None, &settings(false))
         .expect("still notifies");

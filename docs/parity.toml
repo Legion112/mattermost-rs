@@ -178,8 +178,31 @@ nothing, which reads as the client ignoring you. Waiting for that click \
 means waiting as long as the banner is up, so each one waits on a thread of \
 its own, ending when its banner does. The icon is the installed one's name \
 rather than the binary's, which is why the test notification used to draw a \
-generic placeholder. Verified on this machine with `dbus-monitor`: the \
-`Notify` call carries the `default` action and the right icon name. NOT \
+generic placeholder.
+
+**The reader's own account settings decide whether to notify at all**, and \
+they were being ignored: the global preference defaulted to "tell me about \
+everything", so an account set to mentions-only -- which this one is -- was \
+notified about every message in every unmuted channel. Nothing fetched the \
+signed-in user's record, because the roster request is built from the DM \
+partners and the reader is on nobody's DM list but their own. It is fetched \
+on each sync now, for its `notify_props`.
+
+**A sound**, which for most people is the notification: a desktop with \
+banners switched off still makes it, and a chat client that arrives in \
+silence is one you find out about an hour later. `sound-name` is set to \
+`message-new-instant`, the freedesktop sound-naming id for exactly this, so \
+the desktop's own theme decides what it sounds like, and \
+`desktop_sound: "false"` on the account sends `suppress-sound` instead. \
+Whether to make a sound is kept apart from whether to notify, because they \
+are separate settings there and somebody who turned the sound off still \
+wants the banner. `desktop-entry` goes on every notification too: without \
+it GNOME labels the banner from the application name and finds no icon, \
+because it looks that name up among installed applications.
+
+Verified on this machine with `dbus-monitor`: the \
+`Notify` call carries the `default` action, the right icon name, \
+`desktop-entry`, `category` `im.received` and `sound-name`. NOT \
 verified: the click itself, which needs somebody to send a mention. \
 UNVERIFIED: whether muting alone should silence notifications; see \
 NotifySettings::muted_is_silent."""
