@@ -1498,6 +1498,16 @@ async fn sync(
     snapshot.teams.clone_from(&teams);
     let _ = events.send(Event::Teams(teams)).await;
 
+    // The signed-in user's own record, which nothing else fetches:
+    // `users_by_ids` is built from the DM partners and the reader is
+    // on nobody's DM list but their own. It carries their
+    // `notify_props`, which is how this client learns whether they
+    // asked to be told about every message or only mentions -- and
+    // whether to make a sound.
+    if let Ok(me) = fetch(client, &rest::me(), rest::parse_user).await {
+        snapshot.users.push(me.clone());
+        let _ = events.send(Event::Users(vec![me])).await;
+    }
     send_people(client, session, &mut dm_ids, &mut snapshot, events).await;
     // The server's own emoji. After the sidebar, because nothing on
     // screen waits for it: a message holding `:party_parrot:` reads as

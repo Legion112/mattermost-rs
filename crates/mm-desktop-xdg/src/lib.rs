@@ -45,11 +45,37 @@ pub fn show(notification: &Notification) -> Result<(), String> {
     // nothing but a thing to dismiss, and clicking it does nothing --
     // which reads as the client ignoring you.
     builder.action("default", "Open");
+    common_hints(&mut builder, notification);
 
     builder
         .show()
         .map(|_| ())
         .map_err(|e| format!("could not post a notification: {e}"))
+}
+
+/// The hints both paths set.
+///
+/// `sound-name` is the whole notification for most people: a desktop
+/// with banners switched off still makes the sound, and a chat client
+/// that arrives in silence is one you find out about an hour later.
+/// `message-new-instant` is the freedesktop sound-naming id for
+/// exactly this, so the desktop's own theme decides what it is.
+///
+/// `desktop-entry` tells the shell which application this is. Without
+/// it GNOME labels the banner from `appname` and finds no icon,
+/// because it looks the name up among installed applications.
+fn common_hints(builder: &mut notify_rust::Notification, notification: &Notification) {
+    builder.hint(notify_rust::Hint::DesktopEntry(
+        mm_desktop::APP_ID.to_owned(),
+    ));
+    builder.hint(notify_rust::Hint::Category("im.received".to_owned()));
+    if notification.sound {
+        builder.hint(notify_rust::Hint::SoundName(
+            "message-new-instant".to_owned(),
+        ));
+    } else {
+        builder.hint(notify_rust::Hint::SuppressSound(true));
+    }
 }
 
 /// Show a notification and wait for the person to act on it.
@@ -78,6 +104,7 @@ pub fn show_and_wait(notification: &Notification) -> Result<bool, String> {
             "x-mattermost-rs-channel".into(),
             notification.channel.to_string(),
         ));
+    common_hints(&mut builder, notification);
 
     let handle = builder
         .show()

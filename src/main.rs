@@ -283,6 +283,10 @@ fn doctor() -> Result<(), String> {
             body: "Notifications are working.".into(),
             channel: mm_types::ChannelId::new("doctor"),
             is_mention: false,
+            // On purpose: `doctor` is run to find out whether a
+            // banner appears, and a sound is the other half of the
+            // answer.
+            sound: true,
         };
         if let Err(e) = mm_desktop_xdg::show(&probe) {
             println!("               the daemon refused it: {e}");

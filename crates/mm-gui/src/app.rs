@@ -6229,13 +6229,26 @@ impl Ui {
         };
 
         let member = store.my_member.get(&post.channel_id);
+        // The reader's own account settings, which this used to
+        // default to "tell me about everything" -- so an account
+        // asking for mentions only was notified about every message
+        // in every unmuted channel.
+        let mine = store.users.get(&me);
+        let prop = |key: &str| -> &str {
+            mine.and_then(|u| u.notify_props.get(key))
+                .map_or("", String::as_str)
+        };
         let settings = mm_desktop::NotifySettings {
+            global: mm_desktop::DesktopNotify::from_prop(prop("desktop")),
             channel: member.map_or(mm_desktop::DesktopNotify::Inherit, |m| {
                 mm_desktop::DesktopNotify::from_prop(
                     m.notify_props.get("desktop").map_or("", String::as_str),
                 )
             }),
             muted: store.is_muted(&post.channel_id),
+            // Mattermost writes this as the string "true" or "false"
+            // and treats anything missing as on.
+            sound: prop("desktop_sound") != "false",
             ..mm_desktop::NotifySettings::default()
         };
         let focused = self.selected.borrow().clone();

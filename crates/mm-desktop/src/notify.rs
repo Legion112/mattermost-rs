@@ -70,6 +70,14 @@ pub struct NotifySettings {
     pub notify_when_focused: bool,
     /// Suppress join/leave and other `system_*` posts.
     pub suppress_system: bool,
+    /// Whether a notification should make a sound.
+    ///
+    /// The user's `notify_props.desktop_sound`, which Mattermost
+    /// writes as the string `"true"` or `"false"` and defaults to on.
+    /// Kept separate from whether to notify at all, because they are
+    /// separate settings there and somebody who turned the sound off
+    /// still wants the banner.
+    pub sound: bool,
 }
 
 impl Default for NotifySettings {
@@ -81,6 +89,7 @@ impl Default for NotifySettings {
             muted_is_silent: true,
             notify_when_focused: false,
             suppress_system: true,
+            sound: true,
         }
     }
 }
@@ -109,6 +118,10 @@ pub struct Notification {
     pub channel: ChannelId,
     /// True when the reader was named, which callers use to pick urgency.
     pub is_mention: bool,
+    /// Whether to make a sound. A client with banners switched off at
+    /// the desktop still hears this, which for most people is the
+    /// whole notification.
+    pub sound: bool,
 }
 
 /// Why no notification was raised. Returned rather than a bare `None` so that
@@ -171,6 +184,7 @@ pub fn notification_for(
         body: summarize(&post.message),
         channel: post.channel_id.clone(),
         is_mention: mentioned,
+        sound: settings.sound,
     })
 }
 

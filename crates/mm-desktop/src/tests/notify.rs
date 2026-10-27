@@ -273,3 +273,35 @@ fn every_derive_is_exercised() {
     assert_eq!(d, d.clone());
     assert!(!format!("{d:?}").is_empty());
 }
+
+/// Whether to make a sound is a separate setting from whether to
+/// notify, and it travels on the notification: somebody who turned
+/// the sound off still wants the banner, and somebody with banners
+/// switched off at the desktop still hears the sound -- which for
+/// most people is the whole notification.
+#[test]
+fn the_sound_setting_rides_along_without_deciding_anything() {
+    let post = Post {
+        id: PostId::new("p1"),
+        channel_id: ChannelId::new("c1"),
+        user_id: UserId::new("them"),
+        message: "hello".to_owned(),
+        ..Post::default()
+    };
+    let me = UserId::new("me");
+    let settings = |sound: bool| NotifySettings {
+        sound,
+        ..NotifySettings::default()
+    };
+
+    let loud = notification_for(&post, &me, "them", "c1", false, None, &settings(true))
+        .expect("notifies");
+    assert!(loud.sound);
+    let quiet = notification_for(&post, &me, "them", "c1", false, None, &settings(false))
+        .expect("still notifies");
+    assert!(!quiet.sound);
+    // Only the sound differs: turning it off is not turning the
+    // notification off.
+    assert_eq!(loud.title, quiet.title);
+    assert_eq!(loud.body, quiet.body);
+}
