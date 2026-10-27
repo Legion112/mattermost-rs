@@ -2436,6 +2436,30 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
             ui.open_search();
             return glib::Propagation::Stop;
         }
+        // Alt+Up and Alt+Down walk the sidebar, and adding Shift walks
+        // only what is unread -- the bindings Mattermost uses, and the
+        // fastest way through a morning's backlog without reaching for
+        // the mouse once.
+        if state.contains(gdk::ModifierType::ALT_MASK) {
+            let unread_only = state.contains(gdk::ModifierType::SHIFT_MASK);
+            match key {
+                gdk::Key::Up | gdk::Key::KP_Up => {
+                    ui.step_channel(false, unread_only);
+                    return glib::Propagation::Stop;
+                }
+                gdk::Key::Down | gdk::Key::KP_Down => {
+                    ui.step_channel(true, unread_only);
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
+            }
+        }
+        // Escape puts the thread panel away, which is the only thing on
+        // screen that stays open until it is told not to.
+        if key == gdk::Key::Escape && ui.thread_pane.is_visible() {
+            ui.close_thread();
+            return glib::Propagation::Stop;
+        }
         glib::Propagation::Proceed
     });
     // Capture, not bubble: a `GtkEntry` with the focus consumes key
@@ -5275,6 +5299,71 @@ impl Ui {
         let mentions = self.store.borrow().total_mentions();
         if self.badge.replace(mentions) != mentions {
             self.commands.send(Command::Badge(mentions)).ok();
+        }
+    }
+
+    /// Put the thread panel away.
+    ///
+    /// The root goes too, not just the panel: a hidden panel still
+    /// holding a thread would take the next reply to it.
+    fn close_thread(&self) {
+        *self.thread_root.borrow_mut() = None;
+        self.thread_posts.remove_all();
+        self.thread_pane.set_visible(false);
+    }
+
+    /// Move to the channel before or after this one in the sidebar.
+    ///
+    /// Over the rows rather than over the store, because the sidebar is
+    /// what the reader is looking at: it is already in their order,
+    /// already folded where they folded it, and already filtered if
+    /// they turned the unread filter on. Walking the store instead
+    /// would step into channels that are not on screen.
+    ///
+    /// Wraps around, which is what makes Alt+Shift+Up usable as "the
+    /// other unread one" when there are two.
+    fn step_channel(&self, forward: bool, unread_only: bool) {
+        let rows: Vec<gtk::ListBoxRow> = (0..)
+            .map_while(|i| self.sidebar.row_at_index(i))
+            .filter(|row| row.is_selectable() && !row.widget_name().starts_with("mmrs:"))
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let open = self.selected.borrow().clone();
+        let at = open.and_then(|open| {
+            rows.iter()
+                .position(|row| row.widget_name() == open.as_str())
+        });
+        let unread: std::collections::HashSet<ChannelId> = if unread_only {
+            self.store
+                .borrow()
+                .sidebar()
+                .into_iter()
+                .filter(mm_core::SidebarRow::is_unread)
+                .map(|row| row.channel)
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        // From where we are, once around and no further: without the
+        // bound, "next unread" in a channel list with nothing unread
+        // would spin.
+        let count = rows.len();
+        let start = at.unwrap_or(if forward { count - 1 } else { 0 });
+        for step in 1..=count {
+            let next = if forward {
+                (start + step) % count
+            } else {
+                (start + count - step % count) % count
+            };
+            let row = &rows[next];
+            if unread_only && !unread.contains(&ChannelId::new(row.widget_name().as_str())) {
+                continue;
+            }
+            self.sidebar.select_row(Some(row));
+            return;
         }
     }
 

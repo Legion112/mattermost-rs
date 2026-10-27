@@ -779,3 +779,28 @@ on this machine with `dbus-monitor`: the signal carries \
 `application://dev.legion.mattermost_rs.desktop` and the right count. NOT \
 verified: that the dock draws it, which needed a mention to be waiting and \
 is the shell's business rather than this client's."""
+
+[[feature]]
+id       = "desktop.keyboard"
+area     = "desktop"
+upstream = "webapp"
+status   = "partial"
+endpoints = []
+verified_against = "12.0.1"
+notes = """
+Ctrl+K for the quick switcher, Ctrl+Shift+F for search, Alt+Up and Alt+Down \
+to walk the sidebar, Alt+Shift+Up and Alt+Shift+Down to walk only what is \
+unread, and Escape to put the thread panel away. Mattermost's own bindings. \
+Walking goes over the sidebar's rows rather than the store, because the \
+sidebar is what the reader is looking at: already in their order, already \
+folded where they folded it, and already filtered if they turned the unread \
+filter on -- walking the store instead would step into channels that are not \
+on screen. It wraps, which is what makes "previous unread" useful when there \
+are two, and it is bounded at one lap so "next unread" with nothing unread \
+stops instead of spinning. Every binding is on the window in the capture \
+phase, because a `GtkEntry` with the focus eats key presses and the composer \
+has the focus nearly always. Verified on a live account: Alt+Down walked \
+four channels and wrapped from the bottom of CHANNELS to the top of \
+FAVORITES, and Alt+Shift+Down landed on an unread one. NOT built: the \
+shortcuts overlay Ctrl+/ offers, Alt+Shift+Up/Down across teams, and the \
+message-level bindings (reply, edit the last message, react)."""
