@@ -553,16 +553,22 @@ async fn resolve_settings(
     events: &async_channel::Sender<Event>,
     collapsed: &std::sync::atomic::AtomicBool,
 ) {
-    let config = match fetch(client, &rest::client_config(), rest::parse_client_config).await {
+    // The config and the preferences are independent of each other, and
+    // of everything before them.
+    let config_request = rest::client_config();
+    let preference_request = rest::my_preferences();
+    let (config, preferences) = tokio::join!(
+        fetch(client, &config_request, rest::parse_client_config),
+        fetch(client, &preference_request, rest::parse_preferences),
+    );
+    let config = match config {
         Ok(config) => config,
         Err(e) => {
             let _ = events.send(Event::Failed(e)).await;
             BTreeMap::new()
         }
     };
-    let preferences = fetch(client, &rest::my_preferences(), rest::parse_preferences)
-        .await
-        .unwrap_or_default();
+    let preferences = preferences.unwrap_or_default();
     let preference = |name: &str| {
         preferences
             .iter()
@@ -610,7 +616,24 @@ async fn sync(
 
     let mut dm_ids: Vec<String> = Vec::new();
     for team in &teams {
-        match fetch(client, &rest::my_channels(&team.id), rest::parse_channels).await {
+        // Together, not one after another. These three do not depend on
+        // each other, and on a server a third of a second away the
+        // difference between three round trips and one is most of what a
+        // cold start felt like.
+        // Bound to names first: a request built inside `join!` is a
+        // temporary that does not live as long as the future holding it.
+        let channel_request = rest::my_channels(&team.id);
+        let member_request = rest::my_channel_members(&team.id);
+        // Addressed by explicit user id: there is no `/users/me/` form
+        // for categories.
+        let category_request = rest::my_categories(&UserId::new(&session.user_id), &team.id);
+        let (channels, members, categories) = tokio::join!(
+            fetch(client, &channel_request, rest::parse_channels),
+            fetch(client, &member_request, rest::parse_channel_members),
+            fetch(client, &category_request, rest::parse_categories),
+        );
+
+        match channels {
             Ok(channels) => {
                 for channel in &channels {
                     if channel.kind == mm_types::ChannelType::Direct {
@@ -624,44 +647,28 @@ async fn sync(
                     }
                 }
                 let _ = events.send(Event::Channels(channels)).await;
-                // The grouping the user set up, so the sidebar matches the
-                // one they see in every other Mattermost client. Addressed
-                // by explicit user id: there is no `/users/me/` form.
-                let user = UserId::new(&session.user_id);
-                match fetch(
-                    client,
-                    &rest::my_categories(&user, &team.id),
-                    rest::parse_categories,
-                )
-                .await
-                {
-                    Ok(list) => {
-                        let _ = events.send(Event::Categories(list)).await;
-                    }
-                    // A sidebar grouped the server's way is better than one
-                    // grouped ours, but one grouped ours is much better than
-                    // none: the store falls back to a flat list.
-                    Err(e) => {
-                        let _ = events.send(Event::Status(format!("categories: {e}"))).await;
-                    }
-                }
             }
             Err(e) => {
                 let _ = events.send(Event::Failed(e)).await;
             }
         }
-        match fetch(
-            client,
-            &rest::my_channel_members(&team.id),
-            rest::parse_channel_members,
-        )
-        .await
-        {
+        match members {
             Ok(members) => {
                 let _ = events.send(Event::Members(members)).await;
             }
             Err(e) => {
                 let _ = events.send(Event::Failed(e)).await;
+            }
+        }
+        match categories {
+            Ok(list) => {
+                let _ = events.send(Event::Categories(list)).await;
+            }
+            // A sidebar grouped the server's way is better than one
+            // grouped ours, but one grouped ours is much better than none:
+            // the store falls back to a flat list.
+            Err(e) => {
+                let _ = events.send(Event::Status(format!("categories: {e}"))).await;
             }
         }
     }
@@ -685,22 +692,21 @@ async fn open_channel(
     events: &async_channel::Sender<Event>,
     collapsed: bool,
 ) {
-    // The member count for the header. Sent before the posts because it is a
-    // small request and the header is the first thing that changes; a
-    // failure is not worth reporting, since the header simply shows the
-    // channel name without a count.
-    if let Ok(stats) = fetch(
-        client,
-        &rest::channel_stats(channel),
-        rest::parse_channel_stats,
-    )
-    .await
-    {
+    // Together: the member count and the messages do not depend on each
+    // other, and a round trip saved here is one off every click on a
+    // channel. A failed count is not worth reporting -- the header simply
+    // shows the channel's name without one.
+    let stats_request = rest::channel_stats(channel);
+    let posts_request = rest::posts_for_channel(channel, &PostQuery::first(), collapsed);
+    let (stats, posts) = tokio::join!(
+        fetch(client, &stats_request, rest::parse_channel_stats),
+        fetch(client, &posts_request, rest::parse_post_list),
+    );
+    if let Ok(stats) = stats {
         let _ = events.send(Event::Stats(stats)).await;
     }
 
-    let request = rest::posts_for_channel(channel, &PostQuery::first(), collapsed);
-    match fetch(client, &request, rest::parse_post_list).await {
+    match posts {
         Ok(page) => {
             // Post authors are often people not in any DM, so the roster has
             // to be filled from the page itself or every message reads as a
