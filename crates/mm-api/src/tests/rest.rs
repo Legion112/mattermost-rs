@@ -560,3 +560,59 @@ fn a_collapsed_page_asks_the_server_for_roots_only() {
     assert!(older.query.iter().any(|(k, _)| k == "collapsedThreads"));
     assert!(older.query.iter().any(|(k, v)| k == "before" && v == "p1"));
 }
+
+/// Pinning is two paths rather than a body flag, which is how the server
+/// models it.
+#[test]
+fn pinning_and_unpinning_are_different_paths() {
+    let p = PostId::new("p1");
+    assert_eq!(set_pinned(&p, true).path, "/api/v4/posts/p1/pin");
+    assert_eq!(set_pinned(&p, false).path, "/api/v4/posts/p1/unpin");
+    assert_eq!(set_pinned(&p, true).method, Method::Post);
+}
+
+/// Deleting is a DELETE on the post itself; the removal reaches the client
+/// as a `post_deleted` event, not as this response.
+#[test]
+fn deleting_a_post_is_a_delete_on_the_post() {
+    let request = delete_post(&PostId::new("p1"));
+    assert_eq!(request.method, Method::Delete);
+    assert_eq!(request.path, "/api/v4/posts/p1");
+}
+
+/// `set_unread` takes a **native** JSON boolean, unlike most of this
+/// API's booleans, which are strings -- and the flag has to match what
+/// the client does or the server maintains the wrong unread counters.
+#[test]
+fn marking_unread_sends_a_real_boolean() {
+    let request = set_unread(&UserId::new("u1"), &PostId::new("p1"), true);
+    assert_eq!(request.path, "/api/v4/users/u1/posts/p1/set_unread");
+    let Body::Json(body) = &request.body else {
+        panic!("expected a JSON body");
+    };
+    let body: serde_json::Value = serde_json::from_str(body).expect("parses");
+    assert_eq!(
+        body["collapsed_threads_supported"],
+        serde_json::Value::Bool(true),
+        "a string would be silently ignored"
+    );
+}
+
+/// Saving a post is a *preference*, not an endpoint of its own: the
+/// `flagged_post` category keyed by post id. Unsaving deletes that row,
+/// which is a different path.
+#[test]
+fn saving_a_post_writes_a_preference() {
+    let save = set_saved(&UserId::new("u1"), &PostId::new("p1"), true);
+    assert_eq!(save.method, Method::Put);
+    assert_eq!(save.path, "/api/v4/users/u1/preferences");
+    let Body::Json(body) = &save.body else {
+        panic!("expected a JSON body");
+    };
+    let body: serde_json::Value = serde_json::from_str(body).expect("parses");
+    assert_eq!(body[0]["category"], "flagged_post");
+    assert_eq!(body[0]["name"], "p1");
+
+    let unsave = set_saved(&UserId::new("u1"), &PostId::new("p1"), false);
+    assert_eq!(unsave.path, "/api/v4/users/u1/preferences/delete");
+}

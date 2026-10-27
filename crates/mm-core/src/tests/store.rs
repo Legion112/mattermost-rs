@@ -1679,3 +1679,36 @@ fn quick_reactions_are_capped_and_never_repeat() {
     );
     assert_eq!(offered.len(), 3);
 }
+
+/// A saved post is a preference in the `flagged_post` category keyed by
+/// post id -- there is no field on the post itself -- and only the reader
+/// can tell whether a post is theirs to delete.
+#[test]
+fn saved_and_own_posts_are_recognised() {
+    let mut store = store();
+    let mut page = PostList::default();
+    let mine = Post {
+        user_id: UserId::new(ME),
+        ..post("p-mine", "c1", 10)
+    };
+    let theirs = post("p-theirs", "c1", 20);
+    for p in [mine, theirs] {
+        page.order.push(p.id.clone());
+        page.posts.insert(p.id.clone(), p);
+    }
+    store.apply_post_list(&ChannelId::new("c1"), &page, PageAnchor::Newest);
+
+    assert!(store.is_mine(&PostId::new("p-mine")));
+    assert!(!store.is_mine(&PostId::new("p-theirs")));
+    assert!(!store.is_mine(&PostId::new("p-unknown")));
+
+    assert!(!store.is_saved(&PostId::new("p-mine")));
+    store.apply_preferences(&[mm_types::Preference {
+        category: "flagged_post".into(),
+        name: "p-mine".into(),
+        value: "true".into(),
+        ..mm_types::Preference::default()
+    }]);
+    assert!(store.is_saved(&PostId::new("p-mine")));
+    assert!(!store.is_saved(&PostId::new("p-theirs")));
+}

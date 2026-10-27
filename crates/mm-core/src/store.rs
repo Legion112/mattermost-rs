@@ -118,6 +118,11 @@ pub struct Store {
     /// user's preference. Never assumed: the default is `username`, and
     /// guessing otherwise renames everyone in the window.
     pub name_format: NameFormat,
+    /// The reader's preferences, flat and keyed `(category, name)` the
+    /// way the server stores them. Flat on purpose: Mattermost adds
+    /// preference categories constantly, and a struct per category would
+    /// need changing for each one.
+    pub prefs: BTreeMap<(String, String), String>,
     /// Member counts, fetched per channel when it is opened.
     pub stats: HashMap<ChannelId, ChannelStats>,
     /// Who reacted with what, and when they first did. Keyed separately from
@@ -284,6 +289,24 @@ impl Store {
             .is_some_and(Timeline::older_complete)
     }
 
+    /// Whether this reader has saved a post.
+    ///
+    /// Saved posts are preferences in the `flagged_post` category, keyed
+    /// by post id -- there is no field on the post itself.
+    #[must_use]
+    pub fn is_saved(&self, post: &PostId) -> bool {
+        self.prefs
+            .get(&("flagged_post".to_owned(), post.to_string()))
+            .is_some_and(|value| mm_types::is_true(value))
+    }
+
+    /// Whether this reader wrote a post, which decides whether they may
+    /// edit or delete it.
+    #[must_use]
+    pub fn is_mine(&self, post: &PostId) -> bool {
+        self.posts.get(post).is_some_and(|p| p.user_id == self.me)
+    }
+
     /// The emoji this reader reaches for most, commonest first.
     ///
     /// Mattermost offers a few one-click reactions on every message, and
@@ -372,6 +395,17 @@ impl Store {
         let mut out: Vec<ReactionSummary> = grouped.into_values().collect();
         out.sort_by(|a, b| a.first.cmp(&b.first).then_with(|| a.emoji.cmp(&b.emoji)));
         out
+    }
+
+    /// Take in the reader's preferences, replacing what is held.
+    pub fn apply_preferences(&mut self, prefs: &[mm_types::Preference]) -> Vec<Change> {
+        for pref in prefs {
+            self.prefs.insert(
+                (pref.category.clone(), pref.name.clone()),
+                pref.value.clone(),
+            );
+        }
+        vec![Change::ReadState]
     }
 
     pub fn apply_users(&mut self, users: Vec<User>) -> Vec<Change> {

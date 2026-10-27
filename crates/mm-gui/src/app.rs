@@ -957,6 +957,55 @@ fn build_message_tools(
     }
     tools.append(&copier);
 
+    // Everything else, behind the "…" the Electron client uses. Built as
+    // a plain popover of buttons rather than a `GMenu`: the entries change
+    // per message -- pin or unpin, save or unsave, delete only your own --
+    // and a menu model would have to be rebuilt anyway.
+    let more = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text("More actions")
+        .build();
+    let actions = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    actions.set_margin_top(4);
+    actions.set_margin_bottom(4);
+    let popover = gtk::Popover::builder().child(&actions).build();
+    more.set_popover(Some(&popover));
+    tools.append(&more);
+
+    let hover = gtk::EventControllerMotion::new();
+    {
+        let tools = tools.clone();
+        hover.connect_enter(move |_, _, _| tools.set_visible(true));
+    }
+    {
+        let tools = tools.clone();
+        // Not while its own menu is open. Opening the popover sends the
+        // pointer a leave, which hid the toolbar, which took the popover
+        // down with it -- the menu appeared and vanished in one frame.
+        let more = more.clone();
+        hover.connect_leave(move |_| {
+            if !more.is_active() {
+                tools.set_visible(false);
+            }
+        });
+    }
+    {
+        // And hide it once the menu closes, since by then the pointer has
+        // usually moved on and no leave is coming. `closed` lives on the
+        // popover rather than the button.
+        let tools = tools.clone();
+        let row = row.clone();
+        popover.connect_closed(move |_| {
+            // Unless the pointer is still on the message, in which case
+            // the toolbar belongs where it is.
+            if !row.state_flags().contains(gtk::StateFlags::PRELIGHT) {
+                tools.set_visible(false);
+            }
+        });
+    }
+    row.add_controller(hover);
+
     tools
 }
 
@@ -1039,17 +1088,6 @@ fn setup_post_row(
     line.append(&main);
 
     let tools = build_message_tools(&row, commands, store, server);
-
-    let hover = gtk::EventControllerMotion::new();
-    {
-        let tools = tools.clone();
-        hover.connect_enter(move |_, _, _| tools.set_visible(true));
-    }
-    {
-        let tools = tools.clone();
-        hover.connect_leave(move |_| tools.set_visible(false));
-    }
-    row.add_controller(hover);
 
     row.append(&day);
     // The reply button floats over the message rather than sitting beside
@@ -1347,15 +1385,124 @@ fn bind_images(images: &gtk::Box, data: &PostRow) {
     }
 }
 
+/// Fill a message's overflow menu.
+///
+/// Rebuilt per bind because the entries depend on the message -- pin or
+/// unpin, save or unsave, delete only your own -- and rows are recycled,
+/// so the one built last is for a different post.
+fn fill_message_menu(
+    popover: &gtk::Popover,
+    data: &PostRow,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+) {
+    let Some(actions) = popover.child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    while let Some(old) = actions.first_child() {
+        actions.remove(&old);
+    }
+
+    let post = PostId::new(data.id());
+    if post.as_str().is_empty() {
+        return;
+    }
+    let (pinned, saved, mine) = {
+        let store = store.borrow();
+        (
+            store.posts.get(&post).is_some_and(|p| p.is_pinned),
+            store.is_saved(&post),
+            store.is_mine(&post),
+        )
+    };
+
+    let entry = |label: &str| {
+        gtk::Button::builder()
+            .label(label)
+            .css_classes(["flat"])
+            .halign(gtk::Align::Fill)
+            .build()
+    };
+    let add = |button: &gtk::Button, command: Command| {
+        let commands = commands.clone();
+        let popover = popover.clone();
+        button.connect_clicked(move |_| {
+            commands.send(command.clone()).ok();
+            popover.popdown();
+        });
+        actions.append(button);
+    };
+
+    add(&entry("Reply in thread"), Command::OpenThread(post.clone()));
+    add(&entry("Mark as unread"), Command::MarkUnread(post.clone()));
+    add(
+        &entry(if saved {
+            "Remove from saved"
+        } else {
+            "Save message"
+        }),
+        Command::Save {
+            post: post.clone(),
+            saved: !saved,
+        },
+    );
+    add(
+        &entry(if pinned {
+            "Unpin from channel"
+        } else {
+            "Pin to channel"
+        }),
+        Command::Pin {
+            post: post.clone(),
+            pinned: !pinned,
+        },
+    );
+
+    // Copying is local, so it goes straight to the clipboard rather than
+    // through the engine.
+    let copy_text = entry("Copy text");
+    {
+        let body = data.plain_body();
+        let popover = popover.clone();
+        copy_text.connect_clicked(move |_| {
+            if let Some(display) = gdk::Display::default() {
+                display.clipboard().set_text(&body);
+            }
+            popover.popdown();
+        });
+    }
+    actions.append(&copy_text);
+
+    if mine {
+        actions.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        let delete = entry("Delete message");
+        delete.add_css_class("destructive-action");
+        add(&delete, Command::Delete(post));
+    }
+}
+
 /// Hide the hover toolbar and relabel its one-click reactions for the row
 /// now bound to it.
-fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
+fn bind_message_tools(
+    floating: &gtk::Overlay,
+    data: &PostRow,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+) {
     if let Some(tools) = floating.last_child().and_downcast::<gtk::Box>() {
         tools.set_visible(false);
         // Relabel the one-click reactions for this row. The buttons are
         // made once in setup and reused, so the emoji has to be put on
         // them here -- and the tooltip carries the shortcode, which is
         // what the click handler sends.
+        // The overflow menu's entries depend on the message: pin or
+        // unpin, save or unsave, and delete only what the reader wrote.
+        if let Some(more) = tools.last_child().and_downcast::<gtk::MenuButton>()
+            && let Some(actions) = more.popover().and_downcast::<gtk::Popover>()
+        {
+            fill_message_menu(&actions, data, commands, store);
+        }
+
         let mut button = tools.first_child();
         for emoji in data.quick_reactions() {
             let Some(current) = button.and_downcast::<gtk::Button>() else {
@@ -1373,7 +1520,11 @@ fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
     }
 }
 
-fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
+fn bind_post_row(
+    item: &gtk::ListItem,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    store: &Rc<RefCell<Store>>,
+) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
     };
@@ -1464,7 +1615,7 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         body.remove_css_class("dim-label");
     }
 
-    bind_message_tools(&floating, &data);
+    bind_message_tools(&floating, &data, commands, store);
 
     bind_cards(&cards, &data);
     bind_images(&images, &data);
@@ -1646,9 +1797,10 @@ fn build_post_list(
         }
     });
     let sender = commands.clone();
+    let store_for_bind = Rc::clone(store);
     factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            bind_post_row(item, &sender);
+            bind_post_row(item, &sender, &store_for_bind);
         }
     });
     let post_view = gtk::ListView::builder()
@@ -2012,6 +2164,9 @@ impl Ui {
             },
             reactions: store.reactions_for(&post.id),
             quick_reactions: quick.clone(),
+            // What the author typed, not what is drawn: "copy text" should
+            // paste back as markdown, the way it was written.
+            plain_body: post.message.clone(),
             avatar,
             images,
             cards: post
@@ -2162,6 +2317,9 @@ impl Ui {
             Event::Categories(list) => {
                 self.store.borrow_mut().apply_categories(&list);
                 self.refresh_sidebar();
+            }
+            Event::Preferences(prefs) => {
+                self.store.borrow_mut().apply_preferences(&prefs);
             }
             Event::Users(users) => {
                 self.store.borrow_mut().apply_users(users);

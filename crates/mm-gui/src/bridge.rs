@@ -42,6 +42,14 @@ pub enum Command {
     },
     /// Load a thread so it can be read beside the channel.
     OpenThread(PostId),
+    /// Pin a post to its channel, or take the pin off.
+    Pin { post: PostId, pinned: bool },
+    /// Save a post, or take it out of the saved list.
+    Save { post: PostId, saved: bool },
+    /// Mark a post, and everything after it, unread.
+    MarkUnread(PostId),
+    /// Delete a post. Only ever the reader's own.
+    Delete(PostId),
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
     /// Fetch the page of history immediately before `before`, which is the
@@ -132,6 +140,8 @@ pub enum Event {
         image: Vec<u8>,
     },
     Users(Vec<User>),
+    /// The reader's preferences, which carry saved posts among much else.
+    Preferences(Vec<mm_types::Preference>),
     Posts {
         channel: ChannelId,
         page: PostList,

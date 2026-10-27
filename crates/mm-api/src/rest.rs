@@ -288,6 +288,55 @@ pub fn file_contents(file: &FileId, preview: bool) -> HttpRequest {
     HttpRequest::get(path)
 }
 
+/// Pin a post to its channel, or take the pin off.
+///
+/// Two paths rather than a body flag, which is how the server models it.
+#[must_use]
+pub fn set_pinned(post: &PostId, pinned: bool) -> HttpRequest {
+    let verb = if pinned { "pin" } else { "unpin" };
+    HttpRequest::post(format!("{API}/posts/{post}/{verb}"))
+}
+
+/// Delete a post. The server soft-deletes; the post comes back over the
+/// WebSocket as a `post_deleted`, which is what actually removes it here.
+#[must_use]
+pub fn delete_post(post: &PostId) -> HttpRequest {
+    HttpRequest::delete(format!("{API}/posts/{post}"))
+}
+
+/// Mark a post, and everything after it, unread.
+///
+/// The body is a **native** JSON boolean, unlike most of this API's
+/// booleans, which are strings. `collapsed_threads_supported` must match
+/// what the client does or the server maintains the wrong counters.
+#[must_use]
+pub fn set_unread(user: &UserId, post: &PostId, collapsed: bool) -> HttpRequest {
+    let body = serde_json::json!({ "collapsed_threads_supported": collapsed });
+    HttpRequest::post(format!("{API}/users/{user}/posts/{post}/set_unread")).json(&body)
+}
+
+/// Save a post, or take it out of the saved list.
+///
+/// Saved posts are not an endpoint of their own: they are a *preference*,
+/// in the `flagged_post` category, keyed by post id. Saving writes one and
+/// unsaving deletes it, which is why this returns a preference request
+/// rather than something post-shaped.
+#[must_use]
+pub fn set_saved(user: &UserId, post: &PostId, saved: bool) -> HttpRequest {
+    let body = serde_json::json!([{
+        "user_id": user.as_str(),
+        "category": "flagged_post",
+        "name": post.as_str(),
+        "value": "true",
+    }]);
+    let path = if saved {
+        format!("{API}/users/{user}/preferences")
+    } else {
+        format!("{API}/users/{user}/preferences/delete")
+    };
+    HttpRequest::put(path).json(&body)
+}
+
 /// Mark a channel read.
 ///
 /// An **empty** `channel` is legal and means focus loss, which is how the web

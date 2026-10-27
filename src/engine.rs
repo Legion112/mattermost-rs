@@ -117,6 +117,10 @@ async fn refused_as_read_only(
     let refusal = match command {
         Command::Send { .. } => "read-only: not sending",
         Command::React { .. } => "read-only: not reacting",
+        Command::Pin { .. } => "read-only: not pinning",
+        Command::Delete(_) => "read-only: not deleting",
+        // Saving and marking unread change only the reader's own state,
+        // like marking a channel read, so they are allowed.
         _ => return false,
     };
     let _ = events.send(Event::Status(refusal.into())).await;
@@ -191,6 +195,33 @@ fn spawn_download(a: &Active, events: async_channel::Sender<Event>, what: Downlo
     });
 }
 
+/// Send a request whose only interesting outcome is failure.
+///
+/// The server's answer is not applied: every one of these comes back over
+/// the WebSocket, and letting one path own the change keeps the optimistic
+/// update out of this code. A failure is worth saying out loud, though --
+/// silently not pinning something is worse than saying so.
+async fn best_effort(
+    a: &Active,
+    request: &mm_api::http::HttpRequest,
+    events: &async_channel::Sender<Event>,
+) {
+    match a.client.send(request).await {
+        Ok(response) if response.status >= 400 => {
+            let _ = events
+                .send(Event::Failed(format!(
+                    "the server refused that ({})",
+                    response.status
+                )))
+                .await;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            let _ = events.send(Event::Failed(e.to_string())).await;
+        }
+    }
+}
+
 /// Carry out one command against an established session.
 ///
 /// Split from `run` so the loop above stays about *when* a command may run —
@@ -205,6 +236,23 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Sync => sync(&a.client, &a.session, events, &a.collapsed).await,
         Command::OpenChannel(channel) => {
             open_channel(&a.client, &channel, events, a.collapsed()).await;
+        }
+        Command::Pin { post, pinned } => {
+            best_effort(a, &rest::set_pinned(&post, pinned), events).await;
+        }
+        Command::Save { post, saved } => {
+            let user = UserId::new(&a.session.user_id);
+            best_effort(a, &rest::set_saved(&user, &post, saved), events).await;
+        }
+        Command::MarkUnread(post) => {
+            let user = UserId::new(&a.session.user_id);
+            let request = rest::set_unread(&user, &post, a.collapsed());
+            best_effort(a, &request, events).await;
+        }
+        Command::Delete(post) => {
+            // The removal reaches the store as a `post_deleted` event, so
+            // nothing is applied here: one path owns it.
+            best_effort(a, &rest::delete_post(&post), events).await;
         }
         Command::OpenThread(root) => {
             match fetch(
@@ -521,6 +569,8 @@ async fn resolve_settings(
             .find(|p| p.category == "display" && p.name == name)
             .map(|p| p.value.as_str())
     };
+
+    let _ = events.send(Event::Preferences(preferences.clone())).await;
 
     let threading = mm_core::settings::threading(
         config.get("CollapsedThreads").map(String::as_str),
