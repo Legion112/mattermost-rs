@@ -18,10 +18,12 @@
 use mm_api::rest::{self, Login, PostQuery};
 use mm_api::ws::{WsOutcome, WsProtocol};
 use mm_api::{ApiError, HttpRequest, HttpResponse};
+use mm_core::Threading;
 use mm_gui::{Command, Event};
 use mm_http::Client;
 use mm_types::{ChannelId, PostId, UserId};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::session::Session;
 
@@ -32,6 +34,22 @@ struct Active {
     socket: tokio::task::JoinHandle<()>,
     /// Refuse every command that would change something on the server.
     read_only: bool,
+    /// Whether collapsed reply threads are in effect, which decides whether
+    /// a page of posts is asked for as roots only. Learned at the first
+    /// sync, so it is interior-mutable: every other field is fixed when the
+    /// session opens and this one is not known until the config arrives.
+    collapsed: std::sync::atomic::AtomicBool,
+    /// How many images may be downloading at once. Spawning one task per
+    /// image keeps the command loop responsive; without a limit, opening a
+    /// busy channel would open forty connections at once to somebody's
+    /// work server.
+    downloads: Arc<tokio::sync::Semaphore>,
+}
+
+impl Active {
+    fn collapsed(&self) -> bool {
+        self.collapsed.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Start the engine on its own thread.
@@ -105,6 +123,74 @@ async fn refused_as_read_only(
     true
 }
 
+/// An image to fetch out of band.
+enum Download {
+    File {
+        file: mm_types::FileId,
+        preview: bool,
+    },
+    Avatar {
+        user: UserId,
+        version: mm_types::Timestamp,
+    },
+}
+
+/// Fetch an image without holding up the command loop.
+///
+/// Opening a channel with forty screenshots in it queued forty downloads
+/// ahead of the next thing the reader clicked, so switching channels left
+/// the previous channel's messages on screen for seconds. The semaphore
+/// keeps that from becoming forty connections at once to somebody's work
+/// server.
+fn spawn_download(a: &Active, events: async_channel::Sender<Event>, what: Download) {
+    let client = a.client.clone();
+    let limit = Arc::clone(&a.downloads);
+    tokio::spawn(async move {
+        let Ok(_permit) = limit.acquire().await else {
+            return;
+        };
+        // The cache first, so a channel full of screenshots -- or a
+        // relaunch with a channel full of faces -- redraws without a
+        // single request.
+        match what {
+            Download::File { file, preview } => {
+                let cached = crate::avatars::load_file(&file);
+                let image = if let Some(image) = cached {
+                    image
+                } else {
+                    let Ok(image) = fetch(
+                        &client,
+                        &rest::file_contents(&file, preview),
+                        rest::parse_image,
+                    )
+                    .await
+                    else {
+                        return;
+                    };
+                    crate::avatars::store_file(&file, &image);
+                    image
+                };
+                let _ = events.send(Event::File { file, image }).await;
+            }
+            Download::Avatar { user, version } => {
+                let cached = crate::avatars::load(&user, version);
+                let image = if let Some(image) = cached {
+                    image
+                } else {
+                    let Ok(image) =
+                        fetch(&client, &rest::profile_image(&user), rest::parse_image).await
+                    else {
+                        return;
+                    };
+                    crate::avatars::store(&user, version, &image);
+                    image
+                };
+                let _ = events.send(Event::Avatar { user, image }).await;
+            }
+        }
+    });
+}
+
 /// Carry out one command against an established session.
 ///
 /// Split from `run` so the loop above stays about *when* a command may run —
@@ -116,8 +202,10 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
     }
 
     match command {
-        Command::Sync => sync(&a.client, &a.session, events).await,
-        Command::OpenChannel(channel) => open_channel(&a.client, &channel, events).await,
+        Command::Sync => sync(&a.client, &a.session, events, &a.collapsed).await,
+        Command::OpenChannel(channel) => {
+            open_channel(&a.client, &channel, events, a.collapsed()).await;
+        }
         Command::OpenThread(root) => {
             match fetch(
                 &a.client,
@@ -141,7 +229,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             };
             match fetch(
                 &a.client,
-                &rest::posts_for_channel(&channel, &query),
+                &rest::posts_for_channel(&channel, &query, a.collapsed()),
                 rest::parse_post_list,
             )
             .await
@@ -155,32 +243,10 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             }
         }
         Command::FetchFile { file, preview } => {
-            // The cache first, so a channel full of screenshots redraws
-            // without a single request.
-            if let Some(image) = crate::avatars::load_file(&file) {
-                let _ = events.send(Event::File { file, image }).await;
-            } else if let Ok(image) = fetch(
-                &a.client,
-                &rest::file_contents(&file, preview),
-                rest::parse_image,
-            )
-            .await
-            {
-                crate::avatars::store_file(&file, &image);
-                let _ = events.send(Event::File { file, image }).await;
-            }
+            spawn_download(a, events.clone(), Download::File { file, preview });
         }
         Command::FetchAvatar { user, version } => {
-            // The cache first, so a relaunch draws faces without a
-            // single request.
-            if let Some(image) = crate::avatars::load(&user, version) {
-                let _ = events.send(Event::Avatar { user, image }).await;
-            } else if let Ok(image) =
-                fetch(&a.client, &rest::profile_image(&user), rest::parse_image).await
-            {
-                crate::avatars::store(&user, version, &image);
-                let _ = events.send(Event::Avatar { user, image }).await;
-            }
+            spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::React { post, emoji, add } => {
             // Best effort, like MarkRead: the `reaction_added` event
@@ -240,7 +306,7 @@ async fn run(
     if active.is_none() {
         let _ = events.send(Event::NeedLogin).await;
     } else if let Some(a) = &active {
-        sync(&a.client, &a.session, &events).await;
+        sync(&a.client, &a.session, &events, &a.collapsed).await;
     }
 
     while let Some(command) = commands.recv().await {
@@ -260,7 +326,7 @@ async fn run(
             if let Some(saved) = authenticate(&server, &login_id, password, mfa, &events).await {
                 active = activate(saved, &events).await;
                 if let Some(a) = &active {
-                    sync(&a.client, &a.session, &events).await;
+                    sync(&a.client, &a.session, &events, &a.collapsed).await;
                 }
             }
             continue;
@@ -422,16 +488,23 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         session,
         socket,
         read_only: is_read_only(),
+        collapsed: std::sync::atomic::AtomicBool::new(false),
+        downloads: Arc::new(tokio::sync::Semaphore::new(6)),
     })
 }
 
-async fn sync(client: &Client, session: &Session, events: &async_channel::Sender<Event>) {
-    let _ = events.send(Event::Status("loading…".into())).await;
-
-    // Two settings decide how every message reads, and neither is a single
-    // value: the server states a default and the user may hold a preference
-    // that overrides it. The precedence lives in `mm_core::settings`, where
-    // it is covered; this just gathers the inputs.
+/// Ask the server how it wants messages read, and tell the window.
+///
+/// Two settings decide that -- which name to show for a person, and
+/// whether replies are collapsed -- and neither is a single value: the
+/// server states a default and the user may hold a preference that
+/// overrides it. The precedence lives in `mm_core::settings`, where it is
+/// covered; this gathers the inputs.
+async fn resolve_settings(
+    client: &Client,
+    events: &async_channel::Sender<Event>,
+    collapsed: &std::sync::atomic::AtomicBool,
+) {
     let config = match fetch(client, &rest::client_config(), rest::parse_client_config).await {
         Ok(config) => config,
         Err(e) => {
@@ -453,6 +526,10 @@ async fn sync(client: &Client, session: &Session, events: &async_channel::Sender
         config.get("CollapsedThreads").map(String::as_str),
         preference("collapsed_reply_threads"),
     );
+    collapsed.store(
+        threading == Threading::Collapsed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let _ = events.send(Event::Threading(threading)).await;
 
     let names = mm_core::settings::name_format(
@@ -461,6 +538,17 @@ async fn sync(client: &Client, session: &Session, events: &async_channel::Sender
         preference("name_format"),
     );
     let _ = events.send(Event::NameFormat(names)).await;
+}
+
+async fn sync(
+    client: &Client,
+    session: &Session,
+    events: &async_channel::Sender<Event>,
+    collapsed: &std::sync::atomic::AtomicBool,
+) {
+    let _ = events.send(Event::Status("loading…".into())).await;
+
+    resolve_settings(client, events, collapsed).await;
 
     let teams = match fetch(client, &rest::my_teams(), rest::parse_teams).await {
         Ok(t) => t,
@@ -541,7 +629,12 @@ async fn sync(client: &Client, session: &Session, events: &async_channel::Sender
     let _ = events.send(Event::Status("ready".into())).await;
 }
 
-async fn open_channel(client: &Client, channel: &ChannelId, events: &async_channel::Sender<Event>) {
+async fn open_channel(
+    client: &Client,
+    channel: &ChannelId,
+    events: &async_channel::Sender<Event>,
+    collapsed: bool,
+) {
     // The member count for the header. Sent before the posts because it is a
     // small request and the header is the first thing that changes; a
     // failure is not worth reporting, since the header simply shows the
@@ -556,7 +649,7 @@ async fn open_channel(client: &Client, channel: &ChannelId, events: &async_chann
         let _ = events.send(Event::Stats(stats)).await;
     }
 
-    let request = rest::posts_for_channel(channel, &PostQuery::first());
+    let request = rest::posts_for_channel(channel, &PostQuery::first(), collapsed);
     match fetch(client, &request, rest::parse_post_list).await {
         Ok(page) => {
             // Post authors are often people not in any DM, so the roster has

@@ -379,8 +379,16 @@ impl PostQuery {
 }
 
 #[must_use]
-pub fn posts_for_channel(channel: &ChannelId, query: &PostQuery) -> HttpRequest {
-    let req = HttpRequest::get(format!("{API}/channels/{channel}/posts"));
+pub fn posts_for_channel(channel: &ChannelId, query: &PostQuery, collapsed: bool) -> HttpRequest {
+    let mut req = HttpRequest::get(format!("{API}/channels/{channel}/posts"));
+    // Without this the server counts replies against the page size, and a
+    // client that hides replies is left with whatever roots happen to be in
+    // the sixty posts it was sent. In a channel where most traffic is
+    // thread replies that is a handful: one real channel's page of sixty
+    // contained five. With it, the page is sixty *roots*.
+    if collapsed {
+        req = req.q("collapsedThreads", true);
+    }
     match query.clone().clamped() {
         PostQuery::Page { page, per_page } => req.q("page", page).q("per_page", per_page),
         PostQuery::Before { post, per_page } => req.q("before", post).q("per_page", per_page),

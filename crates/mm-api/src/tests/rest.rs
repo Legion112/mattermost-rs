@@ -233,7 +233,7 @@ fn view_channel_response_parses() {
 fn each_post_query_sends_only_its_own_parameters() {
     let c = ChannelId::new("c1");
 
-    let page = posts_for_channel(&c, &PostQuery::first());
+    let page = posts_for_channel(&c, &PostQuery::first(), false);
     assert_eq!(page.path, "/api/v4/channels/c1/posts");
     assert_eq!(
         page.query,
@@ -249,6 +249,7 @@ fn each_post_query_sends_only_its_own_parameters() {
             post: "p9".into(),
             per_page: 30,
         },
+        false,
     );
     assert_eq!(
         before.query,
@@ -264,6 +265,7 @@ fn each_post_query_sends_only_its_own_parameters() {
             post: "p1".into(),
             per_page: 30,
         },
+        false,
     );
     assert_eq!(
         after.query,
@@ -273,7 +275,7 @@ fn each_post_query_sends_only_its_own_parameters() {
         ]
     );
 
-    let since = posts_for_channel(&c, &PostQuery::Since { millis: 1_700 });
+    let since = posts_for_channel(&c, &PostQuery::Since { millis: 1_700 }, false);
     assert_eq!(
         since.query,
         vec![("since".to_owned(), "1700".to_owned())],
@@ -292,6 +294,7 @@ fn per_page_is_clamped_to_what_the_server_honours() {
             page: 0,
             per_page: 1_000,
         },
+        false,
     );
     assert_eq!(huge.query[1], ("per_page".to_owned(), "200".to_owned()));
 
@@ -301,6 +304,7 @@ fn per_page_is_clamped_to_what_the_server_honours() {
             page: 0,
             per_page: 0,
         },
+        false,
     );
     assert_eq!(zero.query[1], ("per_page".to_owned(), "1".to_owned()));
 
@@ -515,4 +519,44 @@ fn a_file_is_fetched_whole_or_as_the_servers_preview() {
     assert_eq!(file_contents(&f, false).path, "/api/v4/files/f1");
     assert_eq!(file_contents(&f, true).path, "/api/v4/files/f1/preview");
     assert_eq!(file_contents(&f, true).method, Method::Get);
+}
+
+/// The bug this exists for: with collapsed reply threads the server counts
+/// replies against the page size, and a client that hides replies is left
+/// with whatever roots happen to be in the sixty posts it was sent. One
+/// real channel's page of sixty held five roots, so the channel looked
+/// nearly empty. `collapsedThreads=true` makes the page sixty roots.
+#[test]
+fn a_collapsed_page_asks_the_server_for_roots_only() {
+    let c = ChannelId::new("c1");
+
+    let collapsed = posts_for_channel(&c, &PostQuery::first(), true);
+    assert!(
+        collapsed
+            .query
+            .contains(&("collapsedThreads".to_owned(), "true".to_owned())),
+        "{:?}",
+        collapsed.query
+    );
+
+    // And the flat view must not send it: there the replies belong in the
+    // channel and leaving them out would hide messages.
+    let flat = posts_for_channel(&c, &PostQuery::first(), false);
+    assert!(
+        !flat.query.iter().any(|(k, _)| k == "collapsedThreads"),
+        "{:?}",
+        flat.query
+    );
+
+    // It rides alongside the paging, not instead of it.
+    let older = posts_for_channel(
+        &c,
+        &PostQuery::Before {
+            post: "p1".into(),
+            per_page: 60,
+        },
+        true,
+    );
+    assert!(older.query.iter().any(|(k, _)| k == "collapsedThreads"));
+    assert!(older.query.iter().any(|(k, v)| k == "before" && v == "p1"));
 }

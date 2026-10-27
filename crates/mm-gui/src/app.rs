@@ -54,6 +54,11 @@ pub struct Wiring {
     pub events: async_channel::Receiver<Event>,
 }
 
+/// Cloneable: every field is a `Rc` or a GTK object, both of which are
+/// handles to one shared thing, so a clone is another handle on the same
+/// window rather than a second window. It is what lets a deferred callback
+/// hold the window without borrowing it.
+#[derive(Clone)]
 struct Ui {
     store: Rc<RefCell<Store>>,
     /// Swaps between the sign-in screen and the chat view. The window starts
@@ -85,6 +90,25 @@ struct Ui {
     /// messages" line. Captured before marking read, because marking read
     /// moves it.
     unread_from: Rc<RefCell<Option<mm_types::Timestamp>>>,
+    /// The sidebar as it was last drawn.
+    ///
+    /// The sidebar is rebuilt from scratch, which destroys every row. Do
+    /// that while somebody is clicking one and the click lands on a widget
+    /// that no longer exists and nothing happens -- which is what made
+    /// channels seem not to open while a channel's avatars were still
+    /// arriving. Rebuilt only when it would actually look different.
+    drawn_sidebar: Rc<RefCell<Option<Vec<mm_core::SidebarSection>>>>,
+    /// An avatar arrived, which changes how the sidebar looks without
+    /// changing any of the rows it is built from.
+    sidebar_stale: Rc<std::cell::Cell<bool>>,
+    /// Whether a redraw is already queued.
+    ///
+    /// Avatars and images arrive one at a time, and each one used to redraw
+    /// the whole channel -- sixty rows, every message re-parsed. Twenty
+    /// images meant twenty rebuilds, and opening a busy channel took so
+    /// long that the previous channel's messages stayed on screen for
+    /// seconds after the click. They are collected into one redraw instead.
+    redraw_queued: Rc<std::cell::Cell<bool>>,
     /// One backfill request at a time. The top edge fires repeatedly while
     /// the user sits there, and without this each firing would start another
     /// identical request.
@@ -348,6 +372,9 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         thread_pane: thread_pane.clone(),
         conversation: conversation.clone(),
         thread_root: Rc::new(RefCell::new(None)),
+        drawn_sidebar: Rc::new(RefCell::new(None)),
+        sidebar_stale: Rc::new(std::cell::Cell::new(false)),
+        redraw_queued: Rc::new(std::cell::Cell::new(false)),
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
@@ -785,17 +812,12 @@ fn clock_time(millis: i64) -> String {
 /// means a hundred-thousand-post channel never opens. That is measured, not
 /// assumed -- see `docs/gtk-notes.md`.
 /// Build the widget tree one list row is recycled through.
-fn setup_post_row(item: &gtk::ListItem) {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    row.set_margin_start(12);
-    row.set_margin_end(12);
-    row.set_margin_top(4);
-    row.set_margin_bottom(4);
-
-    // The day boundary, drawn as a rule with the date sitting in it.
-    // Every row carries one and all but the first of each day hide it,
-    // because ListView recycles a fixed set of widgets and a row that
-    // could not become a separator would need a second factory.
+/// The day boundary, drawn as a rule with the date sitting in it.
+///
+/// Every row carries one and all but the first of each day hide it,
+/// because `ListView` recycles a fixed set of widgets and a row that could
+/// not become a separator would need a second factory.
+fn build_day_separator() -> gtk::Box {
     let day = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     day.set_margin_top(8);
     day.set_margin_bottom(8);
@@ -816,6 +838,17 @@ fn setup_post_row(item: &gtk::ListItem) {
             .valign(gtk::Align::Center)
             .build(),
     );
+    day
+}
+
+fn setup_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.set_margin_top(4);
+    row.set_margin_bottom(4);
+
+    let day = build_day_separator();
 
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let author = gtk::Label::builder()
@@ -881,8 +914,49 @@ fn setup_post_row(item: &gtk::ListItem) {
     line.append(&face);
     line.append(&main);
 
+    // Replying. Mattermost reveals this on hover rather than drawing it on
+    // every message, and a channel with one of these per row is unreadable.
+    // It is the only way to start a thread on a message nobody has replied
+    // to yet -- the "N replies" button only exists once there are replies.
+    let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
+    reply.add_css_class("flat");
+    reply.set_tooltip_text(Some("Reply in thread"));
+    reply.set_valign(gtk::Align::Start);
+    reply.set_halign(gtk::Align::End);
+    reply.set_visible(false);
+
+    {
+        let commands = commands.clone();
+        let row = row.clone();
+        reply.connect_clicked(move |_| {
+            let post = row.widget_name();
+            if !post.is_empty() {
+                commands
+                    .send(Command::OpenThread(PostId::new(post.as_str())))
+                    .ok();
+            }
+        });
+    }
+
+    let hover = gtk::EventControllerMotion::new();
+    {
+        let reply = reply.clone();
+        hover.connect_enter(move |_, _, _| reply.set_visible(true));
+    }
+    {
+        let reply = reply.clone();
+        hover.connect_leave(move |_| reply.set_visible(false));
+    }
+    row.add_controller(hover);
+
     row.append(&day);
-    row.append(&line);
+    // The reply button floats over the message rather than sitting beside
+    // it: a child of the row would take width from the text, and the text
+    // is what the reader came for.
+    let floating = gtk::Overlay::new();
+    floating.set_child(Some(&line));
+    floating.add_overlay(&reply);
+    row.append(&floating);
     item.set_child(Some(&row));
 }
 
@@ -1028,7 +1102,22 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
                 item.append(&card_label(&block.text, block.markup, &[]));
                 item.upcast()
             }
-            BlockKind::Table => build_table(&block.cells).upcast(),
+            BlockKind::Table => {
+                // Inside its own horizontal scroller. A table cell does not
+                // wrap -- a column broken across lines is unreadable -- so
+                // a wide table has a wide *minimum* width, and every row in
+                // a ListView shares the widest row's allocation. One wide
+                // table in one message therefore pushed every other
+                // message's text off the right-hand edge.
+                let scroller = gtk::ScrolledWindow::builder()
+                    .child(&build_table(&block.cells))
+                    .hscrollbar_policy(gtk::PolicyType::Automatic)
+                    .vscrollbar_policy(gtk::PolicyType::Never)
+                    .propagate_natural_width(true)
+                    .propagate_natural_height(true)
+                    .build();
+                scroller.upcast()
+            }
             BlockKind::Text => card_label(&block.text, block.markup, &[]).upcast(),
         };
 
@@ -1169,7 +1258,10 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     let Some(day) = row.first_child().and_downcast::<gtk::Box>() else {
         return;
     };
-    let Some(line) = day.next_sibling().and_downcast::<gtk::Box>() else {
+    let Some(floating) = day.next_sibling().and_downcast::<gtk::Overlay>() else {
+        return;
+    };
+    let Some(line) = floating.child().and_downcast::<gtk::Box>() else {
         return;
     };
     let Some(face) = line.first_child().and_downcast::<adw::Avatar>() else {
@@ -1206,6 +1298,10 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
     }
 
     line.set_visible(true);
+    // The post id travels on the widget name, so the reply button -- which
+    // is connected once, in setup, because these rows are recycled -- can
+    // read it at click time without a handler per bind.
+    row.set_widget_name(&data.id());
     // A grouped message sits tight under the one above it, which is what
     // makes a block read as one utterance rather than three.
     let grouped = data.is_grouped();
@@ -1238,6 +1334,10 @@ fn bind_post_row(item: &gtk::ListItem, commands: &tokio::sync::mpsc::UnboundedSe
         body.add_css_class("dim-label");
     } else {
         body.remove_css_class("dim-label");
+    }
+
+    if let Some(reply) = floating.last_child().and_downcast::<gtk::Button>() {
+        reply.set_visible(false);
     }
 
     bind_cards(&cards, &data);
@@ -1406,9 +1506,10 @@ fn build_post_list(
 ) -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    let sender = commands.clone();
+    factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(item);
+            setup_post_row(item, &sender);
         }
     });
     let sender = commands.clone();
@@ -1588,6 +1689,14 @@ impl Ui {
 
     fn refresh_sidebar(&self) {
         let sections = self.store.borrow().sidebar_sections();
+        // Nothing to redraw, and redrawing anyway would destroy the row
+        // under the reader's cursor.
+        if !self.sidebar_stale.replace(false)
+            && self.drawn_sidebar.borrow().as_ref() == Some(&sections)
+        {
+            return;
+        }
+        self.drawn_sidebar.replace(Some(sections.clone()));
         // The faces the sidebar needs are not necessarily the ones the open
         // channel needed, so ask here too -- once per person, as ever.
         for row in sections.iter().flat_map(|s| &s.rows) {
@@ -1951,10 +2060,7 @@ impl Ui {
             return;
         };
         self.images.borrow_mut().insert(file, texture);
-        if let Some(open) = self.selected.borrow().clone() {
-            self.refresh_posts(&open);
-        }
-        self.refresh_thread();
+        self.redraw_soon();
     }
 
     /// Redraw both lists and the sidebar, for a change that affects all of
@@ -1965,6 +2071,23 @@ impl Ui {
             self.refresh_posts(&open);
         }
         self.refresh_thread();
+    }
+
+    /// Redraw soon, once, however many times this is called first.
+    ///
+    /// For things that arrive in a stream -- a channel's worth of avatars,
+    /// a channel's worth of images -- where each one changes a little of
+    /// the view and redrawing per arrival means redrawing the whole channel
+    /// per arrival.
+    fn redraw_soon(&self) {
+        if self.redraw_queued.replace(true) {
+            return;
+        }
+        let ui = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+            ui.redraw_queued.set(false);
+            ui.redraw_everything();
+        });
     }
 
     /// Decode a face and redraw wherever it appears.
@@ -1979,10 +2102,10 @@ impl Ui {
             return;
         };
         self.avatars.borrow_mut().insert(user, texture);
-        self.refresh_sidebar();
-        if let Some(open) = self.selected.borrow().clone() {
-            self.refresh_posts(&open);
-        }
+        // A face is drawn in the sidebar for a DM, and the rows it is
+        // built from have not changed, so say so explicitly.
+        self.sidebar_stale.set(true);
+        self.redraw_soon();
     }
 
     /// Show a line of status, and only while it says something.
@@ -2044,15 +2167,24 @@ impl Ui {
     /// Put the open channel's name, and how many people are in it, in the
     /// window's title bar.
     fn refresh_heading(&self, channel: &ChannelId) {
-        let (name, members) = self.store.borrow().channel_heading(channel);
-        self.title.set_title(&name);
-        self.title.set_subtitle(&match members {
-            // "1 member" would be the user alone in a channel, which is a
+        let heading = self.store.borrow().channel_heading(channel);
+        self.title.set_title(&heading.name);
+        // Members and the channel's own header line, in that order, the way
+        // Mattermost puts them beside the name. Either may be absent.
+        let members = match heading.members {
+            // "1 member" would be the reader alone in a channel, which is a
             // real state and reads badly in the plural.
-            Some(1) => "1 member".to_owned(),
-            Some(n) => format!("{n} members"),
-            None => String::new(),
-        });
+            Some(1) => Some("1 member".to_owned()),
+            Some(n) => Some(format!("{n} members")),
+            None => None,
+        };
+        let topic = (!heading.topic.is_empty()).then_some(heading.topic);
+        let subtitle = [members, topic]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("  ·  ");
+        self.title.set_subtitle(&subtitle);
     }
 
     fn refresh_posts(&self, channel: &ChannelId) {

@@ -36,6 +36,16 @@ pub enum Change {
     ReadState,
 }
 
+/// What the window's title bar says about the open channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Heading {
+    pub name: String,
+    /// Absent for a one-to-one DM, where it would say nothing.
+    pub members: Option<i64>,
+    /// The channel header's first line, with its markdown rendered away.
+    pub topic: String,
+}
+
 /// How many people are named in a group DM's title.
 ///
 /// The server builds that title by joining the participants' usernames
@@ -172,9 +182,12 @@ impl Store {
     /// reason `channel_label` does: showing something beats showing a blank
     /// header while the first sync is still in flight.
     #[must_use]
-    pub fn channel_heading(&self, channel: &ChannelId) -> (String, Option<i64>) {
+    pub fn channel_heading(&self, channel: &ChannelId) -> Heading {
         let Some(open) = self.channels.get(channel) else {
-            return (channel.to_string(), None);
+            return Heading {
+                name: channel.to_string(),
+                ..Heading::default()
+            };
         };
         let name = self.channel_label(open);
         let count = match open.kind {
@@ -188,7 +201,20 @@ impl Store {
             ChannelType::Group => participants(&open.display_name),
             _ => self.stats.get(channel).map(|s| s.member_count),
         };
-        (name, count)
+        Heading {
+            name,
+            members: count,
+            // The channel header, which Mattermost shows beside the name.
+            // Only its first line: it is markdown and people put several
+            // paragraphs of links in it, and a title bar has one line.
+            topic: open
+                .header
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| mm_md::parse(line).to_plain())
+                .unwrap_or_default(),
+        }
     }
 
     /// What to call a person, in the format this server asked for.

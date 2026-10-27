@@ -143,7 +143,10 @@ async fn history(args: &[String]) -> Result<(), String> {
 
     let first = fetch(
         &client,
-        &rest::posts_for_channel(&channel, &PostQuery::first()),
+        // Flat on purpose: this subcommand checks that pages merge into
+        // one ordered timeline, and the flat view is the one with the most
+        // posts in it to merge.
+        &rest::posts_for_channel(&channel, &PostQuery::first(), false),
         rest::parse_post_list,
     )
     .await?;
@@ -167,7 +170,7 @@ async fn history(args: &[String]) -> Result<(), String> {
         };
         let older = fetch(
             &client,
-            &rest::posts_for_channel(&channel, &query),
+            &rest::posts_for_channel(&channel, &query, false),
             rest::parse_post_list,
         )
         .await?;
@@ -503,7 +506,10 @@ async fn show_channel(client: &Client, store: &mut Store, name: &str) -> Result<
         .map(|c| c.id.clone())
         .ok_or_else(|| format!("no channel called {name:?}"))?;
 
-    let page = fetch_posts(client, &found).await?;
+    // Ask the way the store is set up to read: with collapsed threads the
+    // server must be told, or a page of sixty posts is mostly replies the
+    // view then hides.
+    let page = fetch_posts(client, &found, store.threading == Threading::Collapsed).await?;
     store.apply_post_list(&found, &page, PageAnchor::Newest);
 
     println!("\n--- {name} ---");
@@ -518,10 +524,14 @@ async fn show_channel(client: &Client, store: &mut Store, name: &str) -> Result<
     Ok(())
 }
 
-async fn fetch_posts(client: &Client, channel: &ChannelId) -> Result<mm_types::PostList, String> {
+async fn fetch_posts(
+    client: &Client,
+    channel: &ChannelId,
+    collapsed: bool,
+) -> Result<mm_types::PostList, String> {
     fetch(
         client,
-        &rest::posts_for_channel(channel, &PostQuery::first()),
+        &rest::posts_for_channel(channel, &PostQuery::first(), collapsed),
         rest::parse_post_list,
     )
     .await

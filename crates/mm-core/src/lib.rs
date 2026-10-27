@@ -22,6 +22,6 @@ pub mod unread;
 
 pub use rows::{CivilDate, Row};
 pub use sections::SidebarSection;
-pub use store::{Change, ReactionSummary, SidebarRow, Store};
+pub use store::{Change, Heading, ReactionSummary, SidebarRow, Store};
 pub use timeline::{Merge, PageAnchor, PostKey, Timeline};
 pub use unread::{ChannelTotals, MarkUnread, MemberCounts, Threading, Unread, unread};

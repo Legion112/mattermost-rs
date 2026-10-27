@@ -957,7 +957,9 @@ fn the_channel_heading_carries_the_name_and_the_member_count() {
 
     // Before the stats arrive there is a name and no count, and the header
     // has to draw anyway.
-    assert_eq!(store.channel_heading(&id), ("Channel c1".to_owned(), None));
+    let before = store.channel_heading(&id);
+    assert_eq!(before.name, "Channel c1");
+    assert_eq!(before.members, None);
 
     let changes = store.apply_stats(mm_types::ChannelStats {
         channel_id: id.clone(),
@@ -965,10 +967,7 @@ fn the_channel_heading_carries_the_name_and_the_member_count() {
         ..mm_types::ChannelStats::default()
     });
     assert_eq!(changes, vec![Change::Unread(id.clone())]);
-    assert_eq!(
-        store.channel_heading(&id),
-        ("Channel c1".to_owned(), Some(7))
-    );
+    assert_eq!(store.channel_heading(&id).members, Some(7));
 }
 
 /// A channel we have never loaded still gets a heading rather than a blank
@@ -976,9 +975,9 @@ fn the_channel_heading_carries_the_name_and_the_member_count() {
 #[test]
 fn an_unknown_channel_still_gets_a_heading() {
     let store = store();
-    let (name, members) = store.channel_heading(&ChannelId::new("c-unknown"));
-    assert_eq!(name, "c-unknown");
-    assert_eq!(members, None);
+    let heading = store.channel_heading(&ChannelId::new("c-unknown"));
+    assert_eq!(heading.name, "c-unknown");
+    assert_eq!(heading.members, None);
 }
 
 fn reaction(post: &str, user: &str, emoji: &str, at: i64) -> mm_types::Reaction {
@@ -1484,9 +1483,9 @@ fn a_group_dm_is_counted_by_the_names_in_its_title() {
         ..mm_types::ChannelStats::default()
     });
 
-    let (name, count) = store.channel_heading(&ChannelId::new("g1"));
-    assert_eq!(name, "aiksandr, diogen, legion");
-    assert_eq!(count, Some(3));
+    let heading = store.channel_heading(&ChannelId::new("g1"));
+    assert_eq!(heading.name, "aiksandr, diogen, legion");
+    assert_eq!(heading.members, Some(3));
 }
 
 /// A one-to-one DM gets no count: "2 members" over somebody's name tells
@@ -1502,10 +1501,9 @@ fn a_direct_message_has_no_member_count() {
         ..mm_types::ChannelStats::default()
     });
 
-    assert_eq!(
-        store.channel_heading(&ChannelId::new("d1")),
-        ("jane".to_owned(), None)
-    );
+    let heading = store.channel_heading(&ChannelId::new("d1"));
+    assert_eq!(heading.name, "jane");
+    assert_eq!(heading.members, None);
 }
 
 /// An ordinary channel still uses the server's count, which is what that
@@ -1519,7 +1517,10 @@ fn an_ordinary_channel_uses_the_servers_count() {
         member_count: 34,
         ..mm_types::ChannelStats::default()
     });
-    assert_eq!(store.channel_heading(&ChannelId::new("c1")).1, Some(34));
+    assert_eq!(
+        store.channel_heading(&ChannelId::new("c1")).members,
+        Some(34)
+    );
 }
 
 /// A group DM with no title yet shows no count rather than one.
@@ -1530,5 +1531,44 @@ fn a_group_dm_with_no_title_has_no_count() {
     group.kind = ChannelType::Group;
     group.display_name = String::new();
     store.apply_channels(vec![group]);
-    assert_eq!(store.channel_heading(&ChannelId::new("g2")).1, None);
+    assert_eq!(store.channel_heading(&ChannelId::new("g2")).members, None);
+}
+
+/// Mattermost shows the channel's own header line beside its name, and it
+/// is markdown -- people put links in it. Only the first line: a title bar
+/// has one, and a header can run to paragraphs.
+#[test]
+fn the_heading_carries_the_channels_header_line() {
+    let mut store = store();
+    let mut with_header = channel("c1", 0, 0);
+    with_header.header = "**Alerts** go here\n\nand more below".into();
+    store.apply_channels(vec![with_header]);
+
+    assert_eq!(
+        store.channel_heading(&ChannelId::new("c1")).topic,
+        "Alerts go here"
+    );
+}
+
+/// A channel with no header, or one that is only blank lines, says nothing
+/// rather than showing an empty separator beside its name.
+#[test]
+fn a_channel_with_no_header_has_no_topic() {
+    let mut store = store();
+    let mut blank = channel("c2", 0, 0);
+    blank.header = "\n   \n".into();
+    store.apply_channels(vec![blank, channel("c3", 0, 0)]);
+
+    assert!(
+        store
+            .channel_heading(&ChannelId::new("c2"))
+            .topic
+            .is_empty()
+    );
+    assert!(
+        store
+            .channel_heading(&ChannelId::new("c3"))
+            .topic
+            .is_empty()
+    );
 }
