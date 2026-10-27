@@ -446,13 +446,23 @@ fn build_window(
 ) -> (
     adw::WindowTitle,
     gtk::Button,
-    [gtk::Button; 3],
+    [gtk::Button; 4],
     Rc<LoginPage>,
     gtk::Stack,
     adw::ApplicationWindow,
 ) {
     let title = adw::WindowTitle::new("mattermost-rs", "connecting…");
-    let header = adw::HeaderBar::builder().title_widget(&title).build();
+    // The name is a button, the way Mattermost makes it one: it is
+    // where the channel's own menu comes from, and a title that opens
+    // nothing is a place people click and get nothing.
+    let channel_menu = gtk::Button::builder()
+        .child(&title)
+        .css_classes(["flat"])
+        .tooltip_text("Channel info and members")
+        .build();
+    let header = adw::HeaderBar::builder()
+        .title_widget(&channel_menu)
+        .build();
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Reload channels"));
     header.pack_end(&refresh);
@@ -503,7 +513,7 @@ fn build_window(
     (
         title,
         refresh,
-        [search, pinned, saved],
+        [search, pinned, saved, channel_menu],
         login,
         stack,
         window,
@@ -554,7 +564,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
 
     let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
-    let (title, refresh, [search, pinned, saved], login, stack, window) = build_window(app, &split);
+    let (title, refresh, [search, pinned, saved, channel_menu], login, stack, window) =
+        build_window(app, &split);
 
     let ui = Ui {
         store,
@@ -612,6 +623,12 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     // composer, and the one that accepts a half-typed name has to see it
     // first or every completion would send the message instead.
     wire_found(&ui, &search, &pinned, &saved);
+    {
+        let ui = ui.clone();
+        channel_menu.connect_clicked(move |button| {
+            ui.open_channel_menu(button.upcast_ref::<gtk::Widget>());
+        });
+    }
     attach_both_composers(&ui, &composer, &thread_composer);
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_views(&ui);
@@ -966,10 +983,9 @@ fn wire_found(ui: &Ui, search: &gtk::Button, pinned: &gtk::Button, saved: &gtk::
         let ui = ui.clone();
         ui.found_list.clone().connect_row_activated(move |_, row| {
             let name = row.widget_name();
-            if name.is_empty() {
-                return;
+            if !name.is_empty() {
+                ui.go_to_post(&PostId::new(name.as_str()));
             }
-            ui.show_channel(&ChannelId::new(name.as_str()));
         });
     }
 }
@@ -3778,6 +3794,10 @@ const MISSPELLED: &str = "mmrs-misspelled";
 const SPELL_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
 /// How many replacements the right-click menu offers.
 const SUGGESTIONS_OFFERED: usize = 6;
+/// How wide the channel menu is, and how tall its member list grows
+/// before it scrolls.
+const CHANNEL_MENU_WIDTH: i32 = 320;
+const CHANNEL_MENU_HEIGHT: i32 = 420;
 const PREVIEW_WIDTH: i32 = 520;
 const PREVIEW_IMAGE: i32 = 80;
 const MENTIONS_WIDTH: i32 = 340;
@@ -4388,6 +4408,136 @@ impl Ui {
         }
     }
 
+    /// What the open channel is and who is in it.
+    ///
+    /// Everything here is already held: the header line came with the
+    /// channel and the roster was fetched when it opened, so the menu
+    /// opens on the click rather than after a round trip.
+    fn open_channel_menu(&self, at: &gtk::Widget) {
+        let Some(channel) = self.selected.borrow().clone() else {
+            return;
+        };
+        let store = self.store.borrow();
+        let heading = store.channel_heading(&channel);
+
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        column.set_margin_start(16);
+        column.set_margin_end(16);
+        column.set_margin_top(14);
+        column.set_margin_bottom(14);
+        column.set_size_request(CHANNEL_MENU_WIDTH, -1);
+        column.append(
+            &gtk::Label::builder()
+                .label(&heading.name)
+                .xalign(0.0)
+                .wrap(true)
+                .css_classes(["title-4"])
+                .build(),
+        );
+        if !heading.topic.is_empty() {
+            column.append(
+                &gtk::Label::builder()
+                    .label(&heading.topic)
+                    .xalign(0.0)
+                    .wrap(true)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
+
+        let people = store.channel_roster(&channel);
+        column.append(
+            &gtk::Label::builder()
+                .label(match people.len() {
+                    0 => "MEMBERS".to_owned(),
+                    n => format!("{n} MEMBERS"),
+                })
+                .xalign(0.0)
+                .margin_top(12)
+                .css_classes(["dim-label", "caption-heading"])
+                .build(),
+        );
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["navigation-sidebar"])
+            .build();
+        for user in &people {
+            list.append(&self.member_row(user));
+        }
+        if people.is_empty() {
+            // The roster arrives with the channel's first page, so this
+            // is "not yet" rather than "nobody".
+            list.append(&empty_view("Not loaded yet"));
+        }
+        column.append(
+            &gtk::ScrolledWindow::builder()
+                .child(&list)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .propagate_natural_height(true)
+                .max_content_height(CHANNEL_MENU_HEIGHT)
+                .build(),
+        );
+
+        let menu = gtk::Popover::builder().child(&column).build();
+        menu.set_parent(at);
+        menu.connect_closed(gtk::Popover::unparent);
+        menu.popup();
+    }
+
+    /// One person in the member list: their face, their name, their dot.
+    fn member_row(&self, user: &mm_types::User) -> gtk::ListBoxRow {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        line.set_margin_start(6);
+        line.set_margin_end(6);
+        line.set_margin_top(3);
+        line.set_margin_bottom(3);
+        let (gutter, face, dot) = face_with_dot(24);
+        face.set_text(Some(user.display_name()));
+        face.set_custom_image(self.avatars.borrow().get(&user.id));
+        set_presence(&dot, self.store.borrow().presence(&user.id), true);
+        line.append(&gutter);
+        line.append(
+            &gtk::Label::builder()
+                .label(format!("@{}", user.username))
+                .xalign(0.0)
+                .build(),
+        );
+        let full = user.full_name();
+        if !full.is_empty() {
+            line.append(
+                &gtk::Label::builder()
+                    .label(&full)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
+        gtk::ListBoxRow::builder().child(&line).build()
+    }
+
+    /// Go to a message found somewhere that is not its channel.
+    ///
+    /// The channel, and then the message's own thread beside it. Not a
+    /// scroll to the post: the message may be a year back, and the
+    /// timeline would have to grow a segment around it -- which is real
+    /// work in the part of the store that must not be got wrong.
+    /// Opening the thread puts the message itself on screen, with
+    /// whatever was said in reply, which is what the reader clicked for.
+    fn go_to_post(&self, post: &PostId) {
+        let found = {
+            let store = self.store.borrow();
+            store
+                .posts
+                .get(post)
+                .map(|p| (p.channel_id.clone(), p.thread_root().clone()))
+        };
+        let Some((channel, root)) = found else {
+            return;
+        };
+        self.show_channel(&channel);
+        self.commands.send(Command::OpenThread(root)).ok();
+    }
+
     /// Open the search page and put the caret in the box.
     fn open_search(&self) {
         self.show_pane(&Pane::Found(mm_core::Found::Search));
@@ -4426,8 +4576,10 @@ impl Ui {
                 face_names: Vec::new(),
                 unread: false,
             });
-            // Clicking a result goes to its channel.
-            row.set_widget_name(post.channel_id.as_str());
+            // The post's own id: its channel and its thread are both
+            // questions the store can answer from it, and one id cannot
+            // disagree with itself the way two could.
+            row.set_widget_name(post.id.as_str());
             self.found_list.append(&row);
         }
         if posts.is_empty() {

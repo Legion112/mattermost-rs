@@ -506,6 +506,30 @@ impl Store {
         self.statuses.get(user).copied().unwrap_or_default()
     }
 
+    /// Who is in a channel, as people rather than ids, ordered by name.
+    ///
+    /// Empty until the channel has been opened once, which is when the
+    /// roster is fetched -- not the same as nobody being in it, and the
+    /// window says so.
+    ///
+    /// People who have left the server are not listed. The roster
+    /// endpoint still returns them; the member count beside the
+    /// channel's name does not, and a list of thirty-five under a
+    /// heading saying twenty-four is a window disagreeing with itself.
+    #[must_use]
+    pub fn channel_roster(&self, channel: &ChannelId) -> Vec<&User> {
+        let Some(ids) = self.channel_members.get(channel) else {
+            return Vec::new();
+        };
+        let mut people: Vec<&User> = ids
+            .iter()
+            .filter_map(|id| self.users.get(id))
+            .filter(|user| !user.is_deactivated())
+            .collect();
+        people.sort_by(|a, b| a.username.cmp(&b.username));
+        people
+    }
+
     /// Record who is in a channel, and the people themselves.
     pub fn apply_channel_roster(&mut self, channel: &ChannelId, users: Vec<User>) -> Vec<Change> {
         self.channel_members.insert(

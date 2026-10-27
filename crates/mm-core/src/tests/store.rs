@@ -2457,3 +2457,58 @@ fn an_answer_list_joins_the_posts_but_not_the_timeline() {
     assert!(!format!("{:?}", Found::Pinned(c1)).is_empty());
     assert!(!format!("{:?}", Change::Found).is_empty());
 }
+
+/// A channel's roster comes back as people, by username, and a channel
+/// never opened comes back empty -- which is "not fetched yet", not
+/// "nobody is in it", and the window says so rather than claiming the
+/// channel is deserted.
+#[test]
+fn the_channel_roster_is_people_in_name_order() {
+    let mut store = store();
+    let person = |id: &str, username: &str| User {
+        id: UserId::new(id),
+        username: username.to_owned(),
+        ..User::default()
+    };
+    let c1 = ChannelId::new("c1");
+    store.apply_channel_roster(
+        &c1,
+        vec![
+            person("u2", "zinaida"),
+            person("u1", "aragorn"),
+            person("u3", "diogen"),
+        ],
+    );
+    let names: Vec<&str> = store
+        .channel_roster(&c1)
+        .iter()
+        .map(|u| u.username.as_str())
+        .collect();
+    assert_eq!(names, ["aragorn", "diogen", "zinaida"]);
+    assert!(store.channel_roster(&ChannelId::new("c2")).is_empty());
+
+    // Somebody who has left is not listed: the member count beside the
+    // channel's name does not count them either, and the two must agree.
+    store.apply_channel_roster(
+        &ChannelId::new("c4"),
+        vec![
+            person("u8", "here"),
+            User {
+                delete_at: Timestamp(5),
+                ..person("u9", "gone")
+            },
+        ],
+    );
+    let names: Vec<&str> = store
+        .channel_roster(&ChannelId::new("c4"))
+        .iter()
+        .map(|u| u.username.as_str())
+        .collect();
+    assert_eq!(names, ["here"]);
+
+    // An id with no user record yet is skipped rather than drawn blank.
+    store
+        .channel_members
+        .insert(ChannelId::new("c3"), [UserId::new("ghost")].into());
+    assert!(store.channel_roster(&ChannelId::new("c3")).is_empty());
+}

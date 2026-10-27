@@ -551,8 +551,11 @@ it for reasons that have nothing to do with time, and filing them as \
 history would be the client inventing adjacency the server never claimed. \
 Verified on a live account: "deploy" answered with 100 hits across \
 several channels. NOT built: paging past the first sixty, jumping to the \
-hit inside its channel rather than to the channel, and the match \
-highlighting the server returns alongside the posts."""
+hit's exact place in its channel's scrollback -- clicking a result opens \
+the channel and that message's own thread beside it, which puts the \
+message on screen without the timeline having to grow a segment around a \
+post from a year ago -- and the match highlighting the server returns \
+alongside the posts."""
 
 [[feature]]
 id       = "posts.pinned_and_saved"
@@ -575,3 +578,25 @@ that lesson once. Saved posts are still `flagged` on the wire; the web \
 app has said "Saved" since 5.x. Verified on a live account: three saved \
 messages came back across three channels, and a channel with no pins said \
 so. NOT built: unpinning or unsaving from these lists, and paging."""
+
+[[feature]]
+id       = "channels.info_and_members"
+area     = "channels"
+upstream = "webapp"
+status   = "partial"
+endpoints = ["GET /api/v4/users"]
+verified_against = "12.0.1"
+notes = """
+The channel's name in the header is a button, and it opens what the \
+channel is and who is in it: the header line, then every member with \
+their face, their presence and their name. Everything is already held -- \
+the header came with the channel and the roster was fetched when it \
+opened -- so it opens on the click rather than after a round trip. \
+People who have left the server are left out, because the member count \
+beside the channel's name leaves them out too and a list of thirty-five \
+under a heading saying twenty-four is a window disagreeing with itself. \
+A channel never opened says "Not loaded yet" rather than claiming it is \
+deserted. Verified on a live account: Клиенты reads 24 in the header and \
+24 in the list, where the raw roster holds 35. NOT built: muting, \
+notification preferences, adding or removing members, leaving, and the \
+rest of Mattermost's channel menu."""
