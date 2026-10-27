@@ -89,6 +89,7 @@ real server yet.
 | `posts.link_previews` | done | — | A URL the server has already resolved draws as a card under the message: the site name, the title as a link, the description, and the picture the page offered. Read out of `metadata.embeds`, where only the `opengraph` entries carry a `data` at all -- the others are `null`, and a card with neither title nor description is not drawn, because a card showing only a URL says less than the link already in the text. The picture is fetched straight from whoever hosts it, over https only and deliberately **without the session token**: sending a Mattermost credential to a third party because somebody pasted a URL would be a security bug. Asked once per URL and held in memory for the session; a dead image host leaves the card's text and no picture. |
 | `posts.typing` | partial | — | "somebody is typing…" between the last message and the box being typed into, naming one person, two by name, or "Several people" beyond that. Held in the window rather than the store because it expires on a clock and the store is deliberately clock-free so that replaying events stays exact; an entry older than seven seconds is dropped, which is longer than the server's own five-second `TimeBetweenUserTypingUpdatesMilliseconds` throttle so the line does not flicker between a typist's keystrokes. NOT built: **sending** `user_typing`, so colleagues are not told when this client is typing. The socket loop only reads; announcing would mean splitting the stream so a writer can share it. |
 | `posts.message_times` | done | — | The channel shows a clock time under a day separator, the way Mattermost does. The thread panel has no separators, so it says how long ago instead -- "6 days ago", "last week", "2 weeks ago" -- and falls back to a date past a month. Either way the whole moment, down to the second, is the tooltip on the time: two messages a moment apart show the same clock time, and that is where a reader goes to tell them apart. |
+| `posts.composer` | partial | 12.0.1 | A `TextView` rather than an `Entry`, because a message is not one line: Shift+Return puts in a newline and Return sends, which is the binding Mattermost uses and the one muscle memory expects. An `Entry` could express neither, having no newline to insert. The box grows with what is typed and scrolls past about six lines rather than pushing the conversation off the top; a placeholder is drawn over it while it is empty, since a `TextView` has none of its own. The caret moves there when a channel is opened. Both composers, and the mention popup's Return still completes rather than sends, because its key handler is installed first and stops the event while the popup is up. Verified on a live account: three lines typed with Shift+Return stayed three lines, and Return cleared the box. NOT built: the formatting toolbar, the markdown preview eye, attachments and the emoji button. |
 
 <details><summary><code>ws.live_events</code> wire</summary>
 
@@ -142,6 +143,12 @@ real server yet.
 <details><summary><code>posts.typing</code> wire</summary>
 
 - ws `typing`
+
+</details>
+
+<details><summary><code>posts.composer</code> wire</summary>
+
+- `POST /api/v4/posts`
 
 </details>
 

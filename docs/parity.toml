@@ -424,3 +424,24 @@ does. The thread panel has no separators, so it says how long ago instead -- \
 month. Either way the whole moment, down to the second, is the tooltip on \
 the time: two messages a moment apart show the same clock time, and that is \
 where a reader goes to tell them apart."""
+
+[[feature]]
+id       = "posts.composer"
+area     = "posts"
+upstream = "webapp"
+status   = "partial"
+endpoints = ["POST /api/v4/posts"]
+verified_against = "12.0.1"
+notes = """
+A `TextView` rather than an `Entry`, because a message is not one line: \
+Shift+Return puts in a newline and Return sends, which is the binding \
+Mattermost uses and the one muscle memory expects. An `Entry` could express \
+neither, having no newline to insert. The box grows with what is typed and \
+scrolls past about six lines rather than pushing the conversation off the \
+top; a placeholder is drawn over it while it is empty, since a `TextView` \
+has none of its own. The caret moves there when a channel is opened. Both \
+composers, and the mention popup's Return still completes rather than sends, \
+because its key handler is installed first and stops the event while the \
+popup is up. Verified on a live account: three lines typed with Shift+Return \
+stayed three lines, and Return cleared the box. NOT built: the formatting \
+toolbar, the markdown preview eye, attachments and the emoji button."""

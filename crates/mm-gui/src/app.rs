@@ -171,7 +171,9 @@ struct Ui {
     stick_to_bottom: Rc<std::cell::Cell<bool>>,
     status: gtk::Label,
     title: adw::WindowTitle,
-    composer: gtk::Entry,
+    composer: gtk::TextView,
+    /// The frame around it, which is what is shown, hidden and greyed.
+    composer_pane: gtk::ScrolledWindow,
 }
 
 /// Build the window and run the GTK main loop.
@@ -246,7 +248,7 @@ fn build_thread_pane(
     gtk::ListView,
     gtk::Box,
     gtk::Button,
-    gtk::Entry,
+    gtk::TextView,
     gtk::ScrolledWindow,
 ) {
     let (thread_posts, thread_view, thread_scroller) =
@@ -267,17 +269,11 @@ fn build_thread_pane(
     thread_header.set_margin_bottom(4);
     thread_header.append(&thread_title);
     thread_header.append(&thread_close);
-    let thread_composer = gtk::Entry::builder()
-        .placeholder_text("Reply…")
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(12)
-        .build();
+    let (thread_composer, thread_composer_pane) = build_composer("Reply…");
     let thread_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
     thread_pane.append(&thread_header);
     thread_pane.append(&thread_scroller);
-    thread_pane.append(&thread_composer);
+    thread_pane.append(&thread_composer_pane);
     thread_pane.set_visible(false);
 
     // Wide enough to read a reply in. Without this the Paned hands the
@@ -464,7 +460,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         false,
     );
 
-    let (composer, status) = build_composer_row();
+    let (composer, composer_pane, status) = build_composer_row();
 
     // The conversation, the Threads view and the Drafts view take turns
     // in the same space. The status line and the composer stay put under
@@ -478,7 +474,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     content.append(&middle);
     content.append(&typing_line);
     content.append(&status);
-    content.append(&composer);
+    content.append(&composer_pane);
 
     let (thread_posts, thread_view, thread_pane, thread_close, thread_composer, thread_scroller) =
         build_thread_pane(
@@ -537,10 +533,15 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         status,
         title,
         composer: composer.clone(),
+        composer_pane: composer_pane.clone(),
         stack,
         login: Rc::clone(&login),
     };
 
+    // Before `wire`: both install a capture-phase Return handler on the
+    // composer, and the one that accepts a half-typed name has to see it
+    // first or every completion would send the message instead.
+    attach_both_composers(&ui, &composer, &thread_composer);
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_views(&ui);
     wire_switcher(&ui, &window);
@@ -597,7 +598,7 @@ fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSend
 fn wire_thread(
     ui: &Ui,
     close: &gtk::Button,
-    composer: &gtk::Entry,
+    composer: &gtk::TextView,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) {
     // Scrolling up means the reader is reading, not following. Arriving
@@ -637,8 +638,9 @@ fn wire_thread(
     let commands = commands.clone();
     let root = Rc::clone(&ui.thread_root);
     let store = Rc::clone(&ui.store);
-    composer.connect_activate(move |entry| {
-        let text = entry.text().to_string();
+    let view = composer.clone();
+    composer.add_controller(submit_keys(move || {
+        let text = composer_text(&view);
         if text.trim().is_empty() {
             return;
         }
@@ -670,8 +672,8 @@ fn wire_thread(
                 root: Some(root),
             })
             .ok();
-        entry.set_text("");
-    });
+        view.buffer().set_text("");
+    }));
 }
 
 /// Connect the widgets to the command channel.
@@ -1084,15 +1086,9 @@ fn set_presence(dot: &gtk::Box, presence: mm_types::Presence) {
 ///
 /// Insensitive until a channel is open: a composer that accepts text
 /// with nowhere to send it is a message the reader will lose.
-fn build_composer_row() -> (gtk::Entry, gtk::Label) {
-    let composer = gtk::Entry::builder()
-        .placeholder_text("Write a message…")
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(12)
-        .sensitive(false)
-        .build();
+fn build_composer_row() -> (gtk::TextView, gtk::ScrolledWindow, gtk::Label) {
+    let (composer, pane) = build_composer("Write a message…");
+    pane.set_sensitive(false);
     let status = gtk::Label::builder()
         .xalign(0.0)
         .margin_start(12)
@@ -1100,7 +1096,94 @@ fn build_composer_row() -> (gtk::Entry, gtk::Label) {
         .css_classes(["dim-label", "caption"])
         .label("starting…")
         .build();
-    (composer, status)
+    (composer, pane, status)
+}
+
+/// One composer: a `TextView` that grows with what is typed, framed,
+/// with a placeholder drawn over it while it is empty.
+///
+/// A `TextView` rather than an `Entry` because a message is not one
+/// line. Shift+Return puts in a newline and Return sends, which is the
+/// binding Mattermost uses and the one muscle memory expects -- an
+/// `Entry` can express neither, since it has no newline to insert.
+fn build_composer(placeholder: &str) -> (gtk::TextView, gtk::ScrolledWindow) {
+    let view = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(10)
+        .right_margin(10)
+        // Tab belongs to the mention popup and then to focus movement,
+        // never to the text: nobody indents a chat message.
+        .accepts_tab(false)
+        .build();
+    let hint = gtk::Label::builder()
+        .label(placeholder)
+        .xalign(0.0)
+        .valign(gtk::Align::Start)
+        .margin_start(12)
+        .margin_top(8)
+        // Not a click target, or the placeholder would swallow the click
+        // that is trying to put the caret in the box underneath it.
+        .can_target(false)
+        .css_classes(["dim-label"])
+        .build();
+    let over = gtk::Overlay::builder().child(&view).build();
+    over.add_overlay(&hint);
+    view.buffer().connect_changed(move |buffer| {
+        hint.set_visible(buffer.char_count() == 0);
+    });
+
+    // Grows to a few lines and then scrolls, rather than pushing the
+    // conversation off the top of the window.
+    let pane = gtk::ScrolledWindow::builder()
+        .child(&over)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(COMPOSER_MAX_HEIGHT)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(12)
+        .css_classes(["card"])
+        .build();
+    (view, pane)
+}
+
+/// Everything typed into a composer.
+fn composer_text(view: &gtk::TextView) -> String {
+    let buffer = view.buffer();
+    buffer
+        .text(&buffer.start_iter(), &buffer.end_iter(), false)
+        .to_string()
+}
+
+/// Where the caret is, counted in characters from the start.
+fn composer_caret(view: &gtk::TextView) -> usize {
+    let buffer = view.buffer();
+    let at = buffer.iter_at_mark(&buffer.get_insert()).offset();
+    usize::try_from(at).unwrap_or(0)
+}
+
+/// Return sends, Shift+Return puts in a newline.
+///
+/// Capture phase, ahead of the `TextView`'s own handling, which would
+/// otherwise insert the newline for both. The mention popup's keys are
+/// installed first and stop the event while it is up, so Return there
+/// still accepts the name being completed.
+fn submit_keys(send: impl Fn() + 'static) -> gtk::EventControllerKey {
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+            && !state.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            send();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys
 }
 
 /// The "somebody is typing" line, between the last message and the box
@@ -1124,7 +1207,7 @@ fn build_typing_line() -> gtk::Label {
 /// that channel's members. The thread's channel comes from its root
 /// post, never from whatever is open behind it -- the same mistake that
 /// once sent replies to the wrong channel.
-fn attach_both_composers(ui: &Ui, composer: &gtk::Entry, thread_composer: &gtk::Entry) {
+fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gtk::TextView) {
     attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
     attach_mentions(ui, thread_composer, |ui| {
         let root = ui.thread_root.borrow().clone()?;
@@ -1139,7 +1222,7 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::Entry, thread_composer: &gtk::
 /// message, and Mattermost offers it in both.
 fn attach_mentions(
     ui: &Ui,
-    entry: &gtk::Entry,
+    entry: &gtk::TextView,
     channel: impl Fn(&Ui) -> Option<ChannelId> + 'static,
 ) {
     let list = gtk::ListBox::builder()
@@ -1170,9 +1253,10 @@ fn attach_mentions(
         let ui = ui.clone();
         let list = list.clone();
         let popup = popup.clone();
-        entry.connect_changed(move |entry| {
-            let caret = usize::try_from(entry.position().max(0)).unwrap_or(0);
-            let Some((_, prefix)) = mention_being_typed(entry.text().as_str(), caret) else {
+        let view = entry.clone();
+        entry.buffer().connect_changed(move |_| {
+            let caret = composer_caret(&view);
+            let Some((_, prefix)) = mention_being_typed(&composer_text(&view), caret) else {
                 popup.popdown();
                 return;
             };
@@ -1202,7 +1286,7 @@ fn attach_mentions(
 /// Everything is passed through when the popup is down, so typing is
 /// untouched.
 fn mention_keys(
-    entry: &gtk::Entry,
+    entry: &gtk::TextView,
     list: &gtk::ListBox,
     popup: &gtk::Popover,
 ) -> gtk::EventControllerKey {
@@ -1341,18 +1425,19 @@ fn first_selectable(list: &gtk::ListBox, from: i32, step: i32) -> Option<gtk::Li
 
 /// Put the chosen username where the half-typed one was, and a space
 /// after it, which is what somebody mid-sentence wants next.
-fn accept_mention(entry: &gtk::Entry, username: &str) {
-    let caret = usize::try_from(entry.position().max(0)).unwrap_or(0);
-    let text = entry.text().to_string();
+fn accept_mention(view: &gtk::TextView, username: &str) {
+    let caret = composer_caret(view);
+    let text = composer_text(view);
     let Some((at, prefix)) = mention_being_typed(&text, caret) else {
         return;
     };
     let head: String = text.chars().take(at).collect();
     let tail: String = text.chars().skip(at + 1 + prefix.chars().count()).collect();
-    let filled = format!("{head}@{username} {tail}");
-    entry.set_text(&filled);
+    let buffer = view.buffer();
+    buffer.set_text(&format!("{head}@{username} {tail}"));
     let put = at + username.chars().count() + 2;
-    entry.set_position(i32::try_from(put).unwrap_or(i32::MAX));
+    let caret = buffer.iter_at_offset(i32::try_from(put).unwrap_or(i32::MAX));
+    buffer.place_cursor(&caret);
 }
 
 /// Ctrl+K, the way Mattermost binds the quick switcher.
@@ -1448,6 +1533,11 @@ fn wire_selection(
         // was most of what opening a channel felt like. The answer,
         // when it comes, splices in only what differs.
         ui_for_views.refresh_posts(&id);
+        // The caret belongs in the composer the moment a channel opens,
+        // the way Mattermost puts it there: clicking a channel is how a
+        // reader starts writing in it, and the alternative is a second
+        // click at the bottom of the window before the first letter.
+        ui_for_views.composer.grab_focus();
         commands.send(Command::OpenChannel(id.clone())).ok();
         commands.send(Command::MarkRead(id)).ok();
     });
@@ -1457,7 +1547,7 @@ fn wire(
     ui: &Ui,
     refresh: &gtk::Button,
     sidebar: &gtk::ListBox,
-    composer: &gtk::Entry,
+    composer: &gtk::TextView,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) {
     {
@@ -1542,8 +1632,9 @@ fn wire(
     {
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
-        composer.connect_activate(move |entry| {
-            let text = entry.text().to_string();
+        let view = composer.clone();
+        composer.add_controller(submit_keys(move || {
+            let text = composer_text(&view);
             if text.trim().is_empty() {
                 return;
             }
@@ -1557,8 +1648,8 @@ fn wire(
                     root: None,
                 })
                 .ok();
-            entry.set_text("");
-        });
+            view.buffer().set_text("");
+        }));
     }
 }
 
@@ -3123,6 +3214,9 @@ const MENTIONS_OFFERED: usize = 8;
 /// seconds -- so the window has to be longer than that or the line
 /// flickers off between a typist's own keystrokes.
 const TYPING_LIFETIME: std::time::Duration = std::time::Duration::from_secs(7);
+/// How tall the composer grows before it starts scrolling: about six
+/// lines, after which the conversation would start losing the window.
+const COMPOSER_MAX_HEIGHT: i32 = 160;
 const PREVIEW_WIDTH: i32 = 520;
 const PREVIEW_IMAGE: i32 = 80;
 const MENTIONS_WIDTH: i32 = 340;
@@ -3722,7 +3816,7 @@ impl Ui {
         match pane {
             Pane::Channel => {
                 self.middle.set_visible_child_name("channel");
-                self.composer.set_visible(true);
+                self.composer_pane.set_visible(true);
                 if let Some(open) = self.selected.borrow().clone() {
                     self.refresh_heading(&open);
                 }
@@ -3730,12 +3824,12 @@ impl Ui {
             Pane::Threads => {
                 self.middle.set_visible_child_name("threads");
                 // Nothing to send to: these views are lists of places.
-                self.composer.set_visible(false);
+                self.composer_pane.set_visible(false);
                 self.refresh_threads_view();
             }
             Pane::Drafts => {
                 self.middle.set_visible_child_name("drafts");
-                self.composer.set_visible(false);
+                self.composer_pane.set_visible(false);
                 self.refresh_drafts_view();
             }
         }
@@ -4678,7 +4772,7 @@ impl Ui {
         // `ListView` realizes everything it is handed, only the run that
         // actually differs is handed over at all. See docs/gtk-notes.md.
         splice_changed(&self.posts, &rows);
-        self.composer.set_sensitive(true);
+        self.composer_pane.set_sensitive(true);
 
         // No bottom alignment. Resting a short channel's messages on the
         // composer looked better, but `valign: End` makes ListView ask for
