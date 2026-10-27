@@ -1113,7 +1113,27 @@ fn wire_everything(ui: &Ui, composer: &Composer, thread_composer: &Composer) {
     wire_views(ui);
     wire_switcher(ui, &ui.window);
     wire_presence(ui);
+    watch_presence(ui);
     remember_geometry(ui);
+}
+
+/// Ask again, now and then, where the people on screen are.
+///
+/// Presence arrives with a sync and is then kept current by
+/// `status_change` -- but somebody who walks away produces no event,
+/// so after an hour at the desk the sidebar is a wall of green dots
+/// about people who went home. Mattermost's own clients re-poll; this
+/// does it for the faces actually drawn, which is the sidebar's DMs
+/// and the open channel's authors, and never for the whole server.
+fn watch_presence(ui: &Ui) {
+    let ui = ui.clone();
+    glib::timeout_add_local(PRESENCE_REPOLL, move || {
+        let who = ui.faces_on_screen();
+        if !who.is_empty() {
+            ui.commands.send(Command::Statuses(who)).ok();
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 /// The dot beside the account name, and the menu that moves it.
@@ -2781,6 +2801,11 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
         let store = ui.store.borrow();
         store.my_last_post(&channel).map(editable)
     });
+    // Shift+Up replies to the last message in the channel, whoever
+    // wrote it -- Mattermost's own binding, and the fastest way into
+    // a thread without reaching for the mouse. Only from the channel
+    // box: the thread box is already in one.
+    attach_reply_last(ui, composer);
     attach_edit_last(ui, thread_composer, |ui| {
         let root = ui.thread_root.borrow().clone()?;
         let store = ui.store.borrow();
@@ -2876,6 +2901,37 @@ fn attach_edit_last(
             return glib::Propagation::Proceed;
         };
         open_editor(&box_, &post, &was, &ui.commands);
+        glib::Propagation::Stop
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    view.add_controller(keys);
+}
+
+/// Shift+Up in an empty composer opens the last message's thread.
+///
+/// Empty, like the plain Up that edits: a reader partway through a
+/// sentence is selecting text with Shift+Up, not reaching for a
+/// thread.
+fn attach_reply_last(ui: &Ui, view: &gtk::TextView) {
+    let keys = gtk::EventControllerKey::new();
+    let ui = ui.clone();
+    let box_ = view.clone();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if key != gdk::Key::Up
+            || state != gdk::ModifierType::SHIFT_MASK
+            || !composer_text(&box_).is_empty()
+        {
+            return glib::Propagation::Proceed;
+        }
+        let last = {
+            let channel = ui.selected.borrow().clone();
+            let store = ui.store.borrow();
+            channel.and_then(|channel| store.last_post(&channel).map(|post| post.id.clone()))
+        };
+        let Some(post) = last else {
+            return glib::Propagation::Proceed;
+        };
+        ui.commands.send(Command::OpenThread(post)).ok();
         glib::Propagation::Stop
     });
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -3391,6 +3447,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Return", "Send"),
             ("<Shift>Return", "New line"),
             ("Up", "Edit your last message, in an empty box"),
+            ("<Shift>Up", "Reply to the last message"),
             ("at", "Offer the people in this channel"),
             ("colon", "Offer emoji, the server's own first"),
             ("Tab", "Accept what is offered"),
@@ -5573,6 +5630,11 @@ const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 /// seconds -- so the window has to be longer than that or the line
 /// flickers off between a typist's own keystrokes.
 const TYPING_LIFETIME: std::time::Duration = std::time::Duration::from_secs(7);
+
+/// How often presence is asked for again. Mattermost's own webapp uses
+/// a minute; a dot a minute out of date is nobody's problem, and
+/// anything faster is a request a minute for decoration.
+const PRESENCE_REPOLL: std::time::Duration = std::time::Duration::from_secs(60);
 /// How tall the composer grows before it starts scrolling: about six
 /// lines, after which the conversation would start losing the window.
 const COMPOSER_MAX_HEIGHT: i32 = 160;
@@ -7137,6 +7199,32 @@ impl Ui {
         if let (true, Some(refill)) = (wanted, refill) {
             refill();
         }
+    }
+
+    /// Whose face is drawn anywhere right now.
+    ///
+    /// The sidebar's one-to-one conversations and the open channel's
+    /// authors. Not the whole roster: a channel of two hundred would
+    /// make this a two-hundred-id request every minute for dots
+    /// nobody is looking at.
+    fn faces_on_screen(&self) -> Vec<UserId> {
+        let store = self.store.borrow();
+        let mut who: Vec<UserId> = store
+            .sidebar()
+            .iter()
+            .filter_map(|row| row.avatar_user.clone())
+            .collect();
+        if let Some(channel) = self.selected.borrow().clone() {
+            who.extend(
+                store
+                    .channel_posts(&channel)
+                    .iter()
+                    .map(|p| p.user_id.clone()),
+            );
+        }
+        who.sort();
+        who.dedup();
+        who
     }
 
     /// Ask the server for more names behind a half-typed `@`.

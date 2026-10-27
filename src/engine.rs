@@ -932,6 +932,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::Statuses(users) => send_statuses(&a.client, &users, events).await,
         Command::MentionsLike {
             team,
             channel,

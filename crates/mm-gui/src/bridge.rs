@@ -142,6 +142,13 @@ pub enum Command {
     /// Write what is half-typed, so it survives a restart and follows
     /// the reader to their other clients. An empty one is a deletion.
     SaveDraft(mm_types::Draft),
+    /// Ask again where these people are.
+    ///
+    /// Presence arrives on a sync and is then kept current by
+    /// `status_change` -- but a person who goes away while nothing
+    /// else happens produces no event, so the dots go stale. Asked
+    /// again on a slow timer for the people actually on screen.
+    Statuses(Vec<UserId>),
     /// Ask the server who else matches a half-typed `@`.
     ///
     /// The store only knows the people this client has seen, which on

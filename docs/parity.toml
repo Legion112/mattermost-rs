@@ -339,9 +339,10 @@ verified_against = "12.0.1"
 notes = """
 An attached image is drawn in the row at the size its metadata states, from \
 the `mini_preview` thumbnail that rides in the post so the row never reflows, \
-and clicking it opens the full-size copy in a window. Superseded by `posts.attachments` for upload and download. NOT built: \
-download to disk, and any non-image attachment, which shows as a line of text. \
-An animated GIF renders its first frame."""
+and clicking it opens the full-size copy in a window. Download, and \
+anything that is not a picture, are `posts.attachments`' business and are \
+built there -- this row claimed otherwise for longer than it was true. An \
+animated GIF renders its first frame."""
 
 [[feature]]
 id       = "posts.mention_autocomplete"
@@ -533,9 +534,15 @@ amber, setting it back to Online turned it green, and the server's own \
 server clears the manual flag when a status goes back to online, so \
 choosing one leaves nothing behind.
 
-NOT built: a do-not-disturb timer, custom status text, and there is no \
-periodic re-poll -- a person who goes away while nothing else happens keeps \
-their old dot until the server says otherwise."""
+Asked for again every minute, for the faces actually on screen -- the \
+sidebar's conversations and the open channel's authors, never the whole \
+server. Without it somebody who walks away produces no event at all, and \
+after an hour at the desk the sidebar is a wall of green dots about people \
+who went home. A minute is what Mattermost's own webapp uses: a dot a \
+minute out of date is nobody's problem, and anything faster is a request a \
+minute for decoration.
+
+NOT built: a do-not-disturb timer, and custom status text."""
 
 [[feature]]
 id       = "posts.typing"
@@ -1161,6 +1168,14 @@ they carry this reader's id and there is nothing in them to change. \
 Verified on a live account: Up in an empty box opened the editor on the \
 last message with its text in it, and Up with two characters typed moved \
 the caret instead.
+
+**Shift+Up replies to the last message**, whoever wrote it, which is the \
+fastest way into a thread without reaching for the mouse. Empty box only, \
+for the same reason: a reader partway through a sentence is selecting text \
+with Shift+Up. A join/leave notice is skipped -- that is the server \
+talking, and a thread hanging off one is not a conversation. Verified on a \
+live account: Shift+Up in an empty box opened the thread panel on the last \
+message of the conversation.
 
 Ctrl+/ shows all of it, in GTK's own shortcuts window, which is the only \
 way a reader finds out that any of it exists. The list is one hand-kept \

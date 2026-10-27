@@ -2984,3 +2984,35 @@ fn names_offered_for_a_mention_join_the_roster_rather_than_replace_it() {
     store.extend_channel_roster(&ChannelId::new("c2"), vec![person("zed")]);
     assert_eq!(store.channel_roster(&ChannelId::new("c2")).len(), 1);
 }
+
+/// Shift+Up replies to the last thing anybody said, which is not the
+/// same question as "the last thing I said": somebody else's message
+/// counts, and a join/leave notice does not -- a thread hanging off
+/// the server talking is not a conversation.
+#[test]
+fn the_last_message_in_a_channel_is_the_one_shift_up_replies_to() {
+    let mut store = store();
+    let channel = ChannelId::new("c1");
+    assert!(store.last_post(&channel).is_none());
+
+    store.apply_post_list(
+        &channel,
+        &page(vec![post("p1", "c1", 10), post("p2", "c1", 20)]),
+        PageAnchor::Newest,
+    );
+    assert_eq!(store.last_post(&channel).map(|p| p.id.as_str()), Some("p2"));
+
+    store.apply_post_list(
+        &channel,
+        &page(vec![
+            post("p1", "c1", 10),
+            post("p2", "c1", 20),
+            Post {
+                kind: "system_join_channel".to_owned(),
+                ..post("p3", "c1", 30)
+            },
+        ]),
+        PageAnchor::Newest,
+    );
+    assert_eq!(store.last_post(&channel).map(|p| p.id.as_str()), Some("p2"));
+}

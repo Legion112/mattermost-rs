@@ -1741,6 +1741,19 @@ impl Store {
         Self::last_of_mine(self.channel_posts(channel), &self.me)
     }
 
+    /// The last thing anybody said in a channel.
+    ///
+    /// What Shift+Up replies to. A join/leave notice is skipped: it
+    /// is the server talking, and a thread hanging off one is not a
+    /// conversation anybody wants.
+    #[must_use]
+    pub fn last_post(&self, channel: &ChannelId) -> Option<&Post> {
+        self.channel_posts(channel)
+            .into_iter()
+            .rev()
+            .find(|post| !post.is_system())
+    }
+
     /// The last thing this reader said in a thread.
     #[must_use]
     pub fn my_last_reply(&self, root: &PostId) -> Option<&Post> {
