@@ -702,13 +702,15 @@ clipboard holds an image is asked synchronously off the advertised formats, \
 because that decides then and there whether to let the key through to the \
 box: reading the image itself is asynchronous, and by the time it answered \
 the text would already have been pasted. Files dragged onto the composer are \
-attached too. A pasted image is written into the cache directory under a \
-name with the time in it, since an upload reads from a path and two \
-screenshots a minute apart must not be the same file. Verified on a live \
-account: a picture on the clipboard became an attachment chip, and ordinary \
-text still pastes as text. NOT built: cleaning up those cached copies, \
-progress for a large file, and previewing a non-image attachment in the \
-client."""
+attached too. A pasted image carries its **bytes** and never touches the \
+disk; only a file the reader picked is a path, read at the moment of \
+sending. Writing the paste to a temporary file would mean one file in the \
+cache per paste and something, somewhere, remembering to delete it, which is \
+a leak with extra steps. Verified on a live account: a picture on the \
+clipboard became an attachment chip, sent, and rendered inline in the \
+conversation with nothing written to disk -- and ordinary text still pastes \
+as text. NOT built: progress for a large file, and previewing a non-image \
+attachment in the client."""
 
 [[feature]]
 id       = "desktop.window_geometry"

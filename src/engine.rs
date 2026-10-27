@@ -279,12 +279,12 @@ async fn send_post(
     channel: &ChannelId,
     text: &str,
     root: Option<&PostId>,
-    attach: &[std::path::PathBuf],
+    attach: &[mm_gui::bridge::Attachment],
     events: &async_channel::Sender<Event>,
 ) {
     let mut files = Vec::new();
-    for path in attach {
-        match upload_one(a, channel, path).await {
+    for attachment in attach {
+        match upload_one(a, channel, attachment).await {
             Ok(id) => files.push(id),
             Err(e) => {
                 let _ = events.send(Event::Failed(e)).await;
@@ -303,18 +303,23 @@ async fn send_post(
     }
 }
 
-/// Put one file on the server and give back its id.
+/// Put one attachment on the server and give back its id.
+///
+/// A pasted image arrives as bytes and never touched the disk; a file
+/// the reader picked is read now rather than when they picked it, so
+/// what is sent is what the file says at the moment of sending.
 async fn upload_one(
     a: &Active,
     channel: &ChannelId,
-    path: &std::path::Path,
+    attachment: &mm_gui::bridge::Attachment,
 ) -> Result<mm_types::FileId, String> {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("attachment")
-        .to_owned();
-    let content = std::fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?;
+    let name = attachment.name();
+    let content = match attachment {
+        mm_gui::bridge::Attachment::File(path) => {
+            std::fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?
+        }
+        mm_gui::bridge::Attachment::Pasted { data, .. } => data.clone(),
+    };
     let request = rest::upload_file(channel, &name, content);
     let answer = fetch(&a.client, &request, rest::parse_upload).await?;
     answer

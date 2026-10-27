@@ -1679,23 +1679,6 @@ fn build_composer(placeholder: &str) -> Composer {
     composer
 }
 
-/// Where a pasted image goes, under a name that will not collide.
-///
-/// The cache directory: it is a copy of something the reader already
-/// has on the clipboard, and losing it costs nothing.
-fn pasted_image_path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
-    let folder = base.join("mattermost-rs").join("pasted");
-    std::fs::create_dir_all(&folder).ok()?;
-    let when = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_millis();
-    Some(folder.join(format!("pasted-{when}.png")))
-}
-
 /// One composer: the box, its frame, and what has been attached to it
 /// but not yet sent.
 #[derive(Clone)]
@@ -1704,7 +1687,20 @@ struct Composer {
     /// The whole column, which is what is shown, hidden and greyed.
     pane: gtk::Box,
     tray: gtk::Box,
-    chosen: Rc<RefCell<Vec<std::path::PathBuf>>>,
+    chosen: Rc<RefCell<Vec<crate::bridge::Attachment>>>,
+}
+
+/// What to call a pasted image on the server.
+///
+/// The time, because two screenshots pasted into one message must not
+/// arrive under the same name -- the server would take both, and the
+/// reader could not tell them apart afterwards.
+fn pasted_name() -> String {
+    let when = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default();
+    format!("pasted-{when}.png")
 }
 
 impl Composer {
@@ -1799,7 +1795,10 @@ impl Composer {
                     let Ok(files) = chosen else { return };
                     for file in files.iter::<gio::File>().flatten() {
                         if let Some(path) = file.path() {
-                            picked.chosen.borrow_mut().push(path);
+                            picked
+                                .chosen
+                                .borrow_mut()
+                                .push(crate::bridge::Attachment::File(path));
                         }
                     }
                     picked.refresh_tray();
@@ -1814,12 +1813,8 @@ impl Composer {
         }
         let chosen = self.chosen.borrow().clone();
         self.tray.set_visible(!chosen.is_empty());
-        for (at, path) in chosen.iter().enumerate() {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("attachment")
-                .to_owned();
+        for (at, attachment) in chosen.iter().enumerate() {
+            let name = attachment.name();
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             chip.add_css_class("mmrs-chip");
             chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
@@ -1867,13 +1862,15 @@ impl Composer {
             let Ok(Some(texture)) = found else {
                 return;
             };
-            let Some(path) = pasted_image_path() else {
-                return;
-            };
-            if std::fs::write(&path, texture.save_to_png_bytes()).is_err() {
-                return;
-            }
-            composer.chosen.borrow_mut().push(path);
+            composer
+                .chosen
+                .borrow_mut()
+                .push(crate::bridge::Attachment::Pasted {
+                    // The time, so two screenshots in one message do
+                    // not arrive as one name twice.
+                    name: pasted_name(),
+                    data: texture.save_to_png_bytes().to_vec(),
+                });
             composer.refresh_tray();
         });
     }
@@ -1882,13 +1879,19 @@ impl Composer {
     fn attach_dropped(&self, files: &gdk::FileList) {
         {
             let mut chosen = self.chosen.borrow_mut();
-            chosen.extend(files.files().iter().filter_map(gio::File::path));
+            chosen.extend(
+                files
+                    .files()
+                    .iter()
+                    .filter_map(gio::File::path)
+                    .map(crate::bridge::Attachment::File),
+            );
         }
         self.refresh_tray();
     }
 
     /// What to send, and nothing left behind for the next message.
-    fn take_attachments(&self) -> Vec<std::path::PathBuf> {
+    fn take_attachments(&self) -> Vec<crate::bridge::Attachment> {
         let taken = std::mem::take(&mut *self.chosen.borrow_mut());
         self.refresh_tray();
         taken

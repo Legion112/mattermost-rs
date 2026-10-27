@@ -62,3 +62,30 @@ fn connected_and_posts_carry_what_the_gui_needs() {
     };
     assert!(format!("{posts:?}").contains("c1"));
 }
+
+/// A pasted screenshot carries its bytes; a picked file carries its
+/// path. Writing the paste to a temporary file would mean one file in
+/// the cache per paste and something, somewhere, remembering to delete
+/// it -- a leak with extra steps.
+#[test]
+fn an_attachment_names_itself_whichever_kind_it_is() {
+    let picked = Attachment::File(std::path::PathBuf::from("/home/me/report.pdf"));
+    assert_eq!(picked.name(), "report.pdf");
+
+    let pasted = Attachment::Pasted {
+        name: "pasted-17.png".to_owned(),
+        data: vec![1, 2, 3],
+    };
+    assert_eq!(pasted.name(), "pasted-17.png");
+
+    // A path with no file name at all still has something to call it,
+    // because the server needs a name and refusing to send would be
+    // the worse answer.
+    assert_eq!(
+        Attachment::File(std::path::PathBuf::from("/")).name(),
+        "attachment"
+    );
+
+    assert_eq!(picked, picked.clone());
+    assert!(!format!("{pasted:?}").is_empty());
+}

@@ -15,6 +15,36 @@ use mm_types::{
     PostList, Team, Timestamp, User, UserId,
 };
 
+/// Something to attach to a message.
+///
+/// A pasted screenshot carries its **bytes** rather than a path to a
+/// temporary file. Writing one would mean a file in the cache for
+/// every paste, and something, somewhere, remembering to delete it --
+/// which is a leak with extra steps. A file the reader picked stays a
+/// path, because it is theirs and reading it twice is free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attachment {
+    /// A file on disk, which the reader chose.
+    File(std::path::PathBuf),
+    /// Bytes with a name, which never touched the disk.
+    Pasted { name: String, data: Vec<u8> },
+}
+
+impl Attachment {
+    /// What to call it on the server, and in the composer's tray.
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            Self::File(path) => path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_owned(),
+            Self::Pasted { name, .. } => name.clone(),
+        }
+    }
+}
+
 /// GUI to engine.
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -39,10 +69,10 @@ pub enum Command {
         channel: ChannelId,
         text: String,
         root: Option<PostId>,
-        /// Files chosen from disk, to upload and attach. Uploaded by
-        /// the engine first, because a post carries file *ids* and the
-        /// ids do not exist until the bytes are on the server.
-        attach: Vec<std::path::PathBuf>,
+        /// What to upload and attach. Uploaded by the engine first,
+        /// because a post carries file *ids* and the ids do not exist
+        /// until the bytes are on the server.
+        attach: Vec<Attachment>,
     },
     /// Load a thread so it can be read beside the channel.
     OpenThread(PostId),
