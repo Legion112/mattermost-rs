@@ -4080,8 +4080,7 @@ impl Ui {
         let mut to_select = None;
         for section in &sections {
             // The filter hides what is caught up, but never the channel
-            // the reader is in -- and a category with nothing left to
-            // show is not drawn as a bare heading.
+            // the reader is in.
             let showing: Vec<&mm_core::SidebarRow> = section
                 .visible_rows(keep.as_ref())
                 .into_iter()
@@ -4091,7 +4090,21 @@ impl Ui {
                         || keep.as_ref() == Some(&row.channel)
                 })
                 .collect();
-            if showing.is_empty() {
+            // Two different kinds of nothing, and only one of them is a
+            // reason to leave the heading out.
+            //
+            // A category with no channels in it is not drawn: a bare
+            // heading over nothing says nothing. The unread filter is
+            // the reader asking to see only what wants attention, so a
+            // section with nothing left under it goes with its heading.
+            //
+            // But a category the reader has **folded shut** is full; it
+            // is showing nothing because that is what folding means.
+            // Dropping its heading took away the one thing that could
+            // unfold it, so Team Backend and DevOps -- collapsed on the
+            // server, with nothing unread in them -- were simply absent
+            // from the sidebar with no way to get them back.
+            if section.rows.is_empty() || (showing.is_empty() && self.sidebar_unread_only.get()) {
                 continue;
             }
             self.sidebar.append(&section_header(section));

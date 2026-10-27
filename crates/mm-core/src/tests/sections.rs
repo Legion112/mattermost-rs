@@ -325,3 +325,39 @@ fn a_section_carries_its_category_id_and_an_orphan_has_none() {
     assert_eq!(sections[0].id, "fav");
     assert_eq!(sections[1].id, "");
 }
+
+/// A category folded shut with nothing unread in it keeps its rows, and
+/// therefore its heading.
+///
+/// This is the difference between a category that is empty and one that
+/// is merely folded, and the sidebar has to tell them apart: it draws no
+/// heading for the first and must draw one for the second. Conflating
+/// them made Team Backend and DevOps -- collapsed on the server, with
+/// everything in them read -- vanish from the sidebar entirely, leaving
+/// nothing to click to unfold them.
+#[test]
+fn a_folded_category_with_nothing_unread_is_still_a_section() {
+    let mut cat = category("dev", "DevOps", CategoryKind::Custom, &["c1", "c2"]);
+    cat.collapsed = true;
+    let folded = group(
+        vec![row("c1", "joil"), row("c2", "alukard")],
+        &[cat],
+        &no_recency(),
+    );
+    assert_eq!(folded.len(), 1);
+    assert!(folded[0].collapsed);
+    // Nothing on show, because that is what folded means...
+    assert!(folded[0].visible_rows(None).is_empty());
+    assert!(!folded[0].is_unread());
+    // ...but the category is not empty, which is what the heading hangs on.
+    assert_eq!(folded[0].rows.len(), 2);
+
+    // A category whose channels this client does not hold has no rows at
+    // all, and that one really is not drawn.
+    let gone = group(
+        Vec::new(),
+        &[category("t", "Tasks", CategoryKind::Custom, &["c9"])],
+        &no_recency(),
+    );
+    assert!(gone.is_empty());
+}

@@ -1122,12 +1122,24 @@ impl Store {
             }
             return channel.display_name.clone();
         }
-        let other = channel
+        match self.other_in_dm(channel) {
+            Some(other) => self.user_label(&UserId::new(other)),
+            // A DM with yourself, whose name is your own id twice. It is
+            // where Mattermost keeps saved notes, and it labels it with
+            // your name and "(you)" -- without which the row drew as an
+            // empty name beside a "#", because there was no other party
+            // to name it after.
+            None => format!("{} (you)", self.user_label(&self.me)),
+        }
+    }
+
+    /// The id of the person on the other side of a DM, or `None` when
+    /// that person is the reader themselves.
+    fn other_in_dm<'a>(&self, channel: &'a Channel) -> Option<&'a str> {
+        channel
             .name
             .split("__")
             .find(|part| *part != self.me.as_str())
-            .unwrap_or_default();
-        self.user_label(&UserId::new(other))
     }
 
     /// Tell apart two rows that would otherwise read identically.
@@ -1186,11 +1198,11 @@ impl Store {
         if channel.kind != ChannelType::Direct {
             return None;
         }
-        channel
-            .name
-            .split("__")
-            .find(|part| *part != self.me.as_str())
-            .map(UserId::new)
+        // In a DM with yourself the other party is you, so the row gets
+        // your own face rather than falling through to a channel icon.
+        Some(UserId::new(
+            self.other_in_dm(channel).unwrap_or(self.me.as_str()),
+        ))
     }
 
     /// What separates this channel from another of the same name: the other

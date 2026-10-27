@@ -2256,3 +2256,49 @@ fn presence_comes_from_a_batch_and_stays_current_over_the_socket() {
             .is_empty()
     );
 }
+
+/// A DM with yourself is labelled with your own name and "(you)", and
+/// carries your own face.
+///
+/// Its channel name is your id twice, so looking for "the part that is
+/// not me" finds nothing. That drew the row as an empty label beside a
+/// "#" -- a nameless channel sitting in the middle of a category.
+#[test]
+fn a_dm_with_yourself_is_named_after_you() {
+    let mut store = store();
+    store.apply_users(vec![User {
+        id: UserId::new(ME),
+        username: "legion".into(),
+        ..User::default()
+    }]);
+    let mine = Channel {
+        id: ChannelId::new("c-self"),
+        name: format!("{ME}__{ME}"),
+        kind: ChannelType::Direct,
+        ..Channel::default()
+    };
+    let theirs = Channel {
+        id: ChannelId::new("c-them"),
+        name: format!("{ME}__u2"),
+        kind: ChannelType::Direct,
+        ..Channel::default()
+    };
+    store.apply_users(vec![User {
+        id: UserId::new("u2"),
+        username: "diogen".into(),
+        ..User::default()
+    }]);
+    store.apply_channels(vec![mine.clone(), theirs.clone()]);
+    store.apply_members(vec![member("c-self", 0, 0, 0), member("c-them", 0, 0, 0)]);
+
+    assert_eq!(store.channel_label(&mine), "legion (you)");
+    assert_eq!(store.channel_label(&theirs), "diogen");
+
+    let rows = store.sidebar();
+    let self_row = rows.iter().find(|r| r.channel == mine.id).unwrap();
+    assert_eq!(self_row.display_name, "legion (you)");
+    // Your own face, not a channel icon.
+    assert_eq!(self_row.avatar_user, Some(UserId::new(ME)));
+    let their_row = rows.iter().find(|r| r.channel == theirs.id).unwrap();
+    assert_eq!(their_row.avatar_user, Some(UserId::new("u2")));
+}
