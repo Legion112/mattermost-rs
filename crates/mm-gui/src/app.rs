@@ -78,6 +78,11 @@ struct Ui {
     /// Whether the Threads view is filtered to the unread ones, which is
     /// the "Unreads" tab Mattermost puts beside "Followed threads".
     unreads_only: Rc<std::cell::Cell<bool>>,
+    /// Whether the sidebar is filtered to the channels wanting
+    /// attention. The open channel is exempt, for the reason a folded
+    /// category keeps it: hiding where the reader is standing is never
+    /// what they asked for.
+    sidebar_unread_only: Rc<std::cell::Cell<bool>>,
     unreads_tab: gtk::ToggleButton,
     drafts_list: gtk::ListBox,
     sidebar: gtk::ListBox,
@@ -258,7 +263,7 @@ fn build_thread_pane(
 }
 
 /// The channel list, under a line naming the account this window shows.
-fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::Box) {
+fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::ToggleButton, gtk::Box) {
     let sidebar = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .css_classes(["navigation-sidebar"])
@@ -281,11 +286,25 @@ fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::Box) {
         .css_classes(["dim-label", "caption"])
         .label("connecting…")
         .build();
+    // Mattermost puts a filter at the top of the channel list that hides
+    // everything caught up. On a busy account that is the difference
+    // between a sidebar you read and one you scroll.
+    let unread_only = gtk::ToggleButton::builder()
+        .icon_name("object-select-symbolic")
+        .tooltip_text("Show unread channels only")
+        .css_classes(["flat"])
+        .build();
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    identity.set_hexpand(true);
+    top.append(&identity);
+    top.append(&unread_only);
+    top.set_margin_end(6);
+
     let sidebar_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_pane.set_size_request(260, -1);
-    sidebar_pane.append(&identity);
+    sidebar_pane.append(&top);
     sidebar_pane.append(&sidebar_scroll);
-    (sidebar, identity, sidebar_pane)
+    (sidebar, identity, unread_only, sidebar_pane)
 }
 
 /// Styling this window needs that the theme does not provide.
@@ -381,7 +400,7 @@ fn build_window(
 
 fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
     install_styles();
-    let (sidebar, identity, sidebar_pane) = build_sidebar();
+    let (sidebar, identity, unread_only, sidebar_pane) = build_sidebar();
 
     // Made here rather than in the `Ui` below, because the post list's
     // widgets are built before it and the copy-link button needs both: a
@@ -458,6 +477,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         middle: middle.clone(),
         threads_list: threads_list.clone(),
         unreads_only: Rc::new(std::cell::Cell::new(false)),
+        sidebar_unread_only: Rc::new(std::cell::Cell::new(false)),
         unreads_tab: unreads_tab.clone(),
         drafts_list: drafts_list.clone(),
         sidebar: sidebar.clone(),
@@ -495,6 +515,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_views(&ui);
     wire_switcher(&ui, &window);
+    wire_unread_filter(&ui, &unread_only);
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
     ui
@@ -894,6 +915,20 @@ fn switcher_keys(
     });
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys
+}
+
+/// The sidebar's unread filter, which Mattermost puts at the top of the
+/// channel list: on a busy account it is the difference between a
+/// sidebar somebody reads and one they scroll.
+fn wire_unread_filter(ui: &Ui, button: &gtk::ToggleButton) {
+    let ui = ui.clone();
+    button.connect_toggled(move |button| {
+        ui.sidebar_unread_only.set(button.is_active());
+        // The filter is not part of the sections the sidebar compares
+        // against, so say outright that what it draws has changed.
+        ui.sidebar_stale.set(true);
+        ui.refresh_sidebar();
+    });
 }
 
 /// Ctrl+K, the way Mattermost binds the quick switcher.
@@ -3096,6 +3131,50 @@ impl Ui {
             .ok();
     }
 
+    /// One channel's row in the sidebar.
+    ///
+    /// Split out so `refresh_sidebar` stays about which rows to draw
+    /// rather than what one looks like.
+    fn channel_row(&self, row: &mm_core::SidebarRow) -> gtk::ListBoxRow {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        line.append(&self.channel_mark(row));
+        let name = gtk::Label::builder()
+            .label(&row.display_name)
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build();
+        if row.is_unread() {
+            name.add_css_class("heading");
+        } else {
+            name.add_css_class("dim-label");
+        }
+        line.append(&name);
+
+        if row.unread.mentions > 0 {
+            let badge = gtk::Label::builder()
+                .label(row.unread.mentions.to_string())
+                .css_classes(["accent", "caption-heading"])
+                .build();
+            line.append(&badge);
+        } else if row.is_unread() && row.unread.messages > 0 {
+            let dot = gtk::Label::builder()
+                .label("●")
+                .css_classes(["dim-label", "caption"])
+                .build();
+            line.append(&dot);
+        }
+        if row.muted {
+            line.append(&gtk::Image::from_icon_name("audio-volume-muted-symbolic"));
+        }
+
+        let list_row = gtk::ListBoxRow::builder().child(&line).build();
+        // The channel id travels on the widget name, so selection does not
+        // need a parallel index that could drift from the sidebar.
+        list_row.set_widget_name(row.channel.as_str());
+        list_row
+    }
+
     fn refresh_sidebar(&self) {
         let sections = self.store.borrow().sidebar_sections();
         // Nothing to redraw, and redrawing anyway would destroy the row
@@ -3139,45 +3218,24 @@ impl Ui {
 
         let mut to_select = None;
         for section in &sections {
+            // The filter hides what is caught up, but never the channel
+            // the reader is in -- and a category with nothing left to
+            // show is not drawn as a bare heading.
+            let showing: Vec<&mm_core::SidebarRow> = section
+                .visible_rows(keep.as_ref())
+                .into_iter()
+                .filter(|row| {
+                    !self.sidebar_unread_only.get()
+                        || row.is_unread()
+                        || keep.as_ref() == Some(&row.channel)
+                })
+                .collect();
+            if showing.is_empty() {
+                continue;
+            }
             self.sidebar.append(&section_header(section));
-            for row in section.visible_rows(keep.as_ref()) {
-                let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                line.append(&self.channel_mark(row));
-                let name = gtk::Label::builder()
-                    .label(&row.display_name)
-                    .xalign(0.0)
-                    .hexpand(true)
-                    .ellipsize(gtk::pango::EllipsizeMode::End)
-                    .build();
-                if row.is_unread() {
-                    name.add_css_class("heading");
-                } else {
-                    name.add_css_class("dim-label");
-                }
-                line.append(&name);
-
-                if row.unread.mentions > 0 {
-                    let badge = gtk::Label::builder()
-                        .label(row.unread.mentions.to_string())
-                        .css_classes(["accent", "caption-heading"])
-                        .build();
-                    line.append(&badge);
-                } else if row.is_unread() && row.unread.messages > 0 {
-                    let dot = gtk::Label::builder()
-                        .label("●")
-                        .css_classes(["dim-label", "caption"])
-                        .build();
-                    line.append(&dot);
-                }
-                if row.muted {
-                    line.append(&gtk::Image::from_icon_name("audio-volume-muted-symbolic"));
-                }
-
-                let list_row = gtk::ListBoxRow::builder().child(&line).build();
-                // The channel id travels on the widget name, so selection does not
-                // need a parallel index that could drift from the sidebar.
-                list_row.set_widget_name(row.channel.as_str());
-                self.sidebar.append(&list_row);
+            for row in showing {
+                let list_row = self.channel_row(row);
                 if keep.as_ref() == Some(&row.channel) {
                     to_select = Some(list_row);
                 }

@@ -264,6 +264,22 @@ fn the_drafts_endpoint_lists_unsent_messages() {
     assert_eq!(drafts[0].message, "half a thought");
 }
 
+/// An account with no drafts answers `null`, not `[]`. Parsing that
+/// into a `Vec` fails, and a swallowed failure looks exactly like an
+/// account with no drafts -- so the Drafts row simply stopped appearing
+/// and nothing said why.
+#[test]
+fn no_drafts_comes_back_as_null_not_an_empty_array() {
+    assert!(parse_drafts(&ok("null")).unwrap().is_empty());
+    assert!(parse_drafts(&ok("[]")).unwrap().is_empty());
+    assert_eq!(
+        parse_drafts(&ok(r#"[{"channel_id":"c1","message":"x"}]"#))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// The stats endpoint feeds the member count in the channel header.
 #[test]
 fn channel_stats_reads_the_member_count() {

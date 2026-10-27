@@ -265,8 +265,15 @@ pub fn my_drafts(user: &UserId, team: &TeamId) -> HttpRequest {
     HttpRequest::get(format!("{API}/users/{user}/teams/{team}/drafts"))
 }
 
+/// **The body is `null`, not `[]`, when there are no drafts.** Confirmed
+/// against a live server: the same account returned an array while it
+/// held drafts and `null` once it did not. Parsing straight into a
+/// `Vec` therefore fails on the ordinary empty case, and the failure
+/// looks exactly like an account with no drafts -- which is how it went
+/// unnoticed until the Drafts row stopped appearing.
 pub fn parse_drafts(resp: &HttpResponse) -> Result<Vec<Draft>, ApiError> {
-    parse_json(resp, "GET /users/{user}/teams/{team}/drafts")
+    let drafts: Option<Vec<Draft>> = parse_json(resp, "GET /users/{user}/teams/{team}/drafts")?;
+    Ok(drafts.unwrap_or_default())
 }
 
 /// How many people are in a channel, for the channel header.

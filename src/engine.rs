@@ -220,6 +220,35 @@ async fn set_category(
     best_effort(a, &request, events).await;
 }
 
+/// Hand the window what the Threads and Drafts views are drawn from.
+///
+/// Neither is worth stopping the sync for -- the channel list beside
+/// them is what the reader came for -- but a failure is said out loud.
+/// Swallowing it meant a missing Drafts row was indistinguishable from
+/// an account with no drafts, which is a bug that looks exactly like
+/// working software, and is how a `null` body went unnoticed.
+async fn send_views(
+    client: &Client,
+    threads: Result<mm_types::ThreadList, String>,
+    drafts: Result<Vec<mm_types::Draft>, String>,
+    events: &async_channel::Sender<Event>,
+) {
+    match threads {
+        Ok(threads) => send_threads(client, threads, events).await,
+        Err(e) => {
+            let _ = events.send(Event::Status(format!("threads: {e}"))).await;
+        }
+    }
+    match drafts {
+        Ok(drafts) => {
+            let _ = events.send(Event::Drafts(drafts)).await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Status(format!("drafts: {e}"))).await;
+        }
+    }
+}
+
 /// Hand the window the followed threads, and the people in them.
 ///
 /// A thread's root was written by somebody who need not be in any DM and
@@ -776,15 +805,7 @@ async fn sync(
             fetch(client, &thread_request, rest::parse_threads),
             fetch(client, &draft_request, rest::parse_drafts),
         );
-        // Neither is worth a failure the reader has to read: the view
-        // they feed is empty until the next sync, and the channel list
-        // beside them is the thing they came for.
-        if let Ok(threads) = threads {
-            send_threads(client, threads, events).await;
-        }
-        if let Ok(drafts) = drafts {
-            let _ = events.send(Event::Drafts(drafts)).await;
-        }
+        send_views(client, threads, drafts, events).await;
 
         match channels {
             Ok(channels) => {

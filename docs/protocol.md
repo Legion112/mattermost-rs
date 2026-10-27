@@ -389,7 +389,15 @@ total_unread_urgent_mentions}`.
   the WebSocket has `following` and `last_view_at` and no
   `unread_replies` at all.
 
-`GET /users/{user_id}/teams/{team_id}/drafts` returns a bare array.
+`GET /users/{user_id}/teams/{team_id}/drafts` returns a bare array --
+**or `null`, when there are none.** Not `[]`. Confirmed on 2026-10-27
+against the same account twice: an array while it held drafts, `null`
+once it did not. Parsing straight into a `Vec` fails on the ordinary
+empty case, and because that failure looked identical to an account with
+no drafts, the Drafts row simply stopped appearing and nothing said why.
+This is the same wart as `"fields": null` on an attachment, in a new
+place: a Mattermost collection that is empty is as likely to be `null`
+as `[]`, and every one of them has to tolerate both.
 Drafts are **server-side**, so a message half-typed in the web app is
 waiting in this one. A draft carries `root_id` when it is a reply, and
 the server keeps one whose text has been deleted while it still has
