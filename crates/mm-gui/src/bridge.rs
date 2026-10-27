@@ -81,6 +81,18 @@ pub enum Command {
     Pinned(ChannelId),
     /// Fetch this reader's saved posts.
     Saved,
+    /// Ask the server for channels and people matching what is typed
+    /// in the quick switcher -- including channels the reader has not
+    /// joined, which are in no local list at all.
+    Elsewhere {
+        team: mm_types::TeamId,
+        term: String,
+    },
+    /// Join a channel found that way.
+    JoinChannel(ChannelId),
+    /// Open the one-to-one conversation with somebody, creating it if
+    /// there is not one yet.
+    OpenDirect(UserId),
     /// Mute a channel, or let it speak again.
     SetMuted {
         channel: ChannelId,
@@ -238,6 +250,23 @@ pub enum Event {
     OlderPosts {
         channel: ChannelId,
         page: PostList,
+    },
+    /// What the server found for a quick-switcher query, with the term
+    /// it answered so a reply to a query already moved on from can be
+    /// ignored.
+    Elsewhere {
+        term: String,
+        channels: Vec<Channel>,
+        people: Vec<User>,
+    },
+    /// A channel the window should go to, because it was just created
+    /// or joined on the reader's behalf.
+    Opened(ChannelId),
+    /// A channel the reader has just joined, with the membership that
+    /// came back, so the sidebar has it before it is opened.
+    Joined {
+        channel: Channel,
+        member: ChannelMember,
     },
     /// What a search answered, with the terms it answered, so a reply
     /// to a query the reader has already moved on from can be ignored.

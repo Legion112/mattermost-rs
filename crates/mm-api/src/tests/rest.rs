@@ -939,3 +939,82 @@ fn muting_sets_mark_unread_and_nothing_else() {
     };
     assert_eq!(off, r#"{"mark_unread":"all"}"#);
 }
+
+/// The quick switcher can only offer what is in the sidebar, so a
+/// channel the reader has not joined is unreachable without these.
+#[test]
+fn channels_and_people_can_be_searched_on_the_server() {
+    let team = TeamId::new("t1");
+    let request = search_channels(&team, "devops");
+    assert_eq!(request.method, Method::Post);
+    assert_eq!(request.path, "/api/v4/teams/t1/channels/search");
+    let Body::Json(body) = &request.body else {
+        panic!("expected JSON")
+    };
+    assert_eq!(body, r#"{"term":"devops"}"#);
+    let found =
+        parse_channel_search(&ok(r#"[{"id":"c1","display_name":"DevOps","type":"O"}]"#)).unwrap();
+    assert_eq!(found[0].display_name, "DevOps");
+    assert!(parse_channel_search(&ok("nope")).is_err());
+
+    let people = search_users(&team, "ara", 20);
+    assert_eq!(people.path, "/api/v4/users/search");
+    let Body::Json(body) = &people.body else {
+        panic!("expected JSON")
+    };
+    // Somebody who has left cannot be messaged, so they are not offered.
+    assert!(body.contains(r#""allow_inactive":false"#), "{body}");
+    assert!(body.contains(r#""team_id":"t1""#), "{body}");
+    assert_eq!(
+        parse_user_search(&ok(r#"[{"id":"u1","username":"aragorn"}]"#)).unwrap()[0].username,
+        "aragorn"
+    );
+    assert!(parse_user_search(&ok("nope")).is_err());
+}
+
+/// Joining names the person in the body; opening a DM is a bare array
+/// of both ids, including your own, and is the same call whether or not
+/// the conversation already exists.
+#[test]
+fn joining_and_opening_a_dm() {
+    let me = UserId::new("u-me");
+    let join = join_channel(&ChannelId::new("c1"), &me);
+    assert_eq!(join.method, Method::Post);
+    assert_eq!(join.path, "/api/v4/channels/c1/members");
+    let Body::Json(body) = &join.body else {
+        panic!("expected JSON")
+    };
+    assert_eq!(body, r#"{"user_id":"u-me"}"#);
+
+    let dm = open_direct(&me, &UserId::new("u2"));
+    assert_eq!(dm.path, "/api/v4/channels/direct");
+    let Body::Json(body) = &dm.body else {
+        panic!("expected JSON")
+    };
+    assert_eq!(body, r#"["u-me","u2"]"#);
+    assert_eq!(
+        parse_channel(&ok(r#"{"id":"c9","type":"D","name":"u-me__u2"}"#))
+            .unwrap()
+            .id,
+        ChannelId::new("c9")
+    );
+    assert!(parse_channel(&ok("nope")).is_err());
+}
+
+/// Joining answers with the new membership, and the channel itself has
+/// to be fetched: one found by search was never in this client's own
+/// list, so there is nothing local to show the reader after they join.
+#[test]
+fn joining_answers_with_a_membership_and_the_channel_is_fetched_separately() {
+    let member = parse_channel_member(&ok(
+        r#"{"channel_id":"c1","user_id":"u1","notify_props":{},"last_viewed_at":0}"#,
+    ))
+    .unwrap();
+    assert_eq!(member.channel_id, ChannelId::new("c1"));
+    assert!(parse_channel_member(&ok("nope")).is_err());
+
+    let request = one_channel(&ChannelId::new("c1"));
+    assert_eq!(request.method, Method::Get);
+    assert_eq!(request.path, "/api/v4/channels/c1");
+    assert!(request.query.is_empty());
+}

@@ -261,6 +261,78 @@ pub fn parse_updated_categories(resp: &HttpResponse) -> Result<Vec<ChannelCatego
     parse_json(resp, "PUT /users/{user}/teams/{team}/channels/categories")
 }
 
+/// Public channels in a team whose name or purpose matches.
+///
+/// The quick switcher can only offer what is already in the sidebar,
+/// which means a channel the reader has not joined cannot be found at
+/// all without going back to the web app. This is the endpoint that
+/// fixes that: it searches the team's **open** channels, joined or not,
+/// and the server decides what the reader is allowed to see.
+#[must_use]
+pub fn search_channels(team: &TeamId, wanted: &str) -> HttpRequest {
+    HttpRequest::post(format!("{API}/teams/{team}/channels/search"))
+        .json(&serde_json::json!({ "term": wanted }))
+}
+
+pub fn parse_channel_search(resp: &HttpResponse) -> Result<Vec<Channel>, ApiError> {
+    parse_json(resp, "POST /teams/{team}/channels/search")
+}
+
+/// People in a team whose name matches.
+///
+/// `allow_inactive` is left false: somebody who has left the server
+/// cannot be messaged, and the sidebar already hides them.
+#[must_use]
+pub fn search_users(team: &TeamId, wanted: &str, limit: u32) -> HttpRequest {
+    HttpRequest::post(format!("{API}/users/search")).json(&serde_json::json!({
+        "term": wanted,
+        "team_id": team.as_str(),
+        "allow_inactive": false,
+        "limit": limit,
+    }))
+}
+
+pub fn parse_user_search(resp: &HttpResponse) -> Result<Vec<User>, ApiError> {
+    parse_json(resp, "POST /users/search")
+}
+
+/// Join a channel.
+///
+/// The answer is the new membership; the channel itself has to be
+/// fetched separately, which `one_channel` is for -- a channel found by
+/// search is not in the client's own list until it has been joined.
+#[must_use]
+pub fn join_channel(channel: &ChannelId, user: &UserId) -> HttpRequest {
+    HttpRequest::post(format!("{API}/channels/{channel}/members"))
+        .json(&serde_json::json!({ "user_id": user.as_str() }))
+}
+
+pub fn parse_channel_member(resp: &HttpResponse) -> Result<ChannelMember, ApiError> {
+    parse_json(resp, "POST /channels/{channel}/members")
+}
+
+/// One channel by id. **No `ETag` on this route**, unlike most of the
+/// others, so there is nothing to cache against.
+#[must_use]
+pub fn one_channel(channel: &ChannelId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/channels/{channel}"))
+}
+
+/// Open the one-to-one conversation between two people.
+///
+/// Creates it if it does not exist and returns the existing one if it
+/// does, so there is nothing to check first. The body is a bare array
+/// of two ids -- both of them, including your own.
+#[must_use]
+pub fn open_direct(me: &UserId, them: &UserId) -> HttpRequest {
+    HttpRequest::post(format!("{API}/channels/direct"))
+        .json(&serde_json::json!([me.as_str(), them.as_str()]))
+}
+
+pub fn parse_channel(resp: &HttpResponse) -> Result<Channel, ApiError> {
+    parse_json(resp, "POST /channels/direct")
+}
+
 /// Mute a channel, or let it speak again.
 ///
 /// There is no mute flag: `notify_props.mark_unread` is `"mention"` for

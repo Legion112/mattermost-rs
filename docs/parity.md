@@ -209,7 +209,16 @@ real server yet.
 | feature | status | verified | notes |
 |---|---|---|---|
 | `search.quick_switcher` | done | 12.0.1 | Ctrl+K, the way Mattermost binds it: type a few letters, press Return, be there. The one piece of searching that needs no endpoint -- every channel the reader is in is already in the store -- so it is ranked locally: a name that starts with what was typed, then one where a word does, then one that merely contains it, and unread first within each tier. Verified on a live account by typing `env` and landing in Prod-environment. |
-| `search.people_and_channels` | planned | — | Message search is built -- see `posts.search`. What is left is searching for **people** and for **channels the reader is not already in**: the quick switcher only offers what is in the sidebar, so a channel you have not joined cannot be found at all without going back to the Electron client. |
+| `search.people_and_channels` | partial | 12.0.1 | The quick switcher asks the server as well as itself. Under what it already knows it draws NOT JOINED -- public channels in the team the reader is not a member of, which were previously unreachable without going back to the Electron client -- and PEOPLE, anyone on the team whether or not there is already a conversation with them. Choosing a channel joins it and opens it; choosing a person opens the conversation, creating it only if there is not one, which is the same call either way so there is nothing to check first. The server is asked only from the second character, since one letter matches most of a server, and an answer to a query the reader has already typed past is dropped rather than drawn. A failed search is silent: the local results are already on screen and a shorter list needs no error line. Verified on a live account: "test" offered a public channel outside the sidebar, "ale" offered four people, and choosing one opened the conversation. NOT verified: **joining**, which posts a "user joined the channel" notice that everybody in it sees, so it was built but not tried. NOT built: archived channels, and searching across teams. |
+
+<details><summary><code>search.people_and_channels</code> wire</summary>
+
+- `POST /api/v4/teams/{team_id}/channels/search`
+- `POST /api/v4/users/search`
+- `POST /api/v4/channels/{channel_id}/members`
+- `POST /api/v4/channels/direct`
+
+</details>
 
 ## sidebar
 

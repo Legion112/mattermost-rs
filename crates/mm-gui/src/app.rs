@@ -194,6 +194,12 @@ struct Ui {
     /// choice may be overridden when the channel being restored finally
     /// turns up; one the reader made never is.
     provisional: Rc<std::cell::Cell<bool>>,
+    /// What the server last answered for a quick-switcher query, and a
+    /// way to redraw the open switcher when a later answer lands.
+    /// `None` when no switcher is open, which is also what stops a
+    /// late answer from reaching a window that has gone.
+    elsewhere: Rc<RefCell<Elsewhere>>,
+    refill_switcher: Rc<RefCell<Option<Refill>>>,
     /// The window, and where to write down how it was left.
     window: adw::ApplicationWindow,
     remember: Rc<dyn Fn(mm_desktop::Restored)>,
@@ -286,6 +292,57 @@ type ShownTools = Rc<RefCell<Option<gtk::Box>>>;
 /// again -- and a recycled row is drawn constantly -- does not ask a
 /// second time. `None` is "asked, not here yet".
 type LinkImages = Rc<RefCell<HashMap<String, Option<gdk::Texture>>>>;
+
+/// One row for something the client did not already know about: a
+/// channel the reader is not in, or a person.
+fn elsewhere_row(action: &str, mark: &str, name: &str, detail: &str) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.append(
+        &gtk::Label::builder()
+            .label(mark)
+            .width_request(16)
+            .css_classes(["dim-label"])
+            .build(),
+    );
+    line.append(
+        &gtk::Label::builder()
+            .label(name)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .build(),
+    );
+    if !detail.is_empty() {
+        line.append(
+            &gtk::Label::builder()
+                .label(detail)
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["dim-label"])
+                .build(),
+        );
+    }
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    // What to do when it is chosen travels on the name, the way a
+    // channel id does for the rows above.
+    row.set_widget_name(action);
+    row
+}
+
+/// Redraws the open quick switcher with whatever the server has since
+/// answered.
+type Refill = Rc<dyn Fn()>;
+
+/// What the server found for a quick-switcher query that the client
+/// could not answer from what it holds.
+#[derive(Default)]
+struct Elsewhere {
+    /// The query these answer, so an answer to a query the reader has
+    /// already typed past can be ignored rather than drawn.
+    term: String,
+    channels: Vec<mm_types::Channel>,
+    people: Vec<mm_types::User>,
+}
 
 /// Faces already fetched and decoded, by whose they are.
 type Avatars = Rc<RefCell<HashMap<UserId, gdk::Texture>>>;
@@ -600,7 +657,6 @@ fn build(
     let (posts, post_view, scroller) = build_post_list(&rows, false);
 
     let (composer, status) = build_composer_row();
-    let composer_pane = composer.pane.clone();
 
     // The conversation, the Threads view and the Drafts view take turns
     // in the same space. The status line and the composer stay put under
@@ -623,7 +679,7 @@ fn build(
     content.append(&middle);
     content.append(&typing_line);
     content.append(&status);
-    content.append(&composer_pane);
+    content.append(&composer.pane);
 
     let (thread_posts, thread_view, thread_pane, thread_close, thread_composer, thread_scroller) =
         build_thread_pane(&rows);
@@ -663,6 +719,8 @@ fn build(
         restore_to: Rc::new(RefCell::new(None)),
         reopen: Rc::new(RefCell::new(reopen)),
         provisional: Rc::new(std::cell::Cell::new(false)),
+        elsewhere: Rc::new(RefCell::new(Elsewhere::default())),
+        refill_switcher: Rc::new(RefCell::new(None)),
         window: window.clone(),
         remember: Rc::clone(remember),
         avatars: Rc::clone(&rows.avatars),
@@ -684,7 +742,7 @@ fn build(
         status,
         title,
         composer: composer.clone(),
-        composer_pane: composer_pane.clone(),
+        composer_pane: composer.pane.clone(),
         stack,
         login: Rc::clone(&login),
     };
@@ -4195,6 +4253,9 @@ const MENTIONS_HEIGHT: i32 = 260;
 /// the reader should type another letter rather than scroll.
 const SWITCHER_WIDTH: i32 = 520;
 const SWITCHER_HEIGHT: i32 = 460;
+/// How much has to be typed before the server is asked. One letter
+/// matches most of a server, and the answer would be noise.
+const ELSEWHERE_MINIMUM: usize = 2;
 const SWITCHER_RESULTS: usize = 30;
 
 /// How big the image window opens. Large enough to be worth opening,
@@ -4679,6 +4740,144 @@ impl Ui {
     /// hundred channels does not find one by scrolling the sidebar, and
     /// this is the one piece of searching that needs no endpoint at all
     /// -- every channel they are in is already in the store.
+    /// A reply to a quick-switcher query, or the channel it led to.
+    fn on_elsewhere(&self, event: Event) {
+        match event {
+            Event::Elsewhere {
+                term,
+                channels,
+                people,
+            } => {
+                *self.elsewhere.borrow_mut() = Elsewhere {
+                    term,
+                    channels,
+                    people,
+                };
+                // Only if a switcher is still open to draw them in.
+                let refill = self.refill_switcher.borrow().clone();
+                if let Some(refill) = refill {
+                    refill();
+                }
+            }
+            Event::Joined { channel, member } => {
+                let id = channel.id.clone();
+                {
+                    let mut store = self.store.borrow_mut();
+                    store.apply_channels(vec![channel]);
+                    store.apply_members(vec![member]);
+                }
+                self.go_to_new_channel(&id);
+            }
+            Event::Opened(channel) => self.go_to_new_channel(&channel),
+            // Every other variant has its own arm in `on_data`.
+            _ => {}
+        }
+    }
+
+    /// Show a channel that has only just appeared in the sidebar.
+    fn go_to_new_channel(&self, channel: &ChannelId) {
+        self.set_status("");
+        // Drawn now rather than on the next coalesced pass: the row has
+        // to exist before `show_channel` can select it.
+        self.sidebar_stale.set(true);
+        self.refresh_sidebar();
+        self.show_channel(channel);
+    }
+
+    /// Ask the server about a quick-switcher query.
+    ///
+    /// Only once there is something to ask about: one letter matches
+    /// most of a server, and asking on every keystroke of a long name
+    /// would be a request per letter for answers nobody reads.
+    fn ask_elsewhere(&self, query: &str) {
+        let term = query.trim().to_owned();
+        if term.chars().count() < ELSEWHERE_MINIMUM {
+            *self.elsewhere.borrow_mut() = Elsewhere::default();
+            return;
+        }
+        let Some(where_to_look) = self.store.borrow().teams.first().map(|t| t.id.clone()) else {
+            return;
+        };
+        self.commands
+            .send(Command::Elsewhere {
+                team: where_to_look,
+                term,
+            })
+            .ok();
+    }
+
+    /// Draw what the server found under what the client already knew.
+    ///
+    /// Channels the reader is already in are left out: they are in the
+    /// list above, and offering them twice makes the switcher look
+    /// broken. People already in the list are not, because a person is
+    /// not a channel -- the row above is the conversation, this one is
+    /// the human.
+    fn append_elsewhere(&self, list: &gtk::ListBox, query: &str) {
+        let found = self.elsewhere.borrow();
+        // An answer to a query the reader has already typed past.
+        if found.term != query.trim() || query.trim().is_empty() {
+            return;
+        }
+        let store = self.store.borrow();
+        let unjoined: Vec<&mm_types::Channel> = found
+            .channels
+            .iter()
+            .filter(|c| !store.my_member.contains_key(&c.id))
+            .take(SWITCHER_RESULTS)
+            .collect();
+        if !unjoined.is_empty() {
+            list.append(&mention_heading("NOT JOINED"));
+            for channel in unjoined {
+                list.append(&elsewhere_row(
+                    &format!("join:{}", channel.id),
+                    "#",
+                    &channel.display_name,
+                    "",
+                ));
+            }
+        }
+
+        let people: Vec<&mm_types::User> = found
+            .people
+            .iter()
+            .filter(|u| u.id != store.me && !u.is_deactivated())
+            .take(SWITCHER_RESULTS)
+            .collect();
+        if !people.is_empty() {
+            list.append(&mention_heading("PEOPLE"));
+            for person in people {
+                list.append(&elsewhere_row(
+                    &format!("dm:{}", person.id),
+                    "@",
+                    &format!("@{}", person.username),
+                    &person.full_name(),
+                ));
+            }
+        }
+    }
+
+    /// Act on whatever row the switcher was on when Return was pressed.
+    ///
+    /// The row's name says what it is: a bare channel id is one the
+    /// reader is already in, `join:` is one they are not, and `dm:` is
+    /// a person rather than a place.
+    fn switcher_chose(&self, name: &str) {
+        if let Some(channel) = name.strip_prefix("join:") {
+            self.set_status("joining…");
+            self.commands
+                .send(Command::JoinChannel(ChannelId::new(channel)))
+                .ok();
+        } else if let Some(user) = name.strip_prefix("dm:") {
+            self.set_status("opening…");
+            self.commands
+                .send(Command::OpenDirect(UserId::new(user)))
+                .ok();
+        } else if !name.is_empty() {
+            self.show_channel(&ChannelId::new(name));
+        }
+    }
+
     fn open_switcher(&self) {
         let entry = gtk::SearchEntry::builder()
             .placeholder_text("Find channel…")
@@ -4737,8 +4936,9 @@ impl Ui {
                     row.set_widget_name(found.channel.as_str());
                     list.append(&row);
                 }
+                ui.append_elsewhere(&list, query);
                 // So Return goes somewhere without arrowing down first.
-                if let Some(first) = list.row_at_index(0) {
+                if let Some(first) = first_selectable(&list, 0, 1) {
                     list.select_row(Some(&first));
                 }
             }
@@ -4746,18 +4946,36 @@ impl Ui {
         fill("");
         {
             let fill = fill.clone();
-            entry.connect_search_changed(move |entry| fill(entry.text().as_str()));
+            let ui = self.clone();
+            entry.connect_search_changed(move |entry| {
+                let query = entry.text().to_string();
+                fill(&query);
+                ui.ask_elsewhere(&query);
+            });
+        }
+        // So an answer that lands after the reader has stopped typing
+        // redraws the list it belongs to. Cleared when the window goes,
+        // which is what keeps a late answer from reaching a dead one.
+        {
+            let fill = fill.clone();
+            let entry = entry.clone();
+            *self.refill_switcher.borrow_mut() = Some(Rc::new(move || fill(entry.text().as_str())));
+        }
+        {
+            let ui = self.clone();
+            window.connect_close_request(move |_| {
+                *ui.refill_switcher.borrow_mut() = None;
+                glib::Propagation::Proceed
+            });
         }
 
         let go = {
             let ui = self.clone();
             let window = window.clone();
             move |row: &gtk::ListBoxRow| {
-                let channel = ChannelId::new(row.widget_name().as_str());
+                let name = row.widget_name();
                 window.close();
-                if !channel.as_str().is_empty() {
-                    ui.show_channel(&channel);
-                }
+                ui.switcher_chose(name.as_str());
             }
         };
         {
@@ -5852,6 +6070,9 @@ impl Ui {
             }
             Event::SearchResults { .. } | Event::PinnedPosts { .. } | Event::SavedPosts(_) => {
                 self.on_found(event);
+            }
+            Event::Elsewhere { .. } | Event::Joined { .. } | Event::Opened(_) => {
+                self.on_elsewhere(event);
             }
             Event::Statuses(statuses) => {
                 if !self.store.borrow_mut().apply_statuses(&statuses).is_empty() {

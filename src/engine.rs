@@ -359,6 +359,85 @@ async fn save_file(
     }
 }
 
+/// Look for channels and people the client does not already know.
+///
+/// Both at once: they answer one question the reader asked, and two
+/// round trips in series would make the quick switcher feel like it
+/// was thinking. Failures are silent -- the local results are already
+/// on screen, and an error line under them would say nothing useful
+/// about a list that is merely shorter than it could be.
+async fn find_elsewhere(
+    a: &Active,
+    team: &mm_types::TeamId,
+    wanted: &str,
+    events: &async_channel::Sender<Event>,
+) {
+    let channels = rest::search_channels(team, wanted);
+    let people = rest::search_users(team, wanted, ELSEWHERE_PEOPLE);
+    let (channels, people) = tokio::join!(
+        fetch(&a.client, &channels, rest::parse_channel_search),
+        fetch(&a.client, &people, rest::parse_user_search),
+    );
+    let _ = events
+        .send(Event::Elsewhere {
+            term: wanted.to_owned(),
+            channels: channels.unwrap_or_default(),
+            people: people.unwrap_or_default(),
+        })
+        .await;
+}
+
+/// Join a channel, and hand back enough for the sidebar to show it.
+///
+/// The membership comes from the join; the channel itself has to be
+/// fetched, because a channel found by search was never in this
+/// client's own list.
+async fn join_channel(a: &Active, channel: &ChannelId, events: &async_channel::Sender<Event>) {
+    let user = UserId::new(&a.session.user_id);
+    let request = rest::join_channel(channel, &user);
+    let member = match fetch(&a.client, &request, rest::parse_channel_member).await {
+        Ok(member) => member,
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("join: {e}"))).await;
+            return;
+        }
+    };
+    match fetch(&a.client, &rest::one_channel(channel), rest::parse_channel).await {
+        Ok(channel) => {
+            let _ = events.send(Event::Joined { channel, member }).await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("join: {e}"))).await;
+        }
+    }
+}
+
+/// Open the conversation with somebody, creating it if there is none.
+///
+/// The same call either way, so there is nothing to check first. The
+/// membership is not returned, so the sidebar learns about it from the
+/// sync that follows.
+async fn open_direct(a: &Active, them: &UserId, events: &async_channel::Sender<Event>) {
+    let me = UserId::new(&a.session.user_id);
+    let request = rest::open_direct(&me, them);
+    match fetch(&a.client, &request, rest::parse_channel).await {
+        Ok(channel) => {
+            let _ = events.send(Event::Channels(vec![channel.clone()])).await;
+            open_channel(
+                &a.client,
+                &channel.id,
+                events,
+                a.collapsed.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await;
+            let _ = events.send(Event::Opened(channel.id)).await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("direct: {e}"))).await;
+        }
+    }
+}
+
 /// Ask the server what matches.
 ///
 /// Searching is per team in Mattermost -- there is no account-wide
@@ -620,6 +699,9 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Search { team, terms } => search(a, &team, &terms, events).await,
         Command::Pinned(channel) => send_pinned(a, channel, events).await,
         Command::Saved => send_saved(a, events).await,
+        Command::Elsewhere { team, term } => find_elsewhere(a, &team, &term, events).await,
+        Command::JoinChannel(channel) => join_channel(a, &channel, events).await,
+        Command::OpenDirect(user) => open_direct(a, &user, events).await,
         Command::SetMuted { channel, muted } => {
             let user = UserId::new(&a.session.user_id);
             let request = rest::set_channel_muted(&channel, &user, muted);
@@ -967,6 +1049,8 @@ const CHANNEL_ROSTER: u32 = 200;
 /// fetched. Both are a screenful and then some; neither pages yet.
 const SEARCH_PAGE: u32 = 60;
 const SAVED_PAGE: u32 = 60;
+/// How many people one quick-switcher query asks about.
+const ELSEWHERE_PEOPLE: u32 = 20;
 
 /// How much of the account to warm in the background, and how fast.
 ///
