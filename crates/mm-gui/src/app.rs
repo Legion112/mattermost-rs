@@ -1585,6 +1585,9 @@ struct ViewRow<'a> {
     /// rather than an empty circle.
     face_names: Vec<String>,
     unread: bool,
+    /// Words to pick out in the preview, for a list of search hits.
+    /// Empty everywhere else, and the preview is then plain text.
+    highlight: Vec<String>,
     /// A button at the right-hand end of the top line, for a list whose
     /// rows can be acted on without being opened. The caller builds it,
     /// because what it does is the caller's business.
@@ -1642,7 +1645,6 @@ fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
     // lines, not the ones the author typed, so a deploy report full of
     // newlines filled the whole page with one result.
     let body = gtk::Label::builder()
-        .label(one_line(row.preview))
         .xalign(0.0)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
@@ -1650,6 +1652,12 @@ fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
         .lines(2)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
+    let preview = one_line(row.preview);
+    if row.highlight.is_empty() {
+        body.set_text(&preview);
+    } else {
+        body.set_markup(&mm_md::highlight(&preview, &row.highlight));
+    }
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
     column.set_margin_start(12);
@@ -6878,6 +6886,11 @@ impl Ui {
         }
         let store = self.store.borrow();
         let posts = store.found(which);
+        let words = if *which == mm_core::Found::Search {
+            mm_md::search_words(&store.search_terms)
+        } else {
+            Vec::new()
+        };
         self.found_title
             .set_text(&found_heading(&store, which, posts.len()));
         self.search_entry
@@ -6898,6 +6911,11 @@ impl Ui {
                 faces: Vec::new(),
                 face_names: Vec::new(),
                 unread: false,
+                // Only on a search, and only the words it really
+                // looked for: the query language rides in the same
+                // string, and bolding `from` in every hit would be
+                // worse than bolding nothing.
+                highlight: words.clone(),
                 action: self.take_off_list(which, &post.id),
             });
             // The post's own id: its channel and its thread are both
@@ -7451,6 +7469,7 @@ impl Ui {
                     .collect(),
                 face_names: who.iter().map(|id| store.user_label(id)).collect(),
                 unread: thread.is_unread(),
+                highlight: Vec::new(),
                 action: self.mark_thread_read_button(thread),
             });
             row.set_widget_name(thread.id.as_str());
@@ -7513,6 +7532,7 @@ impl Ui {
                 faces: Vec::new(),
                 face_names: Vec::new(),
                 unread: false,
+                highlight: Vec::new(),
                 action: None,
             });
             row.set_widget_name(draft.channel_id.as_str());

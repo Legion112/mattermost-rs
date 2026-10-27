@@ -772,11 +772,26 @@ button vanish having done nothing, which reads as a bug. Written down in \
 "test" found a hundred hits with the button under them, and clicking it \
 said no more results and took the button away.
 
-NOT built: jumping to the hit's exact place in its channel's scrollback \
--- clicking a result opens the channel and that message's own thread \
-beside it, which puts the message on screen without the timeline having \
-to grow a segment around a post from a year ago -- and the match \
-highlighting the server returns alongside the posts."""
+**The words looked for are picked out in bold** in each hit. Not from the \
+server's `matches`, which is `null` without Elasticsearch -- measured on \
+the live server -- but from the query, picked apart here: the modifiers \
+ride in the same string as the words, and a client that highlighted them \
+would bold `from` in every result. So `from:`, `in:`, `before:` and the \
+rest are dropped by shape rather than by a list, `-excluded` is dropped \
+because it cannot appear in a hit anyway, a trailing `*` is reduced to its \
+stem, and `"a quoted phrase"` stays one unit so its two words are not \
+pointed at separately wherever they occur. The matching runs over \
+characters rather than bytes, or a Cyrillic query would slice a Cyrillic \
+letter in half and hand Pango broken markup; where lowercasing changes the \
+character count at all -- a Turkish dotted capital I becomes two -- it \
+gives up and draws the text plain, because without the bold beats wrong. \
+Verified on a live account: searching `redirector` drew it in bold in \
+every one of a hundred hits.
+
+NOT built: jumping to the hit's exact place in its channel's scrollback -- \
+clicking a result opens the channel and that message's own thread beside \
+it, which puts the message on screen without the timeline having to grow a \
+segment around a post from a year ago."""
 
 [[feature]]
 id       = "posts.pinned_and_saved"

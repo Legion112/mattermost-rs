@@ -18,8 +18,10 @@ mod pango;
 mod parse;
 
 pub mod emoji;
+pub mod search;
 pub mod spell;
 
 pub use emoji::{Choice, Piece, glyph, scan as scan_emoji, search as search_emoji};
 pub use pango::{escape, to_pango};
 pub use parse::{Block, Document, Inline, Mentioned, Roster, mark_mentions, parse};
+pub use search::{highlight, words as search_words};
