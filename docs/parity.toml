@@ -774,9 +774,18 @@ inserts the **shortcode** rather than the character: that is what \
 Mattermost stores and what its own clients render, so a message written \
 here reads the same everywhere and stays editable as text. The server's \
 own custom emoji are offered too, and first -- see `posts.custom_emoji`. \
-Verified on a live account: searching "rocket" and picking it put a 🚀 on \
-the message. NOT built: skin-tone variants, and a `:` completion in the \
-composer, so a shortcode still has to be typed in full or picked."""
+A half-typed `:` completes as well, in both composers, over the same \
+machinery the `@` popup uses: two characters at least, which is \
+Mattermost's own rule and the one thing that keeps a finished `:tada:` \
+from offering the whole table again -- the caret after that last colon is \
+the end of a run with nothing in it. The run must also start at a word \
+boundary, so the colon in `http://` is not an emoji being typed, and hold \
+only shortcode characters, so `:-)` is left alone. Accepting closes the \
+shortcode and leaves a space, which is what somebody mid-sentence wants \
+next. Verified on a live account: searching "rocket" and picking it put a \
+🚀 on the message, and typing `:pep` offered seven of the server's own \
+with their pictures, Tab turning it into `:pepe_clap: `. NOT built: \
+skin-tone variants."""
 
 [[feature]]
 id       = "posts.custom_emoji"

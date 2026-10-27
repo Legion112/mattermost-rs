@@ -1598,23 +1598,52 @@ fn wire_unread_filter(ui: &Ui, button: &gtk::ToggleButton) {
     });
 }
 
-/// The `@` the caret is sitting at the end of, if it is.
+/// The run the caret is sitting at the end of, if it is one.
 ///
-/// Only a mention being typed *now*: the run has to reach the caret,
+/// Only something being typed *now*: the run has to reach the caret,
 /// start at a word boundary -- an address has an `@` in the middle and
-/// is not a mention -- and carry no space, since a mention is one word.
-fn mention_being_typed(text: &str, caret: usize) -> Option<(usize, String)> {
+/// is not a mention, and `http://` has a colon in it -- and carry no
+/// space, since neither a username nor a shortcode has one.
+///
+/// Returns where the sigil is, counted in characters, and what has been
+/// typed after it.
+fn being_typed(text: &str, caret: usize, sigil: char) -> Option<(usize, String)> {
     let upto: String = text.chars().take(caret).collect();
-    let at = upto.rfind('@')?;
+    let at = upto.rfind(sigil)?;
     let before = upto[..at].chars().next_back();
     if before.is_some_and(|c| !c.is_whitespace()) {
         return None;
     }
-    let prefix = &upto[at + 1..];
+    let prefix = &upto[at + sigil.len_utf8()..];
     if prefix.chars().any(char::is_whitespace) {
         return None;
     }
     Some((upto[..at].chars().count(), prefix.to_owned()))
+}
+
+/// The `@` the caret is sitting at the end of, if it is.
+fn mention_being_typed(text: &str, caret: usize) -> Option<(usize, String)> {
+    being_typed(text, caret, '@')
+}
+
+/// The `:shortcode` the caret is sitting at the end of, if it is.
+///
+/// Two characters at least, which is Mattermost's own rule and the one
+/// thing that keeps a finished `:tada:` from immediately offering the
+/// whole table again -- the caret after that last colon is the end of a
+/// run with nothing in it. Only shortcode characters, so a smiley typed
+/// as `:-)` is left alone.
+fn shortcode_being_typed(text: &str, caret: usize) -> Option<(usize, String)> {
+    const SHORTEST: usize = 2;
+    let (at, prefix) = being_typed(text, caret, ':')?;
+    if prefix.chars().count() < SHORTEST
+        || !prefix
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+'))
+    {
+        return None;
+    }
+    Some((at, prefix))
 }
 
 /// The sidebar, the conversation and the thread panel, side by side.
@@ -2520,6 +2549,9 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
     for view in [composer, thread_composer] {
         watch_spelling(ui, view);
     }
+    for view in [composer, thread_composer] {
+        attach_shortcodes(ui, view);
+    }
     attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
     attach_mentions(ui, thread_composer, |ui| {
         let root = ui.thread_root.borrow().clone()?;
@@ -2528,15 +2560,14 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
     });
 }
 
-/// Offer the people a half-typed `@` might mean, and complete it.
+/// The list and popover a completion is drawn in, anchored on a
+/// composer.
 ///
-/// Both composers get one: a mention is as likely in a reply as in a
-/// message, and Mattermost offers it in both.
-fn attach_mentions(
-    ui: &Ui,
-    entry: &gtk::TextView,
-    channel: impl Fn(&Ui) -> Option<ChannelId> + 'static,
-) {
+/// `autohide(false)` on purpose: an autohiding popover takes the
+/// keyboard, and the whole point is that typing carries on underneath
+/// it. Above the caret, with no arrow, which is where Mattermost puts
+/// both of these.
+fn completion_popup(entry: &gtk::TextView) -> (gtk::ListBox, gtk::Popover) {
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Browse)
         .css_classes(["navigation-sidebar"])
@@ -2560,6 +2591,19 @@ fn attach_mentions(
         .has_arrow(false)
         .build();
     popup.set_parent(entry);
+    (list, popup)
+}
+
+/// Offer the people a half-typed `@` might mean, and complete it.
+///
+/// Both composers get one: a mention is as likely in a reply as in a
+/// message, and Mattermost offers it in both.
+fn attach_mentions(
+    ui: &Ui,
+    entry: &gtk::TextView,
+    channel: impl Fn(&Ui) -> Option<ChannelId> + 'static,
+) {
+    let (list, popup) = completion_popup(entry);
 
     {
         let ui = ui.clone();
@@ -2588,7 +2632,112 @@ fn attach_mentions(
             popup.popdown();
         });
     }
-    entry.add_controller(mention_keys(entry, &list, &popup));
+    entry.add_controller(completion_keys(entry, &list, &popup, accept_mention));
+}
+
+/// Offer the emoji a half-typed `:` might mean, and complete it.
+///
+/// The server's own first, as pictures, and then the standard table --
+/// the same order the picker uses, and for the same reason: the custom
+/// ones are the ones a reader cannot find anywhere else.
+fn attach_shortcodes(ui: &Ui, entry: &gtk::TextView) {
+    let (list, popup) = completion_popup(entry);
+
+    {
+        let ui = ui.clone();
+        let list = list.clone();
+        let popup = popup.clone();
+        let view = entry.clone();
+        entry.buffer().connect_changed(move |_| {
+            let caret = composer_caret(&view);
+            let Some((_, prefix)) = shortcode_being_typed(&composer_text(&view), caret) else {
+                popup.popdown();
+                return;
+            };
+            fill_shortcodes(&ui, &list, &prefix);
+            if list.row_at_index(0).is_none() {
+                popup.popdown();
+            } else {
+                popup.popup();
+            }
+        });
+    }
+    {
+        let entry = entry.clone();
+        let popup = popup.clone();
+        list.connect_row_activated(move |_, row| {
+            accept_shortcode(&entry, &row.widget_name());
+            popup.popdown();
+        });
+    }
+    entry.add_controller(completion_keys(entry, &list, &popup, accept_shortcode));
+}
+
+/// Draw the emoji that match, picture or glyph on the left and the
+/// shortcode beside it -- the shortcode is what gets typed, so it is
+/// the part that has to be readable.
+fn fill_shortcodes(ui: &Ui, list: &gtk::ListBox, prefix: &str) {
+    while let Some(old) = list.first_child() {
+        list.remove(&old);
+    }
+    let custom = ui
+        .store
+        .borrow()
+        .custom_emoji_matching(prefix, SHORTCODES_OFFERED);
+    let standard = mm_md::search_emoji(prefix, SHORTCODES_OFFERED);
+    for name in &custom {
+        list.append(&shortcode_row(&ui.emoji, name));
+    }
+    for found in standard
+        .iter()
+        .take(SHORTCODES_OFFERED.saturating_sub(custom.len()))
+    {
+        list.append(&shortcode_row(&ui.emoji, found.shortcode));
+    }
+    if let Some(first) = list.row_at_index(0) {
+        list.select_row(Some(&first));
+    }
+}
+
+/// One offered emoji. The name travels on the row's widget name, the
+/// way the mention rows carry a username.
+fn shortcode_row(emoji: &Emoji, name: &str) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.set_margin_start(8);
+    line.set_margin_end(8);
+    line.set_margin_top(4);
+    line.set_margin_bottom(4);
+    if let Some(texture) = emoji.texture(name) {
+        line.append(&Emoji::image(&texture));
+    } else {
+        let face = gtk::Label::new(Some(mm_md::glyph(name).unwrap_or(" ")));
+        face.set_width_chars(2);
+        line.append(&face);
+    }
+    line.append(&gtk::Label::new(Some(&format!(":{name}:"))));
+
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.set_widget_name(name);
+    row
+}
+
+/// Put the chosen shortcode where the half-typed one was, closed with
+/// its colon and followed by a space.
+fn accept_shortcode(view: &gtk::TextView, name: &str) {
+    let caret = composer_caret(view);
+    let text = composer_text(view);
+    let Some((at, prefix)) = shortcode_being_typed(&text, caret) else {
+        return;
+    };
+    let head: String = text.chars().take(at).collect();
+    let tail: String = text.chars().skip(at + 1 + prefix.chars().count()).collect();
+    let buffer = view.buffer();
+    buffer.set_text(&format!("{head}:{name}: {tail}"));
+    // Past the closing colon and the space, which is where somebody
+    // mid-sentence wants to carry on.
+    let put = at + name.chars().count() + 3;
+    let caret = buffer.iter_at_offset(i32::try_from(put).unwrap_or(i32::MAX));
+    buffer.place_cursor(&caret);
 }
 
 /// The popup's keys, while it is up: move, accept, dismiss.
@@ -2597,10 +2746,11 @@ fn attach_mentions(
 /// takes Up, Down, Tab and Return for itself, and the caret is in one.
 /// Everything is passed through when the popup is down, so typing is
 /// untouched.
-fn mention_keys(
+fn completion_keys(
     entry: &gtk::TextView,
     list: &gtk::ListBox,
     popup: &gtk::Popover,
+    accept: impl Fn(&gtk::TextView, &str) + 'static,
 ) -> gtk::EventControllerKey {
     let keys = gtk::EventControllerKey::new();
     let entry = entry.clone();
@@ -2617,7 +2767,7 @@ fn mention_keys(
             }
             gdk::Key::Tab | gdk::Key::Return | gdk::Key::KP_Enter => {
                 if let Some(row) = list.selected_row() {
-                    accept_mention(&entry, &row.widget_name());
+                    accept(&entry, &row.widget_name());
                 }
                 popup.popdown();
                 glib::Propagation::Stop
@@ -4717,6 +4867,11 @@ const EDITOR_HEIGHT: i32 = 260;
 /// How many people the mention popup offers before the reader should
 /// type another letter rather than scroll a list.
 const MENTIONS_OFFERED: usize = 8;
+
+/// How many emoji a half-typed `:` offers. Fewer than the picker's
+/// grid, because this is a list with a shortcode on every row and it
+/// sits over the message being written.
+const SHORTCODES_OFFERED: usize = 10;
 /// How wide a link preview card is drawn, and how big a side the picture
 /// in it gets. Fixed rather than fitted: a page's `OpenGraph` image can be
 /// a 1200px banner, and a row that resizes itself when one arrives moves
