@@ -665,7 +665,29 @@ and a failed request look identical, and the drafts list already taught \
 that lesson once. Saved posts are still `flagged` on the wire; the web \
 app has said "Saved" since 5.x. Verified on a live account: three saved \
 messages came back across three channels, and a channel with no pins said \
-so. NOT built: unpinning or unsaving from these lists, and paging."""
+so. A button at the right-hand end of each row takes the post off the list \
+it is being shown in -- unpin on the pinned list, remove on the saved \
+one. Only on those two: the list **is** the thing being changed there, \
+while a search result has nothing to be taken off. Until now the only \
+way to unpin was to find the message in its channel, which is the one \
+place the pinned list exists to save you going. The list is asked for \
+again afterwards rather than edited in place: the server answers a pin \
+with an event about the *post*, not about the list, so nothing would \
+otherwise redraw the page.
+
+Two bugs came out of building it, both of which had been shipped. \
+Unsaving sent `PUT` to `/users/{id}/preferences/delete`, which is a \
+`POST` -- the server answered 404, which reads like a missing post \
+rather than a wrong verb, and the post stayed saved with nothing on \
+screen admitting it. And a save was sent without being recorded here, \
+so the menu went on offering "Remove from saved" for a post that had \
+just been unsaved: saving is a preference, and the server announces a \
+changed preference over an event this client does not decode.
+
+Verified against the live account on the self-DM: saving a message put \
+it at the top of the saved list, the button took it off and the \
+server's own flagged-posts endpoint agreed; pinning one put it on the \
+pinned list and the button emptied it again. NOT built: paging."""
 
 [[feature]]
 id       = "channels.info_and_members"

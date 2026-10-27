@@ -754,8 +754,14 @@ fn saving_a_post_writes_a_preference() {
     assert_eq!(body[0]["category"], "flagged_post");
     assert_eq!(body[0]["name"], "p1");
 
+    // Not a PUT. Deleting a preference takes a body, so Mattermost
+    // models it as an action rather than a DELETE on a resource -- and
+    // a PUT to this path answers 404, which reads like a missing post
+    // rather than a wrong verb and leaves the post saved.
     let unsave = set_saved(&UserId::new("u1"), &PostId::new("p1"), false);
     assert_eq!(unsave.path, "/api/v4/users/u1/preferences/delete");
+    assert_eq!(unsave.method, Method::Post);
+    assert_eq!(unsave.body, save.body);
 }
 
 /// Presence for a set of people goes in one POST with the ids in the

@@ -1500,6 +1500,10 @@ struct ViewRow<'a> {
     /// rather than an empty circle.
     face_names: Vec<String>,
     unread: bool,
+    /// A button at the right-hand end of the top line, for a list whose
+    /// rows can be acted on without being opened. The caller builds it,
+    /// because what it does is the caller's business.
+    action: Option<gtk::Button>,
 }
 
 /// A message as one run of text, for a list that previews it.
@@ -1542,6 +1546,9 @@ fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
             .css_classes(["dim-label", "caption"])
             .build(),
     );
+    if let Some(action) = &row.action {
+        top.append(action);
+    }
 
     // Two lines of the message and no more: the view is a list of things
     // to go to, not a place to read them.
@@ -3768,12 +3775,7 @@ fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -
             }
             let post = PostId::new(post.as_str());
             let already = store.borrow().is_saved(&post);
-            commands
-                .send(Command::Save {
-                    post,
-                    saved: !already,
-                })
-                .ok();
+            save_post(&store, &commands, &post, !already);
         });
     }
     tools.append(&saver);
@@ -4655,6 +4657,48 @@ fn open_image(
     window.present();
 }
 
+/// Save a post, or take it out of the saved list.
+///
+/// Applied to the store as well as sent, because saving is a
+/// **preference** and the server announces a changed preference over a
+/// WebSocket event this client does not decode -- so without this the
+/// menu goes on offering "Remove from saved" for a post that has just
+/// been unsaved, and the next click asks the server to unsave it twice.
+fn save_post(
+    store: &Rc<RefCell<Store>>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    post: &PostId,
+    saved: bool,
+) {
+    store.borrow_mut().set_saved_locally(post, saved);
+    commands
+        .send(Command::Save {
+            post: post.clone(),
+            saved,
+        })
+        .ok();
+}
+
+/// The overflow menu's save entry, which cannot go through the generic
+/// `add` because it has to touch the store as well as the engine.
+fn wire_save_entry(
+    button: &gtk::Button,
+    popover: &gtk::Popover,
+    store: &Rc<RefCell<Store>>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    post: &PostId,
+    saved: bool,
+) {
+    let store = Rc::clone(store);
+    let commands = commands.clone();
+    let popover = popover.clone();
+    let post = post.clone();
+    button.connect_clicked(move |_| {
+        save_post(&store, &commands, &post, saved);
+        popover.popdown();
+    });
+}
+
 /// Fill a message's overflow menu.
 ///
 /// Rebuilt per bind because the entries depend on the message -- pin or
@@ -4742,13 +4786,9 @@ fn fill_message_menu(
     } else {
         "Save message"
     };
-    add(
-        &entry("bookmark-new-symbolic", saving),
-        Command::Save {
-            post: post.clone(),
-            saved: !saved,
-        },
-    );
+    let button = entry("bookmark-new-symbolic", saving);
+    wire_save_entry(&button, popover, store, commands, &post, !saved);
+    actions.append(&button);
     let pinning = if pinned {
         "Unpin from channel"
     } else {
@@ -6338,6 +6378,7 @@ impl Ui {
                 faces: Vec::new(),
                 face_names: Vec::new(),
                 unread: false,
+                action: self.take_off_list(which, &post.id),
             });
             // The post's own id: its channel and its thread are both
             // questions the store can answer from it, and one id cannot
@@ -6354,6 +6395,75 @@ impl Ui {
                 mm_core::Found::Saved => "Nothing saved",
                 mm_core::Found::Pinned(_) => "Nothing pinned in this channel",
             }));
+        }
+    }
+
+    /// The button that takes a post off the list it is being shown in.
+    ///
+    /// Only on the pinned and saved lists, where the list **is** the
+    /// thing being changed -- a search result has nothing to be taken
+    /// off. Until now the only way to unpin was to find the message in
+    /// its channel, which is the one place the pinned list exists to
+    /// save you going.
+    fn take_off_list(&self, which: &mm_core::Found, post: &PostId) -> Option<gtk::Button> {
+        let (icon, tip, command) = match which {
+            mm_core::Found::Search => return None,
+            mm_core::Found::Pinned(_) => (
+                "view-pin-symbolic",
+                "Unpin from this channel",
+                Command::Pin {
+                    post: post.clone(),
+                    pinned: false,
+                },
+            ),
+            mm_core::Found::Saved => (
+                "user-bookmarks-symbolic",
+                "Remove from saved",
+                Command::Save {
+                    post: post.clone(),
+                    saved: false,
+                },
+            ),
+        };
+        let button = gtk::Button::from_icon_name(icon);
+        button.add_css_class("flat");
+        button.set_tooltip_text(Some(tip));
+        // Or the click reaches the row underneath and opens the message
+        // that is being taken off the list.
+        button.set_can_focus(false);
+        let ui = self.clone();
+        button.connect_clicked(move |_| {
+            // Unsaving goes through `save_post`, which also records it
+            // in the store: a saved post is a preference, and the
+            // server announces that over an event this client does not
+            // decode.
+            if let Command::Save { post, saved } = &command {
+                save_post(&ui.store, &ui.commands, post, *saved);
+            } else {
+                ui.commands.send(command.clone()).ok();
+            }
+            // The server answers a pin with a WebSocket event about the
+            // *post*, not about the list, so nothing would redraw this
+            // page. Ask for the list again, which is the only honest
+            // way to know what is on it.
+            ui.refetch_found();
+        });
+        Some(button)
+    }
+
+    /// Ask the server for whichever list is on screen.
+    fn refetch_found(&self) {
+        let Pane::Found(which) = self.pane.borrow().clone() else {
+            return;
+        };
+        match which {
+            mm_core::Found::Pinned(channel) => {
+                self.commands.send(Command::Pinned(channel)).ok();
+            }
+            mm_core::Found::Saved => {
+                self.commands.send(Command::Saved).ok();
+            }
+            mm_core::Found::Search => {}
         }
     }
 
@@ -6445,6 +6555,7 @@ impl Ui {
                     .collect(),
                 face_names: who.iter().map(|id| store.user_label(id)).collect(),
                 unread: thread.is_unread(),
+                action: None,
             });
             row.set_widget_name(thread.id.as_str());
             self.threads_list.append(&row);
@@ -6506,6 +6617,7 @@ impl Ui {
                 faces: Vec::new(),
                 face_names: Vec::new(),
                 unread: false,
+                action: None,
             });
             row.set_widget_name(draft.channel_id.as_str());
             self.drafts_list.append(&row);

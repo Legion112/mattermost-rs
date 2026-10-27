@@ -934,6 +934,29 @@ impl Store {
             .is_some_and(|value| mm_types::is_true(value))
     }
 
+    /// Record that a post has just been saved, or unsaved.
+    ///
+    /// Applied here as well as sent, like a folded category, and for a
+    /// sharper reason: saving is a **preference**, and the server
+    /// announces a changed preference over a WebSocket event this
+    /// client does not decode. Without this the menu went on offering
+    /// "Remove from saved" for a post that had just been unsaved, and
+    /// the next click would have asked the server to unsave it twice.
+    /// A sync overwrites it, which is what keeps the server's copy the
+    /// one that matters.
+    pub fn set_saved_locally(&mut self, post: &PostId, saved: bool) -> Vec<Change> {
+        let key = (mm_types::keys::FLAGGED_POST.to_owned(), post.to_string());
+        if saved {
+            self.prefs.insert(key, "true".to_owned());
+        } else {
+            self.prefs.remove(&key);
+            // And out of the list, so the page it was taken off
+            // redraws without waiting for the server to answer.
+            self.saved.retain(|held| held != post);
+        }
+        vec![Change::Found]
+    }
+
     /// Whether this reader wrote a post, which decides whether they may
     /// edit or delete it.
     #[must_use]

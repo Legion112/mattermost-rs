@@ -641,6 +641,14 @@ pub fn set_unread(user: &UserId, post: &PostId, collapsed: bool) -> HttpRequest 
 /// in the `flagged_post` category, keyed by post id. Saving writes one and
 /// unsaving deletes it, which is why this returns a preference request
 /// rather than something post-shaped.
+///
+/// **The two halves do not use the same method.** Writing a preference
+/// is `PUT /users/{id}/preferences`; deleting one is
+/// `POST /users/{id}/preferences/delete`, because it takes a body and
+/// Mattermost models it as an action rather than a `DELETE` on a
+/// resource. Sending `PUT` to the delete path answers 404, which reads
+/// like a missing post rather than a wrong verb -- and leaves the post
+/// saved, with nothing on screen admitting it.
 #[must_use]
 pub fn set_saved(user: &UserId, post: &PostId, saved: bool) -> HttpRequest {
     let body = serde_json::json!([{
@@ -649,12 +657,11 @@ pub fn set_saved(user: &UserId, post: &PostId, saved: bool) -> HttpRequest {
         "name": post.as_str(),
         "value": "true",
     }]);
-    let path = if saved {
-        format!("{API}/users/{user}/preferences")
+    if saved {
+        HttpRequest::put(format!("{API}/users/{user}/preferences")).json(&body)
     } else {
-        format!("{API}/users/{user}/preferences/delete")
-    };
-    HttpRequest::put(path).json(&body)
+        HttpRequest::post(format!("{API}/users/{user}/preferences/delete")).json(&body)
+    }
 }
 
 /// Mark a channel read.

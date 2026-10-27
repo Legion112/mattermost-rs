@@ -2834,3 +2834,29 @@ fn the_last_message_of_mine_is_the_one_up_edits() {
     // Somebody else's thread offers nothing to edit.
     assert!(store.my_last_reply(&PostId::new("p2")).is_none());
 }
+
+/// Saving is a preference, and the server announces a changed
+/// preference over a WebSocket event this client does not decode -- so
+/// the window records it here as well as sending it. Without that the
+/// menu goes on offering "Remove from saved" for a post that has just
+/// been unsaved.
+#[test]
+fn a_save_is_recorded_here_as_well_as_sent() {
+    let mut store = store();
+    let id = PostId::new("p1");
+    let listed = page(vec![post("p1", "c1", 10)]);
+    store.apply_post_list(&ChannelId::new("c1"), &listed, PageAnchor::Newest);
+
+    assert!(!store.is_saved(&id));
+    assert_eq!(store.set_saved_locally(&id, true), [Change::Found]);
+    assert!(store.is_saved(&id));
+
+    store.apply_saved(&listed);
+    assert_eq!(store.found(&Found::Saved).len(), 1);
+
+    // Unsaving takes it out of the list too, so the page it was shown
+    // on redraws without waiting for the server to answer.
+    assert_eq!(store.set_saved_locally(&id, false), [Change::Found]);
+    assert!(!store.is_saved(&id));
+    assert!(store.found(&Found::Saved).is_empty());
+}
