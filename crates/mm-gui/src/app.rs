@@ -98,6 +98,14 @@ struct Ui {
     thread_posts: gio::ListStore,
     thread_view: gtk::ListView,
     thread_pane: gtk::Box,
+    thread_scroller: gtk::ScrolledWindow,
+    /// Whether the thread pane should follow its newest reply.
+    ///
+    /// The same rule the channel list follows, and for the same reason:
+    /// without it every redraw scrolled the pane to the bottom, so
+    /// reacting to a message half way up a long thread threw the reader
+    /// to the end of it.
+    thread_stick: Rc<std::cell::Cell<bool>>,
     conversation: gtk::Paned,
     thread_root: Rc<RefCell<Option<PostId>>>,
     /// Where the reader was when they opened the channel, for the "new
@@ -202,6 +210,7 @@ fn build_thread_pane(
     gtk::Box,
     gtk::Button,
     gtk::Entry,
+    gtk::ScrolledWindow,
 ) {
     let (thread_posts, thread_view, thread_scroller) =
         build_post_list(commands, store, server, viewer);
@@ -244,6 +253,7 @@ fn build_thread_pane(
         thread_pane,
         thread_close,
         thread_composer,
+        thread_scroller,
     )
 }
 
@@ -412,7 +422,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     content.append(&status);
     content.append(&composer);
 
-    let (thread_posts, thread_view, thread_pane, thread_close, thread_composer) =
+    let (thread_posts, thread_view, thread_pane, thread_close, thread_composer, thread_scroller) =
         build_thread_pane(commands, &store, &server, &viewer);
 
     let conversation = gtk::Paned::builder()
@@ -449,6 +459,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         thread_posts: thread_posts.clone(),
         thread_view: thread_view.clone(),
         thread_pane: thread_pane.clone(),
+        thread_scroller: thread_scroller.clone(),
+        thread_stick: Rc::new(std::cell::Cell::new(true)),
         conversation: conversation.clone(),
         thread_root: Rc::new(RefCell::new(None)),
         drawn_sidebar: Rc::new(RefCell::new(None)),
@@ -529,6 +541,29 @@ fn wire_thread(
     composer: &gtk::Entry,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) {
+    // Scrolling up means the reader is reading, not following. Arriving
+    // back at the bottom opts them back in. The same pair the channel
+    // list uses, and the same reason it does not ask the adjustment:
+    // `upper` is an estimate `ListView` revises as rows are realized.
+    {
+        let stick = Rc::clone(&ui.thread_stick);
+        let scrolling = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        scrolling.connect_scroll(move |_, _, dy| {
+            if dy < 0.0 {
+                stick.set(false);
+            }
+            glib::Propagation::Proceed
+        });
+        ui.thread_scroller.add_controller(scrolling);
+    }
+    {
+        let stick = Rc::clone(&ui.thread_stick);
+        ui.thread_scroller.connect_edge_reached(move |_, edge| {
+            if edge == gtk::PositionType::Bottom {
+                stick.set(true);
+            }
+        });
+    }
     {
         let root = Rc::clone(&ui.thread_root);
         let pane = ui.thread_pane.clone();
@@ -3184,7 +3219,7 @@ impl Ui {
             previous = Some(post);
         }
         // Only what changed, for the reasons in `refresh_posts`.
-        splice_changed(&self.thread_posts, &rows);
+        let changed = splice_changed(&self.thread_posts, &rows);
         drop(store);
 
         // Place the divider the first time the pane appears, and leave it
@@ -3197,8 +3232,13 @@ impl Ui {
                     .set_position(available - THREAD_PANE_WIDTH);
             }
         }
+        // Only when a reply actually arrived, and only if the reader was
+        // already at the end of the thread. A redraw on its own must not
+        // move them: a reaction, an avatar or an image landing used to
+        // throw somebody reading half way up a long thread to the bottom
+        // of it.
         let n = self.thread_posts.n_items();
-        if n > 0 {
+        if changed && self.thread_stick.get() && n > 0 {
             let view = self.thread_view.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                 view.scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
@@ -3225,6 +3265,9 @@ impl Ui {
             }
             Event::Thread { root, page } => {
                 let _ = self.store.borrow_mut().apply_thread(&page);
+                // A thread just opened is read from its newest reply,
+                // whatever the reader was doing in the last one.
+                self.thread_stick.set(true);
                 *self.thread_root.borrow_mut() = Some(root.clone());
                 self.refresh_thread();
             }
