@@ -927,6 +927,21 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::SaveDraft(draft) => {
+            // An empty draft is a deletion. The server does the same
+            // thing with one, but it answers 400 rather than quietly
+            // dropping it, so the client has to choose the verb.
+            let request = if draft.is_empty() {
+                rest::delete_draft(
+                    &UserId::new(&a.session.user_id),
+                    &draft.channel_id,
+                    (!draft.root_id.as_str().is_empty()).then_some(&draft.root_id),
+                )
+            } else {
+                rest::upsert_draft(&draft)
+            };
+            best_effort(a, &request, events).await;
+        }
         Command::SetPresence(presence) => {
             match fetch(
                 &a.client,

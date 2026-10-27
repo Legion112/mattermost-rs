@@ -139,6 +139,9 @@ pub enum Command {
         root: PostId,
         following: bool,
     },
+    /// Write what is half-typed, so it survives a restart and follows
+    /// the reader to their other clients. An empty one is a deletion.
+    SaveDraft(mm_types::Draft),
     /// Say where this reader is: online, away, do not disturb, offline.
     ///
     /// The server stops moving a status it was told, so choosing one is

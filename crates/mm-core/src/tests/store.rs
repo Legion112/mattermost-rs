@@ -2890,3 +2890,64 @@ fn a_save_is_recorded_here_as_well_as_sent() {
     assert!(!store.is_saved(&id));
     assert!(store.found(&Found::Saved).is_empty());
 }
+
+/// A draft written here, not fetched. Recorded as well as sent,
+/// because the Drafts view and the composer both read the store and
+/// waiting for the round trip would mean switching channels and back
+/// lost what was typed.
+#[test]
+fn a_draft_written_here_is_held_until_it_is_empty() {
+    let mut store = store();
+    let channel = ChannelId::new("c1");
+    let root = PostId::new("p9");
+    let draft = |text: &str, root: &str| mm_types::Draft {
+        channel_id: channel.clone(),
+        root_id: PostId::new(root),
+        message: text.to_owned(),
+        update_at: Timestamp(1),
+        ..mm_types::Draft::default()
+    };
+
+    assert!(store.draft_for(&channel, None).is_none());
+    assert_eq!(
+        store.set_draft_locally(draft("half a thought", "")),
+        [Change::Sidebar, Change::Drafts]
+    );
+    assert_eq!(
+        store.draft_for(&channel, None).map(|d| d.message.as_str()),
+        Some("half a thought")
+    );
+    // The same text again is not a change, which is what keeps this
+    // off the network on every keystroke.
+    assert!(
+        store
+            .set_draft_locally(draft("half a thought", ""))
+            .is_empty()
+    );
+    assert!(!store.set_draft_locally(draft("more", "")).is_empty());
+
+    // A channel holds one draft of its own and one per thread, and
+    // they do not see each other.
+    store.set_draft_locally(draft("a reply", "p9"));
+    assert_eq!(
+        store
+            .draft_for(&channel, Some(&root))
+            .map(|d| d.message.as_str()),
+        Some("a reply")
+    );
+    assert_eq!(
+        store.draft_for(&channel, None).map(|d| d.message.as_str()),
+        Some("more")
+    );
+    assert_eq!(store.pending_drafts().len(), 2);
+
+    // Emptying one is deleting it, which is what the server does too.
+    assert!(!store.set_draft_locally(draft("   ", "")).is_empty());
+    assert!(store.draft_for(&channel, None).is_none());
+    assert!(store.draft_for(&channel, Some(&root)).is_some());
+    // And emptying one that was never there is not a change.
+    assert!(store.set_draft_locally(draft("", "")).is_empty());
+
+    // Another channel's draft is its own.
+    assert!(store.draft_for(&ChannelId::new("c2"), None).is_none());
+}

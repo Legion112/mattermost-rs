@@ -568,3 +568,26 @@ the first hundred on an ordinary server. This one asks for a hundred,
 offers "Load more results" when a page comes back full, and says **no
 more results** out loud when the next page is empty — rather than
 letting the button vanish having done nothing, which reads as a bug.
+
+## Writing a draft: `POST /drafts`, and nothing else
+
+Reading drafts is `GET /users/{user_id}/teams/{team_id}/drafts`, so the
+obvious place to write one is under the same prefix. It is not there.
+Measured against a live 12.0.1 server, these all answer 404 with "there
+doesn't appear to be an api call for the url":
+
+- `POST /users/{user_id}/drafts`
+- `PUT /users/{user_id}/drafts`
+- `POST /users/{user_id}/channels/{channel_id}/drafts`
+- `POST /users/{user_id}/teams/{team_id}/drafts`
+
+The one that works is **`POST /api/v4/drafts`** with the draft as the
+body — no user and no channel in the path, because the body carries
+both. It answers **201 with an empty body**, so a client that parses the
+response as a `Draft` fails on success.
+
+Deleting one is back under the user:
+`DELETE /users/{user_id}/channels/{channel_id}/drafts`, with
+`?root_id={post_id}` for a reply waiting in a thread. It answers
+`{"status":"OK"}`. There is no "write an empty draft" — the server
+rejects that — so a client clearing its composer has to change verb.

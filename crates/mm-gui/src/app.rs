@@ -252,6 +252,9 @@ struct Ui {
     status: gtk::Label,
     title: adw::WindowTitle,
     composer: Composer,
+    /// The thread panel's own box, so a half-typed reply can be
+    /// written down and brought back like a channel's.
+    thread_composer: Composer,
     /// The frame around it, which is what is shown, hidden and greyed.
     composer_pane: gtk::Box,
 }
@@ -832,6 +835,10 @@ fn remember_geometry(ui: &Ui) {
     let on_close = ui.clone();
     ui.window.connect_close_request(move |window| {
         on_close.remember_state();
+        // Whatever is half-typed, before the window goes away -- a
+        // close to the tray included, since the process may be killed
+        // from there without coming back.
+        on_close.remember_drafts();
         if !on_close.has_tray.get() {
             return glib::Propagation::Proceed;
         }
@@ -1061,6 +1068,7 @@ fn build(
         status,
         title,
         composer: composer.clone(),
+        thread_composer: thread_composer.clone(),
         composer_pane: composer.pane.clone(),
         stack,
         login: Rc::clone(&login),
@@ -1231,6 +1239,7 @@ fn wire_thread(
     let root = Rc::clone(&ui.thread_root);
     let store = Rc::clone(&ui.store);
     let into = composer.clone();
+    let ui = ui.clone();
     composer.view.add_controller(submit_keys(move || {
         let text = composer_text(&into.view);
         if text.trim().is_empty() {
@@ -1266,6 +1275,7 @@ fn wire_thread(
             })
             .ok();
         into.view.buffer().set_text("");
+        ui.remember_drafts();
     }));
 }
 
@@ -2185,6 +2195,19 @@ impl Composer {
     }
 }
 
+/// Now, in the milliseconds since the epoch the server counts in.
+///
+/// The store is deliberately clock-free -- replaying events has to be
+/// exact -- so the window is where a timestamp of this client's own
+/// comes from.
+fn now() -> mm_types::Timestamp {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis())
+        .unwrap_or_default();
+    mm_types::Timestamp(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
 /// Everything typed into a composer.
 fn composer_text(view: &gtk::TextView) -> String {
     let buffer = view.buffer();
@@ -2688,6 +2711,7 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
     }
     for view in [composer, thread_composer] {
         attach_shortcodes(ui, view);
+        watch_drafts(ui, view);
     }
     attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
     attach_mentions(ui, thread_composer, |ui| {
@@ -2709,6 +2733,31 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
         let root = ui.thread_root.borrow().clone()?;
         let store = ui.store.borrow();
         store.my_last_reply(&root).map(editable)
+    });
+}
+
+/// Write a draft down a few seconds after the typing stops.
+///
+/// Not on every keystroke: that would be a request per character.
+/// Not only on leaving the channel either -- a crash, or a kill from
+/// the tray, would take the message with it.
+///
+/// A generation counter rather than a cancellable timer: a `SourceId`
+/// that has already fired cannot be removed, and the bookkeeping to
+/// know which is which is longer than this.
+fn watch_drafts(ui: &Ui, view: &gtk::TextView) {
+    let generation = Rc::new(std::cell::Cell::new(0u64));
+    let ui = ui.clone();
+    view.buffer().connect_changed(move |_| {
+        let mine = generation.get().wrapping_add(1);
+        generation.set(mine);
+        let ui = ui.clone();
+        let generation = Rc::clone(&generation);
+        glib::timeout_add_local_once(DRAFT_IDLE, move || {
+            if generation.get() == mine {
+                ui.remember_drafts();
+            }
+        });
     });
 }
 
@@ -3447,6 +3496,7 @@ fn wire(
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
         let into = composer.clone();
+        let ui = ui.clone();
         composer.view.add_controller(submit_keys(move || {
             let text = composer_text(&into.view);
             let attach = into.take_attachments();
@@ -3467,6 +3517,9 @@ fn wire(
                 })
                 .ok();
             into.view.buffer().set_text("");
+            // The draft is gone the moment the message is sent: an
+            // empty box records as a deletion, here and on the server.
+            ui.remember_drafts();
         }));
     }
 }
@@ -5384,6 +5437,11 @@ const MENTIONS_OFFERED: usize = 8;
 /// grid, because this is a list with a shortcode on every row and it
 /// sits over the message being written.
 const SHORTCODES_OFFERED: usize = 10;
+
+/// How long the typing has to stop before a draft is written down.
+/// Long enough not to be a request per word, short enough that what
+/// was typed survives walking away from the machine.
+const DRAFT_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
 /// How wide a link preview card is drawn, and how big a side the picture
 /// in it gets. Fixed rather than fitted: a page's `OpenGraph` image can be
 /// a 1200px banner, and a row that resizes itself when one arrives moves
@@ -6448,7 +6506,11 @@ impl Ui {
     /// The root goes too, not just the panel: a hidden panel still
     /// holding a thread would take the next reply to it.
     fn close_thread(&self) {
+        // Before the root goes: that is what says which thread the
+        // half-typed reply belongs to.
+        self.remember_drafts();
         *self.thread_root.borrow_mut() = None;
+        self.thread_composer.view.buffer().set_text("");
         self.thread_posts.remove_all();
         self.thread_pane.set_visible(false);
     }
@@ -6875,6 +6937,104 @@ impl Ui {
         }
     }
 
+    /// Write down what is half-typed, wherever it belongs.
+    ///
+    /// Both boxes, because a reply left in a thread is as easy to lose
+    /// as a message left in a channel -- and until now both were lost
+    /// the moment the reader clicked somewhere else: the text was
+    /// widget state and nothing else.
+    fn remember_drafts(&self) {
+        let open = self.selected.borrow().clone();
+        if let Some(channel) = open {
+            self.remember_draft(&channel, None, &self.composer);
+        }
+        let root = self.thread_root.borrow().clone();
+        if let Some(root) = root {
+            let channel = self
+                .store
+                .borrow()
+                .posts
+                .get(&root)
+                .map(|post| post.channel_id.clone());
+            if let Some(channel) = channel {
+                self.remember_draft(&channel, Some(&root), &self.thread_composer);
+            }
+        }
+    }
+
+    /// One box's draft, recorded here and sent on.
+    ///
+    /// Nothing is sent when nothing changed, which is what keeps this
+    /// off the network on every keystroke: the store answers with no
+    /// changes when the text is the one it already holds.
+    fn remember_draft(&self, channel: &ChannelId, root: Option<&PostId>, composer: &Composer) {
+        let draft = mm_types::Draft {
+            channel_id: channel.clone(),
+            root_id: root.cloned().unwrap_or_default(),
+            message: composer_text(&composer.view),
+            // The Drafts view orders by this. The store has no clock on
+            // purpose -- replaying events has to be exact -- so the
+            // window stamps it.
+            update_at: now(),
+            ..mm_types::Draft::default()
+        };
+        if self
+            .store
+            .borrow_mut()
+            .set_draft_locally(draft.clone())
+            .is_empty()
+        {
+            return;
+        }
+        self.commands.send(Command::SaveDraft(draft)).ok();
+        // Whether there is a Drafts row at all depends on this, and the
+        // sections themselves have not changed.
+        self.sidebar_stale.set(true);
+        self.sidebar_soon();
+    }
+
+    /// Put a thread's half-typed reply back in its box.
+    fn restore_thread_draft(&self, root: &PostId) {
+        let text = {
+            let store = self.store.borrow();
+            store
+                .posts
+                .get(root)
+                .and_then(|post| store.draft_for(&post.channel_id, Some(root)))
+                .map_or_else(String::new, |draft| draft.message.clone())
+        };
+        self.thread_composer.view.buffer().set_text(&text);
+    }
+
+    /// Fill the open channel's box from a draft that has just arrived.
+    ///
+    /// The channel was opened before the drafts were: on a launch the
+    /// reopened one is on screen within a second and the drafts come
+    /// with the rest of the sync, so without this a message left here
+    /// yesterday is in the Drafts view and nowhere else.
+    ///
+    /// Only when the box is empty. This also lands on a resync, and a
+    /// reader mid-sentence must not have what they are typing replaced
+    /// by what the server last heard.
+    fn refill_composer(&self) {
+        let open = self.selected.borrow().clone();
+        if let Some(channel) = open
+            && composer_text(&self.composer.view).is_empty()
+        {
+            self.restore_draft(&channel);
+        }
+    }
+
+    /// Put a channel's half-typed message back in the box.
+    fn restore_draft(&self, channel: &ChannelId) {
+        let text = self
+            .store
+            .borrow()
+            .draft_for(channel, None)
+            .map_or_else(String::new, |draft| draft.message.clone());
+        self.composer.view.buffer().set_text(&text);
+    }
+
     /// Go to a channel: what it opens, and what it closes.
     fn open_channel(&self, id: &ChannelId) {
         // `refresh_sidebar` rebuilds every row and re-selects the open
@@ -6887,6 +7047,11 @@ impl Ui {
             return;
         }
 
+        // Before anything moves: what is in the boxes belongs to where
+        // they were, and a channel switch is the commonest way to lose
+        // it.
+        self.remember_drafts();
+
         // Opening a channel always starts at the newest message, and
         // closes whatever thread was open: a thread belongs to the
         // channel it came from, and leaving it up beside a different one
@@ -6898,6 +7063,7 @@ impl Ui {
         self.thread_posts.remove_all();
         self.thread_pane.set_visible(false);
         *self.selected.borrow_mut() = Some(id.clone());
+        self.restore_draft(id);
         self.show_pane(&Pane::Channel);
         // Draw what is already held, before asking for anything. A
         // channel read earlier, or warmed in the background, is in the
@@ -7593,7 +7759,11 @@ impl Ui {
                 // A thread just opened is read from its newest reply,
                 // whatever the reader was doing in the last one.
                 self.thread_stick.set(true);
+                // The reply half-typed in whatever thread was open
+                // before this one, before the root that names it moves.
+                self.remember_drafts();
                 *self.thread_root.borrow_mut() = Some(root.clone());
+                self.restore_thread_draft(&root);
                 self.refresh_thread();
             }
             Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
@@ -7645,6 +7815,7 @@ impl Ui {
             }
             Event::Drafts(drafts) => {
                 self.store.borrow_mut().apply_drafts(&drafts);
+                self.refill_composer();
                 // Likewise: whether there is a Drafts row at all depends
                 // on this, and the sections have not changed.
                 self.sidebar_stale.set(true);

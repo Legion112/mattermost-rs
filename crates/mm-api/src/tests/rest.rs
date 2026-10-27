@@ -1134,3 +1134,39 @@ fn saying_where_you_are_repeats_your_id_in_the_body() {
     let err = HttpResponse::new(403, r#"{"id":"api.no","message":"nope"}"#);
     assert!(matches!(parse_status(&err), Err(ApiError::Forbidden(_))));
 }
+
+/// `POST /drafts`, with no user or channel in the path: the body
+/// carries both. Measured, because the obvious shapes all answer 404 --
+/// `/users/{id}/drafts`, `/users/{id}/channels/{id}/drafts` and
+/// `/users/{id}/teams/{id}/drafts`.
+#[test]
+fn a_draft_is_written_to_a_path_with_nothing_in_it() {
+    let draft = mm_types::Draft {
+        channel_id: ChannelId::new("c1"),
+        message: "half a thought".to_owned(),
+        ..mm_types::Draft::default()
+    };
+    let request = upsert_draft(&draft);
+    assert_eq!(request.method, Method::Post);
+    assert_eq!(request.path, "/api/v4/drafts");
+    let Body::Json(body) = &request.body else {
+        panic!("expected JSON")
+    };
+    assert!(body.contains(r#""channel_id":"c1""#), "{body}");
+    assert!(body.contains("half a thought"), "{body}");
+}
+
+/// By channel, and by root when the draft is a reply: a channel can
+/// hold one of each at once and deleting the channel's must not take
+/// the thread's with it.
+#[test]
+fn a_draft_is_deleted_by_channel_and_by_root() {
+    let user = UserId::new("u1");
+    let channel = ChannelId::new("c1");
+    let whole = delete_draft(&user, &channel, None);
+    assert_eq!(whole.method, Method::Delete);
+    assert_eq!(whole.path, "/api/v4/users/u1/channels/c1/drafts");
+
+    let reply = delete_draft(&user, &channel, Some(&PostId::new("p9")));
+    assert_eq!(reply.path, "/api/v4/users/u1/channels/c1/drafts?root_id=p9");
+}

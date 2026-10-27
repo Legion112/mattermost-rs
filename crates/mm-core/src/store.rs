@@ -375,6 +375,52 @@ impl Store {
         vec![Change::Sidebar, Change::Drafts]
     }
 
+    /// Record a draft this client has just written.
+    ///
+    /// Applied here as well as sent, like a folded category: the Drafts
+    /// view and the composer both read the store, and waiting for the
+    /// round trip would mean switching channels and back lost what was
+    /// typed. An empty one is a deletion, because that is what the
+    /// server does with it.
+    pub fn set_draft_locally(&mut self, draft: mm_types::Draft) -> Vec<Change> {
+        let same = |held: &mm_types::Draft| {
+            held.channel_id == draft.channel_id && held.root_id == draft.root_id
+        };
+        if draft.is_empty() {
+            let before = self.drafts.len();
+            self.drafts.retain(|held| !same(held));
+            if self.drafts.len() == before {
+                return Vec::new();
+            }
+        } else if let Some(held) = self.drafts.iter_mut().find(|held| same(held)) {
+            // By content, not by the whole record: the window stamps
+            // `update_at` from the clock, so comparing everything
+            // would make every idle tick a change and every change a
+            // request.
+            if held.message == draft.message && held.file_ids == draft.file_ids {
+                return Vec::new();
+            }
+            *held = draft;
+        } else {
+            self.drafts.push(draft);
+        }
+        vec![Change::Sidebar, Change::Drafts]
+    }
+
+    /// What is waiting in a channel's composer, or in a thread's when
+    /// `root` is set.
+    #[must_use]
+    pub fn draft_for(
+        &self,
+        channel: &ChannelId,
+        root: Option<&PostId>,
+    ) -> Option<&mm_types::Draft> {
+        let wanted = root.map_or("", PostId::as_str);
+        self.drafts
+            .iter()
+            .find(|held| held.channel_id == *channel && held.root_id.as_str() == wanted)
+    }
+
     /// The drafts worth drawing, most recently touched first.
     ///
     /// An empty one is skipped rather than drawn as a blank row: the

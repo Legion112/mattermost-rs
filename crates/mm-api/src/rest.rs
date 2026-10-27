@@ -486,6 +486,36 @@ pub fn parse_drafts(resp: &HttpResponse) -> Result<Vec<Draft>, ApiError> {
     Ok(drafts.unwrap_or_default())
 }
 
+/// Write a draft, or replace the one already there.
+///
+/// **`POST /drafts`, with no user or channel in the path** -- the body
+/// carries both. Measured against a live 12.0.1 server, because the
+/// obvious shapes are not there: `POST /users/{id}/drafts`,
+/// `POST /users/{id}/channels/{id}/drafts` and
+/// `POST /users/{id}/teams/{id}/drafts` all answer 404, which is a
+/// confusing way to be told a path is wrong. The answer is **201 with
+/// an empty body**, so there is nothing to parse and nothing to check
+/// beyond the status.
+#[must_use]
+pub fn upsert_draft(draft: &Draft) -> HttpRequest {
+    let body = serde_json::to_value(draft).unwrap_or(serde_json::Value::Null);
+    HttpRequest::post(format!("{API}/drafts")).json(&body)
+}
+
+/// Throw a draft away.
+///
+/// By channel, and by root when the draft is a reply waiting in a
+/// thread: a channel can hold one of each at once and deleting the
+/// channel's must not take the thread's with it.
+#[must_use]
+pub fn delete_draft(user: &UserId, channel: &ChannelId, root: Option<&PostId>) -> HttpRequest {
+    let path = format!("{API}/users/{user}/channels/{channel}/drafts");
+    match root {
+        Some(root) => HttpRequest::delete(format!("{path}?root_id={root}")),
+        None => HttpRequest::delete(path),
+    }
+}
+
 /// How many people are in a channel, for the channel header.
 #[must_use]
 pub fn channel_stats(channel: &ChannelId) -> HttpRequest {
