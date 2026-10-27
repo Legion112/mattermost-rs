@@ -255,6 +255,10 @@ struct Ui {
     /// The thread panel's own box, so a half-typed reply can be
     /// written down and brought back like a channel's.
     thread_composer: Composer,
+    /// Set while a composer is being filled from a draft, so putting
+    /// yesterday's half-typed message back does not announce to the
+    /// channel that somebody is writing.
+    restoring: Rc<std::cell::Cell<bool>>,
     /// The frame around it, which is what is shown, hidden and greyed.
     composer_pane: gtk::Box,
 }
@@ -1069,6 +1073,7 @@ fn build(
         title,
         composer: composer.clone(),
         thread_composer: thread_composer.clone(),
+        restoring: Rc::new(std::cell::Cell::new(false)),
         composer_pane: composer.pane.clone(),
         stack,
         login: Rc::clone(&login),
@@ -2713,6 +2718,19 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
         attach_shortcodes(ui, view);
         watch_drafts(ui, view);
     }
+    watch_typing(ui, composer, |ui| {
+        Some((ui.selected.borrow().clone()?, None))
+    });
+    watch_typing(ui, thread_composer, |ui| {
+        let root = ui.thread_root.borrow().clone()?;
+        let channel = ui
+            .store
+            .borrow()
+            .posts
+            .get(&root)
+            .map(|post| post.channel_id.clone())?;
+        Some((channel, Some(root)))
+    });
     attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
     attach_mentions(ui, thread_composer, |ui| {
         let root = ui.thread_root.borrow().clone()?;
@@ -2733,6 +2751,43 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
         let root = ui.thread_root.borrow().clone()?;
         let store = ui.store.borrow();
         store.my_last_reply(&root).map(editable)
+    });
+}
+
+/// Tell the channel somebody is writing.
+///
+/// Throttled, because the server forgets a `user_typing` after five
+/// seconds whichever client sent it: one frame every four keeps the
+/// indicator up for as long as the typing lasts, and sending one per
+/// keystroke would be a frame per character for no extra effect.
+///
+/// Silent while a draft is being put back: filling the box is not
+/// somebody writing, and announcing it on every channel switch would
+/// tell a whole team you were about to say something when you were
+/// only looking.
+fn watch_typing(
+    ui: &Ui,
+    view: &gtk::TextView,
+    speaking: impl Fn(&Ui) -> Option<(ChannelId, Option<PostId>)> + 'static,
+) {
+    let last = Rc::new(std::cell::Cell::new(None::<std::time::Instant>));
+    let ui = ui.clone();
+    view.buffer().connect_changed(move |buffer| {
+        if ui.restoring.get() || buffer.char_count() == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if last
+            .get()
+            .is_some_and(|then| now.duration_since(then) < TYPING_EVERY)
+        {
+            return;
+        }
+        let Some((channel, root)) = speaking(&ui) else {
+            return;
+        };
+        last.set(Some(now));
+        ui.commands.send(Command::Typing { channel, root }).ok();
     });
 }
 
@@ -5442,6 +5497,11 @@ const SHORTCODES_OFFERED: usize = 10;
 /// Long enough not to be a request per word, short enough that what
 /// was typed survives walking away from the machine.
 const DRAFT_IDLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often "somebody is typing" is sent while the typing goes on.
+/// The server forgets one after five seconds, so this has to be under
+/// that for the indicator to stay up.
+const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(4);
 /// How wide a link preview card is drawn, and how big a side the picture
 /// in it gets. Fixed rather than fitted: a page's `OpenGraph` image can be
 /// a 1200px banner, and a row that resizes itself when one arrives moves
@@ -7003,7 +7063,7 @@ impl Ui {
                 .and_then(|post| store.draft_for(&post.channel_id, Some(root)))
                 .map_or_else(String::new, |draft| draft.message.clone())
         };
-        self.thread_composer.view.buffer().set_text(&text);
+        self.fill_quietly(&self.thread_composer, &text);
     }
 
     /// Fill the open channel's box from a draft that has just arrived.
@@ -7032,7 +7092,14 @@ impl Ui {
             .borrow()
             .draft_for(channel, None)
             .map_or_else(String::new, |draft| draft.message.clone());
-        self.composer.view.buffer().set_text(&text);
+        self.fill_quietly(&self.composer, &text);
+    }
+
+    /// Put text in a box without it counting as typing.
+    fn fill_quietly(&self, composer: &Composer, text: &str) {
+        self.restoring.set(true);
+        composer.view.buffer().set_text(text);
+        self.restoring.set(false);
     }
 
     /// Go to a channel: what it opens, and what it closes.

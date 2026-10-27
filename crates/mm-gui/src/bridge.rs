@@ -142,6 +142,13 @@ pub enum Command {
     /// Write what is half-typed, so it survives a restart and follows
     /// the reader to their other clients. An empty one is a deletion.
     SaveDraft(mm_types::Draft),
+    /// Tell the channel somebody is writing. Over the WebSocket, not
+    /// REST: it is an action on the socket, and the server forgets it
+    /// after five seconds whether or not anything else is sent.
+    Typing {
+        channel: ChannelId,
+        root: Option<PostId>,
+    },
     /// Say where this reader is: online, away, do not disturb, offline.
     ///
     /// The server stops moving a status it was told, so choosing one is

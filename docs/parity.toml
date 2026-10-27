@@ -530,7 +530,7 @@ upstream = "webapp"
 status   = "partial"
 endpoints = []
 ws_events = ["typing"]
-verified_against = ""
+verified_against = "12.0.1"
 notes = """
 "somebody is typing…" between the last message and the box being typed into, \
 naming one person, two by name, or "Several people" beyond that. Held in the \
@@ -538,10 +538,27 @@ window rather than the store because it expires on a clock and the store is \
 deliberately clock-free so that replaying events stays exact; an entry older \
 than seven seconds is dropped, which is longer than the server's own \
 five-second `TimeBetweenUserTypingUpdatesMilliseconds` throttle so the line \
-does not flicker between a typist's keystrokes. NOT built: **sending** \
-`user_typing`, so colleagues are not told when this client is typing. The \
-socket loop only reads; announcing would mean splitting the stream so a \
-writer can share it."""
+does not flicker between a typist's keystrokes.
+
+**Sent as well as received now**, from both boxes. Over the WebSocket, not \
+REST: it is an action on the socket, and the frame builder was already in \
+`mm-api` waiting for a caller. The socket task owns the connection and is \
+parked reading it, so the frame is handed to that task rather than written \
+from the command loop -- one `select!` over the read and a queue, with the \
+frame carried out of the select and written after it, because the read \
+borrows the socket for as long as it waits.
+
+Throttled to one frame every four seconds while the typing goes on: the \
+server forgets a `user_typing` after five whichever client sent it, so that \
+keeps the indicator up without sending a frame per character. Silent while \
+a draft is being put back into the box -- filling it is not somebody \
+writing, and announcing it on every channel switch would tell a team you \
+were about to say something when you were only looking.
+
+Verified on a live account: the server answered the frame with `status: \
+OK`. NOT verified: that a colleague's client draws it, which is their \
+client's business and cannot be seen from this account -- Mattermost does \
+not show you your own typing."""
 
 [[feature]]
 id       = "posts.message_times"

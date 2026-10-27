@@ -53,6 +53,11 @@ struct Active {
     /// because closing to a tray that is not there would hide the
     /// application somewhere unreachable.
     tray: Option<mm_desktop_xdg::TrayHandle>,
+    /// Where "somebody is typing" goes. The socket task owns the
+    /// connection and is parked reading it, so telling the server
+    /// means handing the frame to that task rather than writing it
+    /// from here.
+    typing: tokio::sync::mpsc::UnboundedSender<(ChannelId, String)>,
 }
 
 impl Active {
@@ -927,6 +932,14 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::Typing { channel, root } => {
+            // Straight to the socket task, and nothing waits on it:
+            // being a moment late with "is typing" costs nothing, and
+            // a full queue means the socket is down, which the reader
+            // already knows about.
+            let parent = root.map(|root| root.to_string()).unwrap_or_default();
+            a.typing.send((channel, parent)).ok();
+        }
         Command::SaveDraft(draft) => {
             // An empty draft is a deletion. The server does the same
             // thing with one, but it answers 400 rather than quietly
@@ -1187,10 +1200,12 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
     // event delivery -- and, more importantly, so the socket keeps being
     // polled. The server pings every 60s and closes after 100s without a pong,
     // so a connection nobody is reading dies while looking healthy.
+    let (typing, typing_rx) = tokio::sync::mpsc::unbounded_channel();
     let socket = tokio::spawn(socket_loop(
         client.clone(),
         session.token.clone(),
         events.clone(),
+        typing_rx,
     ));
 
     let tray = spawn_tray(events).await;
@@ -1203,6 +1218,7 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         downloads: Arc::new(tokio::sync::Semaphore::new(6)),
         warmed: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
         tray,
+        typing,
     })
 }
 
@@ -1646,7 +1662,12 @@ async fn open_channel(
 }
 
 /// Connect, read frames, and reconnect with backoff.
-async fn socket_loop(client: Client, token: String, events: async_channel::Sender<Event>) {
+async fn socket_loop(
+    client: Client,
+    token: String,
+    events: async_channel::Sender<Event>,
+    mut typing: tokio::sync::mpsc::UnboundedReceiver<(ChannelId, String)>,
+) {
     let mut protocol = WsProtocol::new();
     let mut attempt: u32 = 0;
 
@@ -1662,32 +1683,27 @@ async fn socket_loop(client: Client, token: String, events: async_channel::Sende
         match mm_http::WsConn::connect(&url, &token).await {
             Ok(mut socket) => {
                 attempt = 0;
-                while let Some(frame) = socket.next_text().await {
-                    let Ok(text) = frame else { break };
-                    for outcome in protocol.on_frame(&text) {
-                        match outcome {
-                            WsOutcome::Event(event) => {
-                                if events.send(Event::Ws(event)).await.is_err() {
-                                    return;
-                                }
+                loop {
+                    // One or the other, never both at once: the read
+                    // borrows the socket for as long as it is waiting,
+                    // so a frame to send is carried out of the select
+                    // and written after it.
+                    let outgoing = tokio::select! {
+                        frame = socket.next_text() => {
+                            let Some(Ok(text)) = frame else { break };
+                            if !handle_frame(&mut protocol, &text, &events).await {
+                                return;
                             }
-                            WsOutcome::Hello { lost_events, .. } if lost_events => {
-                                let _ = events
-                                    .send(Event::ResyncRequired(
-                                        "the server could not replay the gap".into(),
-                                    ))
-                                    .await;
-                            }
-                            WsOutcome::SequenceGap { expected, got } => {
-                                let _ = events
-                                    .send(Event::ResyncRequired(format!(
-                                        "event sequence jumped from {expected} to {got}"
-                                    )))
-                                    .await;
-                            }
-                            WsOutcome::Hello { .. }
-                            | WsOutcome::Reply { .. }
-                            | WsOutcome::Undecodable { .. } => {}
+                            None
+                        }
+                        said = typing.recv() => said,
+                    };
+                    if let Some((channel, parent)) = outgoing {
+                        let frame = protocol.typing_frame(&channel, &parent);
+                        // Nothing to report if it fails: the reader
+                        // loses nothing, and the next frame reconnects.
+                        if socket.send_text(frame).await.is_err() {
+                            break;
                         }
                     }
                 }
@@ -1696,7 +1712,6 @@ async fn socket_loop(client: Client, token: String, events: async_channel::Sende
                 let _ = events.send(Event::Status(format!("websocket: {e}"))).await;
             }
         }
-
         // Full-jitter backoff, with the jitter supplied as a number so the
         // schedule stays a pure function in mm-api.
         //
@@ -1711,6 +1726,40 @@ async fn socket_loop(client: Client, token: String, events: async_channel::Sende
             .await;
         tokio::time::sleep(tokio::time::Duration::from_secs_f64(wait)).await;
     }
+}
+
+/// Decode one frame and pass on what it says. `false` means the window
+/// has gone and the socket should stop.
+async fn handle_frame(
+    protocol: &mut WsProtocol,
+    text: &str,
+    events: &async_channel::Sender<Event>,
+) -> bool {
+    for outcome in protocol.on_frame(text) {
+        match outcome {
+            WsOutcome::Event(event) => {
+                if events.send(Event::Ws(event)).await.is_err() {
+                    return false;
+                }
+            }
+            WsOutcome::Hello { lost_events, .. } if lost_events => {
+                let _ = events
+                    .send(Event::ResyncRequired(
+                        "the server could not replay the gap".into(),
+                    ))
+                    .await;
+            }
+            WsOutcome::SequenceGap { expected, got } => {
+                let _ = events
+                    .send(Event::ResyncRequired(format!(
+                        "event sequence jumped from {expected} to {got}"
+                    )))
+                    .await;
+            }
+            WsOutcome::Hello { .. } | WsOutcome::Reply { .. } | WsOutcome::Undecodable { .. } => {}
+        }
+    }
+    true
 }
 
 fn now_millis() -> u64 {
