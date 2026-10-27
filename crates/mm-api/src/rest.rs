@@ -7,7 +7,8 @@ use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
     CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, Draft, FileId,
-    Post, PostId, PostList, Preference, Reaction, Status, Team, TeamId, ThreadList, User, UserId,
+    FileRef, Post, PostId, PostList, Preference, Reaction, Status, Team, TeamId, ThreadList, User,
+    UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -258,6 +259,37 @@ pub fn update_categories(
 
 pub fn parse_updated_categories(resp: &HttpResponse) -> Result<Vec<ChannelCategory>, ApiError> {
     parse_json(resp, "PUT /users/{user}/teams/{team}/channels/categories")
+}
+
+/// Upload one file to a channel, before a post can refer to it.
+///
+/// Mattermost uploads first and posts second: the message carries
+/// `file_ids`, and a file with no post attached to it is simply an
+/// orphan the server cleans up. That is also why a failed post after a
+/// successful upload is not a disaster.
+///
+/// The channel goes in the form rather than the path, which is what the
+/// endpoint expects; `client_ids` is left out, since this client waits
+/// for the answer rather than matching uploads up afterwards.
+#[must_use]
+pub fn upload_file(channel: &ChannelId, filename: &str, content: Vec<u8>) -> HttpRequest {
+    HttpRequest::post(format!("{API}/files")).multipart(
+        vec![("channel_id".to_owned(), channel.to_string())],
+        "files",
+        filename,
+        content,
+    )
+}
+
+/// What the server made of an upload.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Uploaded {
+    pub file_infos: Vec<FileRef>,
+}
+
+pub fn parse_upload(resp: &HttpResponse) -> Result<Uploaded, ApiError> {
+    parse_json(resp, "POST /files")
 }
 
 /// Search a team's messages.
@@ -612,11 +644,22 @@ pub fn create_post(
     message: &str,
     root: Option<&str>,
     pending_post_id: &str,
+    files: &[FileId],
 ) -> HttpRequest {
     let mut body = serde_json::Map::new();
     body.insert("channel_id".into(), channel.as_str().into());
     body.insert("message".into(), message.into());
     body.insert("pending_post_id".into(), pending_post_id.into());
+    // Only when there are some. An empty `file_ids` is accepted, but it
+    // makes the request differ from what the web app sends, and those
+    // differences are what turn into server-side edge cases later.
+    if !files.is_empty() {
+        let ids: Vec<serde_json::Value> = files
+            .iter()
+            .map(|id| serde_json::Value::String(id.to_string()))
+            .collect();
+        body.insert("file_ids".into(), serde_json::Value::Array(ids));
+    }
     // A root post sends no root_id at all. Sending `""` is accepted but makes
     // the request differ from what the web app sends, which is the kind of
     // difference that turns into a server-side edge case later.

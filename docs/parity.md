@@ -55,6 +55,7 @@ real server yet.
 | `boards` | blocked-no-webview | — | Focalboard ships as a webapp plugin. Fallback: `OpenInBrowser({server}/boards)` |
 | `playbooks` | blocked-no-webview | — | Playbooks ships as a webapp plugin. Fallback: `OpenInBrowser({server}/playbooks)` |
 | `desktop.tray` | planned | GNOME Shell 46.0 / Ubuntu 24.04 / X11 | De-risked ahead of P3: ubuntu-appindicators is enabled by default, the StatusNotifierWatcher is present with a registered host, and a real ksni item registers successfully. See docs/gtk-notes.md. Depends on that GNOME extension, so the implementation must detect an absent watcher and say so rather than publishing into the void. |
+| `desktop.window_geometry` | partial | — | The window opens the size it was closed at, and maximized if it was maximized. This client lives in half a screen, and opening at a default size every launch means dragging it into place every launch -- which is what `bounds-info.json` is for on the Electron side. **Size only, not position**: on X11 the window manager owns placement and GTK4 deliberately offers no way to ask for a spot, so a client that saved coordinates it cannot restore would be lying in its own state file. A saved size that could only have come from a window measured mid-unmap, or from a monitor that is no longer attached, falls back to the default rather than opening as a postage stamp. Written to `~/.local/state/mattermost-rs/window.json`, best effort: a client that refused to close because it could not write down its own size would be worse than one that opens at the default. NOT built: remembering which monitor, which the display server does not let a client choose anyway. |
 
 ## drafts
 
@@ -72,7 +73,7 @@ real server yet.
 
 | feature | status | verified | notes |
 |---|---|---|---|
-| `files.inline_images` | partial | 12.0.1 | An attached image is drawn in the row at the size its metadata states, from the `mini_preview` thumbnail that rides in the post so the row never reflows, and clicking it opens the full-size copy in a window. NOT built: upload, download to disk, and any non-image attachment, which shows as a line of text. An animated GIF renders its first frame. |
+| `files.inline_images` | partial | 12.0.1 | An attached image is drawn in the row at the size its metadata states, from the `mini_preview` thumbnail that rides in the post so the row never reflows, and clicking it opens the full-size copy in a window. Superseded by `posts.attachments` for upload and download. NOT built: download to disk, and any non-image attachment, which shows as a line of text. An animated GIF renders its first frame. |
 
 <details><summary><code>files.inline_images</code> wire</summary>
 
@@ -105,6 +106,7 @@ real server yet.
 | `posts.spellcheck` | partial | 12.0.1 | Red squiggles under what is not a word, in **every language this machine has a dictionary for**, and replacements on a right-click. Hunspell dictionaries read with `spellbook`, which is pure Rust: no C library to link, nothing for the `.deb` but a recommendation, and no `unsafe` near a workspace that forbids it. (`spellbook` is MPL-2.0, which is file-level copyleft and imposes nothing on this MIT tree beyond its own files.) One dictionary per language rather than per locale -- the locale's variant wins, else the one whose region repeats the language -- so five English variants do not become five copies of English that accept both "colour" and "color". A word is wrong only when **no** dictionary knows it, which is what makes a sentence of mixed Russian and English check correctly in both. Deciding what counts as a word is pure and lives in `mm-md` at 100%: mentions, channel links, emoji codes, URLs, paths, snake_case, anything with a digit in it, acronyms, single letters and everything between backticks are all left alone, because a composer in a channel like this one would otherwise be solid red. The dictionaries load on a worker thread -- `ru_RU.dic` is 3.4 MB -- and checking is debounced 400 ms so a word is not marked wrong while it is still half typed. Verified on a live account: "Ошибки в сообщениии and teh wrong word" underlines exactly "сообщениии" and "teh". NOT built: a personal dictionary ("add to dictionary"), grammar as opposed to spelling, and spell-checking anything but the two composers. |
 | `posts.search` | partial | 12.0.1 | Ctrl+Shift+F, or the magnifier in the header. The terms go to the server untouched: its own query language -- `from:`, `in:`, `before:`, quoted phrases, `-excluded` -- is parsed there, and a client that tried to interpret it could only get it wrong. Searched on Return rather than per keystroke, because every letter of a half-typed `from:legion` would otherwise be its own query. Results draw as the rows the Threads and Drafts views use -- who said it, where, when, the message -- since a hit is a place to go; clicking one opens its channel. The hits join the one post map but **not** a timeline: a result sits next to the result above it for reasons that have nothing to do with time, and filing them as history would be the client inventing adjacency the server never claimed. Verified on a live account: "deploy" answered with 100 hits across several channels. NOT built: paging past the first sixty, jumping to the hit's exact place in its channel's scrollback -- clicking a result opens the channel and that message's own thread beside it, which puts the message on screen without the timeline having to grow a segment around a post from a year ago -- and the match highlighting the server returns alongside the posts. |
 | `posts.pinned_and_saved` | partial | 12.0.1 | The pin and bookmark buttons in the header: what is pinned in the open channel, and what this reader has saved anywhere. Both share the search page, because from the store's side the three are one thing -- a set of posts in an order the server chose, which is not the order of any channel. A failed fetch is reported rather than swallowed: an empty pane and a failed request look identical, and the drafts list already taught that lesson once. Saved posts are still `flagged` on the wire; the web app has said "Saved" since 5.x. Verified on a live account: three saved messages came back across three channels, and a channel with no pins said so. NOT built: unpinning or unsaving from these lists, and paging. |
+| `posts.attachments` | partial | 12.0.1 | A paperclip on both composers: pick files, see them as chips above the box, take one off again, and send. Uploaded first and posted second, because a post carries file *ids* and the ids do not exist until the bytes are on the server; an upload that fails stops the send, since posting the message without the file somebody attached is worse than not posting it. A file on its own is a message, with no text, the way Mattermost sends one. Anything not drawn as a picture -- a document, an archive, an image whose size the server never stated -- gets a row naming it with its size and a button that writes it into the download folder, reporting where it landed. The name comes off the wire, so it is reduced to its last component before it is used: `../../../.bashrc` is a file name. A name already taken grows a counter rather than overwriting. Verified on a live account, in the reader's own DM: a PNG uploaded and rendered inline, a text file uploaded and saved back to ~/Downloads with its contents intact. NOT built: drag and drop onto the composer, paste-to-upload, progress for a large file, and previewing a non-image attachment in the client. |
 
 <details><summary><code>ws.live_events</code> wire</summary>
 
@@ -177,6 +179,14 @@ real server yet.
 
 - `GET /api/v4/channels/{channel_id}/pinned`
 - `GET /api/v4/users/{user_id}/posts/flagged`
+
+</details>
+
+<details><summary><code>posts.attachments</code> wire</summary>
+
+- `POST /api/v4/files`
+- `POST /api/v4/posts`
+- `GET /api/v4/files/{file_id}`
 
 </details>
 

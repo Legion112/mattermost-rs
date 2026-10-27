@@ -29,6 +29,22 @@ where
     })
 }
 
+/// Read a field that the server may send as `null`, as its default.
+///
+/// **`#[serde(default)]` does not cover this.** It applies when the key
+/// is *absent*; a key that is present and null is still a type error,
+/// and the whole response fails with it. Mattermost sends explicit
+/// nulls for fields that do not apply -- `mini_preview` is null on
+/// every attachment that is not an image -- so one text file in a
+/// channel made the entire upload response fail to parse.
+pub fn null_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
+}
+
 /// Same, for an optional field.
 pub fn json_string_opt<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
 where

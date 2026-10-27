@@ -261,7 +261,7 @@ verified_against = "12.0.1"
 notes = """
 An attached image is drawn in the row at the size its metadata states, from \
 the `mini_preview` thumbnail that rides in the post so the row never reflows, \
-and clicking it opens the full-size copy in a window. NOT built: upload, \
+and clicking it opens the full-size copy in a window. Superseded by `posts.attachments` for upload and download. NOT built: \
 download to disk, and any non-image attachment, which shows as a line of text. \
 An animated GIF renders its first frame."""
 
@@ -601,3 +601,55 @@ deserted. Verified on a live account: Клиенты reads 24 in the header and 
 24 in the list, where the raw roster holds 35. NOT built: muting, \
 notification preferences, adding or removing members, leaving, and the \
 rest of Mattermost's channel menu."""
+
+[[feature]]
+id       = "posts.attachments"
+area     = "posts"
+upstream = "webapp"
+status   = "partial"
+endpoints = [
+  "POST /api/v4/files",
+  "POST /api/v4/posts",
+  "GET /api/v4/files/{file_id}",
+]
+verified_against = "12.0.1"
+notes = """
+A paperclip on both composers: pick files, see them as chips above the box, \
+take one off again, and send. Uploaded first and posted second, because a \
+post carries file *ids* and the ids do not exist until the bytes are on the \
+server; an upload that fails stops the send, since posting the message \
+without the file somebody attached is worse than not posting it. A file on \
+its own is a message, with no text, the way Mattermost sends one. Anything \
+not drawn as a picture -- a document, an archive, an image whose size the \
+server never stated -- gets a row naming it with its size and a button that \
+writes it into the download folder, reporting where it landed. The name \
+comes off the wire, so it is reduced to its last component before it is \
+used: `../../../.bashrc` is a file name. A name already taken grows a \
+counter rather than overwriting. Verified on a live account, in the \
+reader's own DM: a PNG uploaded and rendered inline, a text file uploaded \
+and saved back to ~/Downloads with its contents intact. NOT built: drag and \
+drop onto the composer, paste-to-upload, progress for a large file, and \
+previewing a non-image attachment in the client."""
+
+[[feature]]
+id       = "desktop.window_geometry"
+area     = "desktop"
+upstream = "electron"
+status   = "partial"
+endpoints = []
+verified_against = ""
+notes = """
+The window opens the size it was closed at, and maximized if it was \
+maximized. This client lives in half a screen, and opening at a default \
+size every launch means dragging it into place every launch -- which is \
+what `bounds-info.json` is for on the Electron side. **Size only, not \
+position**: on X11 the window manager owns placement and GTK4 deliberately \
+offers no way to ask for a spot, so a client that saved coordinates it \
+cannot restore would be lying in its own state file. A saved size that \
+could only have come from a window measured mid-unmap, or from a monitor \
+that is no longer attached, falls back to the default rather than opening \
+as a postage stamp. Written to `~/.local/state/mattermost-rs/window.json`, \
+best effort: a client that refused to close because it could not write \
+down its own size would be worse than one that opens at the default. NOT \
+built: remembering which monitor, which the display server does not let a \
+client choose anyway."""

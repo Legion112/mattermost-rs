@@ -51,9 +51,12 @@ pub struct Post {
 #[serde(default)]
 pub struct FileRef {
     pub id: FileId,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub name: String,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub extension: String,
     pub size: i64,
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub mime_type: String,
     /// Zero for anything that is not an image.
     pub width: i64,
@@ -66,6 +69,11 @@ pub struct FileRef {
     /// metadata. It costs no request at all, so a row can show *something*
     /// at the right size the instant it is drawn and never reflow when the
     /// real image lands.
+    ///
+    /// **Null for anything that is not an image**, which `#[serde(default)]`
+    /// does not cover: that applies to a missing key, not a present one
+    /// holding null. One text file made a whole upload response fail.
+    #[serde(deserialize_with = "crate::wire::null_default")]
     pub mini_preview: String,
 }
 
@@ -353,6 +361,38 @@ impl PostList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server sends an explicit `null` for a field that does not
+    /// apply -- `mini_preview` on anything that is not an image -- and
+    /// `#[serde(default)]` does not cover that: it applies to a missing
+    /// key, not a present one holding null.
+    ///
+    /// Found by uploading a text file, which made the whole upload
+    /// response fail to parse with "invalid type: null, expected a
+    /// string", so the message was never sent.
+    #[test]
+    fn a_null_string_on_a_file_is_not_a_parse_failure() {
+        let file: FileRef = serde_json::from_str(
+            r#"{"id":"f1","name":"note.txt","extension":"txt","size":42,
+                "mime_type":"text/plain","width":0,"height":0,
+                "has_preview_image":false,"mini_preview":null}"#,
+        )
+        .unwrap();
+        assert_eq!(file.id, FileId::new("f1"));
+        assert_eq!(file.name, "note.txt");
+        assert!(file.mini_preview.is_empty());
+        assert!(!file.is_image());
+
+        // The other strings too, and a missing key still defaults.
+        let bare: FileRef =
+            serde_json::from_str(r#"{"id":"f2","name":null,"extension":null,"mime_type":null}"#)
+                .unwrap();
+        assert!(bare.name.is_empty());
+        assert!(bare.extension.is_empty());
+        assert!(bare.mime_type.is_empty());
+        let absent: FileRef = serde_json::from_str(r#"{"id":"f3"}"#).unwrap();
+        assert!(absent.name.is_empty());
+    }
 
     /// A Google Meet invitation renders as a card, which is the whole
     /// point of `metadata.embeds`: the server has already fetched the

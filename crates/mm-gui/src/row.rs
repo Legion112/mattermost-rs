@@ -95,7 +95,7 @@ mod imp {
         pub ago: RefCell<String>,
         pub full_time: RefCell<String>,
         /// A trailing line for attachments and reply counts; empty hides it.
-        pub meta: RefCell<String>,
+        pub files: RefCell<Vec<mm_types::FileRef>>,
         /// A day boundary rather than a message. `body` carries the label.
         pub separator: Cell<bool>,
         /// A separator that marks where the reader left off, drawn in the
@@ -157,7 +157,8 @@ pub struct PostRowFields<'a> {
     /// The whole date and time, for the tooltip on the clock. A message
     /// says "17:01" and the reader needs to know which day that was.
     pub full_time: &'a str,
-    pub meta: &'a str,
+    /// Everything attached that is not drawn as a picture.
+    pub files: Vec<mm_types::FileRef>,
     pub flags: PostRowFlags,
     pub reactions: Vec<mm_core::ReactionSummary>,
     pub avatar: Option<gtk::gdk::Texture>,
@@ -211,7 +212,7 @@ impl PostRow {
         inner.time.replace(fields.time.to_owned());
         inner.ago.replace(fields.ago.to_owned());
         inner.full_time.replace(fields.full_time.to_owned());
-        inner.meta.replace(fields.meta.to_owned());
+        inner.files.replace(fields.files);
         inner.voice.set(fields.flags.voice);
         inner.grouped.set(fields.flags.grouped);
         inner.reactions.replace(fields.reactions);
@@ -266,7 +267,7 @@ impl PostRow {
             && *a.body.borrow() == *b.body.borrow()
             && *a.time.borrow() == *b.time.borrow()
             && *a.ago.borrow() == *b.ago.borrow()
-            && *a.meta.borrow() == *b.meta.borrow()
+            && *a.files.borrow() == *b.files.borrow()
             && *a.blocks.borrow() == *b.blocks.borrow()
             && *a.cards.borrow() == *b.cards.borrow()
             && *a.previews.borrow() == *b.previews.borrow()
@@ -383,8 +384,8 @@ impl PostRow {
     }
 
     #[must_use]
-    pub fn meta(&self) -> String {
-        self.imp().meta.borrow().clone()
+    pub fn files(&self) -> Vec<mm_types::FileRef> {
+        self.imp().files.borrow().clone()
     }
 
     #[must_use]

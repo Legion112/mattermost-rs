@@ -152,6 +152,25 @@ impl HttpRequest {
         self
     }
 
+    /// A file upload, as the multipart form Mattermost's upload
+    /// endpoint takes.
+    #[must_use]
+    pub fn multipart(
+        mut self,
+        fields: Vec<(String, String)>,
+        file_field: impl Into<String>,
+        filename: impl Into<String>,
+        content: Vec<u8>,
+    ) -> Self {
+        self.body = Body::Multipart {
+            fields,
+            file_field: file_field.into(),
+            filename: filename.into(),
+            content,
+        };
+        self
+    }
+
     /// The path with its query string appended, for logging and for fakes
     /// keyed by route.
     #[must_use]

@@ -493,7 +493,7 @@ fn post_list_and_thread_parse() {
 #[test]
 fn create_post_carries_a_pending_id_and_omits_an_empty_root() {
     let c = ChannelId::new("c1");
-    let root = create_post(&c, "hello", None, "pending-1");
+    let root = create_post(&c, "hello", None, "pending-1", &[]);
     let Body::Json(body) = &root.body else {
         panic!("expected JSON")
     };
@@ -503,7 +503,7 @@ fn create_post_carries_a_pending_id_and_omits_an_empty_root() {
         "a root post sends no root_id: {body}"
     );
 
-    let reply = create_post(&c, "hello", Some("p1"), "pending-2");
+    let reply = create_post(&c, "hello", Some("p1"), "pending-2", &[]);
     let Body::Json(body) = &reply.body else {
         panic!("expected JSON")
     };
@@ -872,4 +872,49 @@ fn pinned_and_saved_posts_come_from_their_own_endpoints() {
     assert_eq!(parse_saved(&ok(page)).unwrap().order.len(), 1);
     assert!(parse_pinned(&ok("nope")).is_err());
     assert!(parse_saved(&ok("nope")).is_err());
+}
+
+/// A file goes up before the post that carries it, because a post
+/// refers to file *ids* and the ids do not exist until the bytes are on
+/// the server. The channel goes in the form, not the path.
+#[test]
+fn a_file_is_uploaded_before_the_post_that_names_it() {
+    let c = ChannelId::new("c1");
+    let request = upload_file(&c, "shot.png", vec![1, 2, 3]);
+    assert_eq!(request.method, Method::Post);
+    assert_eq!(request.path, "/api/v4/files");
+    match &request.body {
+        Body::Multipart {
+            fields,
+            file_field,
+            filename,
+            content,
+        } => {
+            assert_eq!(fields, &[("channel_id".to_owned(), "c1".to_owned())]);
+            assert_eq!(file_field, "files");
+            assert_eq!(filename, "shot.png");
+            assert_eq!(content, &[1, 2, 3]);
+        }
+        other => panic!("expected a multipart body, got {other:?}"),
+    }
+
+    let up = parse_upload(&ok(
+        r#"{"file_infos":[{"id":"f1","name":"shot.png","size":3}]}"#,
+    ))
+    .unwrap();
+    assert_eq!(up.file_infos[0].id, FileId::new("f1"));
+    assert!(parse_upload(&ok("not json")).is_err());
+
+    // And then the post names it. An empty list sends no `file_ids` at
+    // all, which is what the web app does.
+    let with = create_post(&c, "", None, "pending-1", &[FileId::new("f1")]);
+    let Body::Json(body) = &with.body else {
+        panic!("expected JSON")
+    };
+    assert!(body.contains(r#""file_ids":["f1"]"#), "{body}");
+    let without = create_post(&c, "hi", None, "pending-2", &[]);
+    let Body::Json(body) = &without.body else {
+        panic!("expected JSON")
+    };
+    assert!(!body.contains("file_ids"), "{body}");
 }

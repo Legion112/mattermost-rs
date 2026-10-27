@@ -261,6 +261,104 @@ async fn set_category(
     best_effort(a, &request, events).await;
 }
 
+/// Upload whatever is attached, then post the message.
+///
+/// In that order because a post carries file *ids*, and the ids do not
+/// exist until the bytes are on the server. An upload that fails stops
+/// the send: posting the message without the file somebody attached
+/// would be a worse answer than not posting it, because they would
+/// have to notice and send it again.
+async fn send_post(
+    a: &Active,
+    channel: &ChannelId,
+    text: &str,
+    root: Option<&PostId>,
+    attach: &[std::path::PathBuf],
+    events: &async_channel::Sender<Event>,
+) {
+    let mut files = Vec::new();
+    for path in attach {
+        match upload_one(a, channel, path).await {
+            Ok(id) => files.push(id),
+            Err(e) => {
+                let _ = events.send(Event::Failed(e)).await;
+                return;
+            }
+        }
+    }
+
+    let pending = format!("mmrs-{}", now_millis());
+    let request = rest::create_post(channel, text, root.map(PostId::as_str), &pending, &files);
+    // The `posted` event arrives over the WebSocket carrying the same
+    // post, so nothing is applied here: letting one path own it keeps
+    // the optimistic-post race out of this code entirely.
+    if let Err(e) = fetch(&a.client, &request, rest::parse_post).await {
+        let _ = events.send(Event::Failed(e)).await;
+    }
+}
+
+/// Put one file on the server and give back its id.
+async fn upload_one(
+    a: &Active,
+    channel: &ChannelId,
+    path: &std::path::Path,
+) -> Result<mm_types::FileId, String> {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("attachment")
+        .to_owned();
+    let content = std::fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?;
+    let request = rest::upload_file(channel, &name, content);
+    let answer = fetch(&a.client, &request, rest::parse_upload).await?;
+    answer
+        .file_infos
+        .into_iter()
+        .next()
+        .map(|info| info.id)
+        .ok_or_else(|| format!("{name}: the server accepted it but named no file"))
+}
+
+/// Put an attachment in the reader's download folder.
+///
+/// The cache first: a file already fetched to draw the row is the same
+/// file, so keeping it costs no request. The name is the server's, with
+/// anything that could climb out of the folder taken off -- a file name
+/// is attacker-controlled, and `../../.bashrc` is a file name.
+async fn save_file(
+    a: &Active,
+    file: &mm_types::FileId,
+    name: &str,
+    events: &async_channel::Sender<Event>,
+) {
+    let bytes = match crate::avatars::load_file(file) {
+        Some(bytes) => bytes,
+        None => match fetch(
+            &a.client,
+            &rest::file_contents(file, false),
+            rest::parse_image,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = events.send(Event::Failed(format!("download: {e}"))).await;
+                return;
+            }
+        },
+    };
+    match crate::downloads::save(name, &bytes) {
+        Ok(path) => {
+            let _ = events
+                .send(Event::Status(format!("saved to {}", path.display())))
+                .await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("download: {e}"))).await;
+        }
+    }
+}
+
 /// Ask the server what matches.
 ///
 /// Searching is per team in Mattermost -- there is no account-wide
@@ -571,6 +669,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::FetchAvatar { user, version } => {
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
+        Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
         Command::FetchLinkImage(url) => {
             spawn_download(a, events.clone(), Download::Link { url });
         }
@@ -598,17 +697,8 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             channel,
             text,
             root,
-        } => {
-            let pending = format!("mmrs-{}", now_millis());
-            let request =
-                rest::create_post(&channel, &text, root.as_ref().map(PostId::as_str), &pending);
-            // The `posted` event arrives over the WebSocket carrying the
-            // same post, so nothing is applied here: letting one path own
-            // it keeps the optimistic-post race out of this code entirely.
-            if let Err(e) = fetch(&a.client, &request, rest::parse_post).await {
-                let _ = events.send(Event::Failed(e)).await;
-            }
-        }
+            attach,
+        } => send_post(a, &channel, &text, root.as_ref(), &attach, events).await,
         Command::Notify(notification) => {
             // A missing notification daemon is a normal state on a minimal
             // desktop, and not a reason for a chat client to stop working.

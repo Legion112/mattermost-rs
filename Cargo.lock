@@ -1331,6 +1331,8 @@ name = "mm-desktop"
 version = "0.1.0"
 dependencies = [
  "mm-types",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

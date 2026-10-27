@@ -10,7 +10,9 @@
 //! the store is modelling.
 
 mod avatars;
+mod downloads;
 mod engine;
+mod geometry;
 mod session;
 mod snapshot;
 
@@ -299,7 +301,12 @@ fn gui() -> Result<(), String> {
     // idea of a login flow.
     let saved = session::load().ok();
     let (commands, events) = engine::spawn(saved);
-    let code = mm_gui::run(mm_gui::Wiring { commands, events });
+    let code = mm_gui::run(mm_gui::Wiring {
+        commands,
+        events,
+        geometry: geometry::load(),
+        remember: std::rc::Rc::new(geometry::store),
+    });
     if code == mm_gui::glib_exit_success() {
         Ok(())
     } else {
@@ -487,7 +494,7 @@ async fn send(args: &[String]) -> Result<(), String> {
     // The pending id is what lets an optimistic post on screen be matched to
     // the `posted` event that confirms it, instead of appearing twice.
     let pending = format!("mmrs-{}-{}", saved.user_id, now_millis());
-    let request = rest::create_post(&channel, &text, None, &pending);
+    let request = rest::create_post(&channel, &text, None, &pending, &[]);
     let post = fetch(&client, &request, rest::parse_post).await?;
     println!("posted {} to {name} at {}", post.id, post.create_at);
     Ok(())

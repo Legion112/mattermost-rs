@@ -37,6 +37,7 @@ fn commands_round_trip_through_debug_and_clone() {
             root: None,
             channel: ChannelId::new("c1"),
             text: "hello".into(),
+            attach: Vec::new(),
         },
         Command::MarkRead(ChannelId::new("c1")),
         Command::Quit,

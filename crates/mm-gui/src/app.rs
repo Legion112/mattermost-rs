@@ -51,10 +51,29 @@ const APP_ID: &str = "dev.legion.mattermost_rs";
 const APP_ID_OVERRIDE: &str = "MMRS_APP_ID";
 
 /// Everything the window needs to talk to the outside world.
-#[derive(Debug)]
+///
+/// `Debug` is written by hand rather than derived: `remember` is a
+/// closure and there is nothing useful to print about one.
 pub struct Wiring {
     pub commands: tokio::sync::mpsc::UnboundedSender<Command>,
     pub events: async_channel::Receiver<Event>,
+    /// How big the window was when it was last closed. The window is
+    /// where this client lives -- half a screen, usually -- and opening
+    /// at a default size every launch means dragging it into place
+    /// every launch.
+    pub geometry: mm_desktop::Geometry,
+    /// Where to write the size back to. A closure rather than a path,
+    /// because which file and which directory is the binary's business
+    /// and the window's only job is to say what size it ended up.
+    pub remember: Rc<dyn Fn(mm_desktop::Geometry)>,
+}
+
+impl std::fmt::Debug for Wiring {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wiring")
+            .field("geometry", &self.geometry)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Cloneable: every field is a `Rc` or a GTK object, both of which are
@@ -182,9 +201,9 @@ struct Ui {
     stick_to_bottom: Rc<std::cell::Cell<bool>>,
     status: gtk::Label,
     title: adw::WindowTitle,
-    composer: gtk::TextView,
+    composer: Composer,
     /// The frame around it, which is what is shown, hidden and greyed.
-    composer_pane: gtk::ScrolledWindow,
+    composer_pane: gtk::Box,
 }
 
 /// Build the window and run the GTK main loop.
@@ -195,7 +214,13 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
     let wiring = Rc::new(RefCell::new(Some(wiring)));
 
     app.connect_activate(move |app| {
-        let Some(Wiring { commands, events }) = wiring.borrow_mut().take() else {
+        let Some(Wiring {
+            commands,
+            events,
+            geometry,
+            remember,
+        }) = wiring.borrow_mut().take()
+        else {
             // A second activation (another launch while this one is running)
             // must present the existing window rather than build a second one.
             if let Some(window) = app.windows().first() {
@@ -207,7 +232,7 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
         // session, and asking for a second one ran every request twice --
         // two sets of answers, and the window drew the channel again for
         // each of them.
-        let ui = Rc::new(build(app, &commands));
+        let ui = Rc::new(build(app, &commands, geometry, &remember));
 
         // THE one bridge. Children never spawn; they send commands.
         let pump = Rc::clone(&ui);
@@ -306,7 +331,7 @@ fn build_thread_pane(
     gtk::ListView,
     gtk::Box,
     gtk::Button,
-    gtk::TextView,
+    Composer,
     gtk::ScrolledWindow,
 ) {
     let (thread_posts, thread_view, thread_scroller) = build_post_list(ctx, true);
@@ -326,7 +351,8 @@ fn build_thread_pane(
     thread_header.set_margin_bottom(4);
     thread_header.append(&thread_title);
     thread_header.append(&thread_close);
-    let (thread_composer, thread_composer_pane) = build_composer("Reply…");
+    let thread_composer = build_composer("Reply…");
+    let thread_composer_pane = thread_composer.pane.clone();
     let thread_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
     thread_pane.append(&thread_header);
     thread_pane.append(&thread_scroller);
@@ -438,11 +464,34 @@ fn install_styles() {
     }
 }
 
+/// Write the window's size down when it closes.
+///
+/// Size and maximized only. On X11 the window manager owns placement,
+/// GTK4 deliberately offers no way to ask for a spot, and a client that
+/// saved coordinates it cannot restore would be lying in its own state
+/// file -- so the window comes back the right *shape* and wherever the
+/// desktop decides to put it.
+fn remember_geometry(window: &adw::ApplicationWindow, remember: &Rc<dyn Fn(mm_desktop::Geometry)>) {
+    let remember = Rc::clone(remember);
+    window.connect_close_request(move |window| {
+        // `default_width` tracks the current size of a resizable
+        // window, and while maximized it holds the size to go back to,
+        // which is exactly what should be restored later.
+        remember(mm_desktop::Geometry {
+            width: window.default_width(),
+            height: window.default_height(),
+            maximized: window.is_maximized(),
+        });
+        glib::Propagation::Proceed
+    });
+}
+
 /// The window itself: its title bar, the sign-in page, and the stack
 /// that swaps between that page and the chat view.
 fn build_window(
     app: &adw::Application,
     split: &gtk::Paned,
+    geometry: mm_desktop::Geometry,
 ) -> (
     adw::WindowTitle,
     gtk::Button,
@@ -504,9 +553,10 @@ fn build_window(
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title(window_title)
-        .default_width(1_040)
-        .default_height(720)
+        .default_width(geometry.width)
+        .default_height(geometry.height)
         .content(&root)
+        .maximized(geometry.maximized)
         .build();
     window.present();
 
@@ -520,7 +570,12 @@ fn build_window(
     )
 }
 
-fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
+fn build(
+    app: &adw::Application,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    geometry: mm_desktop::Geometry,
+    remember: &Rc<dyn Fn(mm_desktop::Geometry)>,
+) -> Ui {
     install_styles();
     let (sidebar, identity, unread_only, sidebar_pane) = build_sidebar();
 
@@ -534,7 +589,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let rows = RowContext::new(commands, &store, &server);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
 
-    let (composer, composer_pane, status) = build_composer_row();
+    let (composer, status) = build_composer_row();
+    let composer_pane = composer.pane.clone();
 
     // The conversation, the Threads view and the Drafts view take turns
     // in the same space. The status line and the composer stay put under
@@ -565,7 +621,8 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
     let (title, refresh, [search, pinned, saved, channel_menu], login, stack, window) =
-        build_window(app, &split);
+        build_window(app, &split, geometry);
+    remember_geometry(&window, remember);
 
     let ui = Ui {
         store,
@@ -629,12 +686,11 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
             ui.open_channel_menu(button.upcast_ref::<gtk::Widget>());
         });
     }
-    attach_both_composers(&ui, &composer, &thread_composer);
+    attach_both_composers(&ui, &composer.view, &thread_composer.view);
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_views(&ui);
     wire_switcher(&ui, &window);
     wire_unread_filter(&ui, &unread_only);
-    attach_both_composers(&ui, &composer, &thread_composer);
 
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
@@ -686,7 +742,7 @@ fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSend
 fn wire_thread(
     ui: &Ui,
     close: &gtk::Button,
-    composer: &gtk::TextView,
+    composer: &Composer,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) {
     // Scrolling up means the reader is reading, not following. Arriving
@@ -726,9 +782,9 @@ fn wire_thread(
     let commands = commands.clone();
     let root = Rc::clone(&ui.thread_root);
     let store = Rc::clone(&ui.store);
-    let view = composer.clone();
-    composer.add_controller(submit_keys(move || {
-        let text = composer_text(&view);
+    let into = composer.clone();
+    composer.view.add_controller(submit_keys(move || {
+        let text = composer_text(&into.view);
         if text.trim().is_empty() {
             return;
         }
@@ -758,9 +814,10 @@ fn wire_thread(
                 channel,
                 text,
                 root: Some(root),
+                attach: into.take_attachments(),
             })
             .ok();
-        view.buffer().set_text("");
+        into.view.buffer().set_text("");
     }));
 }
 
@@ -1309,9 +1366,9 @@ fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool) {
 ///
 /// Insensitive until a channel is open: a composer that accepts text
 /// with nowhere to send it is a message the reader will lose.
-fn build_composer_row() -> (gtk::TextView, gtk::ScrolledWindow, gtk::Label) {
-    let (composer, pane) = build_composer("Write a message…");
-    pane.set_sensitive(false);
+fn build_composer_row() -> (Composer, gtk::Label) {
+    let composer = build_composer("Write a message…");
+    composer.pane.set_sensitive(false);
     let status = gtk::Label::builder()
         .xalign(0.0)
         .margin_start(12)
@@ -1319,7 +1376,7 @@ fn build_composer_row() -> (gtk::TextView, gtk::ScrolledWindow, gtk::Label) {
         .css_classes(["dim-label", "caption"])
         .label("starting…")
         .build();
-    (composer, pane, status)
+    (composer, status)
 }
 
 /// One composer: a `TextView` that grows with what is typed, framed,
@@ -1329,7 +1386,7 @@ fn build_composer_row() -> (gtk::TextView, gtk::ScrolledWindow, gtk::Label) {
 /// line. Shift+Return puts in a newline and Return sends, which is the
 /// binding Mattermost uses and the one muscle memory expects -- an
 /// `Entry` can express neither, since it has no newline to insert.
-fn build_composer(placeholder: &str) -> (gtk::TextView, gtk::ScrolledWindow) {
+fn build_composer(placeholder: &str) -> Composer {
     let view = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
         .top_margin(8)
@@ -1359,18 +1416,136 @@ fn build_composer(placeholder: &str) -> (gtk::TextView, gtk::ScrolledWindow) {
 
     // Grows to a few lines and then scrolls, rather than pushing the
     // conversation off the top of the window.
-    let pane = gtk::ScrolledWindow::builder()
+    let scroll = gtk::ScrolledWindow::builder()
         .child(&over)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .propagate_natural_height(true)
         .max_content_height(COMPOSER_MAX_HEIGHT)
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(12)
-        .css_classes(["card"])
+        .hexpand(true)
         .build();
-    (view, pane)
+
+    let attach = gtk::Button::from_icon_name("mail-attachment-symbolic");
+    attach.set_tooltip_text(Some("Attach a file"));
+    attach.add_css_class("flat");
+    attach.set_valign(gtk::Align::End);
+    attach.set_margin_bottom(4);
+    attach.set_margin_end(4);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("card");
+    row.append(&scroll);
+    row.append(&attach);
+
+    // What has been chosen but not yet sent, above the box it will be
+    // sent with. Hidden while empty so an untouched composer is the
+    // same height it always was.
+    let tray = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    tray.set_visible(false);
+    tray.set_margin_bottom(4);
+
+    let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    pane.set_margin_start(12);
+    pane.set_margin_end(12);
+    pane.set_margin_top(6);
+    pane.set_margin_bottom(12);
+    pane.append(&tray);
+    pane.append(&row);
+
+    let composer = Composer {
+        view,
+        pane,
+        tray,
+        chosen: Rc::new(RefCell::new(Vec::new())),
+    };
+    composer.wire_attach(&attach);
+    composer
+}
+
+/// One composer: the box, its frame, and what has been attached to it
+/// but not yet sent.
+#[derive(Clone)]
+struct Composer {
+    view: gtk::TextView,
+    /// The whole column, which is what is shown, hidden and greyed.
+    pane: gtk::Box,
+    tray: gtk::Box,
+    chosen: Rc<RefCell<Vec<std::path::PathBuf>>>,
+}
+
+impl Composer {
+    /// The paperclip: pick files, and show what was picked.
+    fn wire_attach(&self, button: &gtk::Button) {
+        let composer = self.clone();
+        button.connect_clicked(move |button| {
+            let window = button.root().and_downcast::<gtk::Window>();
+            let picked = composer.clone();
+            gtk::FileDialog::builder()
+                .title("Attach to this message")
+                .modal(true)
+                .build()
+                .open_multiple(window.as_ref(), gio::Cancellable::NONE, move |chosen| {
+                    // A cancelled dialog is an error here, and is
+                    // exactly as uninteresting as it sounds.
+                    let Ok(files) = chosen else { return };
+                    for file in files.iter::<gio::File>().flatten() {
+                        if let Some(path) = file.path() {
+                            picked.chosen.borrow_mut().push(path);
+                        }
+                    }
+                    picked.refresh_tray();
+                });
+        });
+    }
+
+    /// Draw a chip per attached file, each with a way to take it off.
+    fn refresh_tray(&self) {
+        while let Some(old) = self.tray.first_child() {
+            self.tray.remove(&old);
+        }
+        let chosen = self.chosen.borrow().clone();
+        self.tray.set_visible(!chosen.is_empty());
+        for (at, path) in chosen.iter().enumerate() {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment")
+                .to_owned();
+            let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            chip.add_css_class("mmrs-chip");
+            chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
+            chip.append(
+                &gtk::Label::builder()
+                    .label(&name)
+                    .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                    .max_width_chars(28)
+                    .build(),
+            );
+            let remove = gtk::Button::from_icon_name("window-close-symbolic");
+            remove.add_css_class("flat");
+            remove.set_tooltip_text(Some("Do not attach this"));
+            let composer = self.clone();
+            remove.connect_clicked(move |_| {
+                {
+                    // By position, read at click time: taking the first
+                    // of three off renumbers the other two.
+                    let mut chosen = composer.chosen.borrow_mut();
+                    if at < chosen.len() {
+                        chosen.remove(at);
+                    }
+                }
+                composer.refresh_tray();
+            });
+            chip.append(&remove);
+            self.tray.append(&chip);
+        }
+    }
+
+    /// What to send, and nothing left behind for the next message.
+    fn take_attachments(&self) -> Vec<std::path::PathBuf> {
+        let taken = std::mem::take(&mut *self.chosen.borrow_mut());
+        self.refresh_tray();
+        taken
+    }
 }
 
 /// Everything typed into a composer.
@@ -2110,7 +2285,7 @@ fn wire_selection(
         // the way Mattermost puts it there: clicking a channel is how a
         // reader starts writing in it, and the alternative is a second
         // click at the bottom of the window before the first letter.
-        ui_for_views.composer.grab_focus();
+        ui_for_views.composer.view.grab_focus();
         commands.send(Command::OpenChannel(id.clone())).ok();
         commands.send(Command::MarkRead(id)).ok();
     });
@@ -2120,7 +2295,7 @@ fn wire(
     ui: &Ui,
     refresh: &gtk::Button,
     sidebar: &gtk::ListBox,
-    composer: &gtk::TextView,
+    composer: &Composer,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) {
     {
@@ -2205,10 +2380,13 @@ fn wire(
     {
         let commands = commands.clone();
         let selected = Rc::clone(&ui.selected);
-        let view = composer.clone();
-        composer.add_controller(submit_keys(move || {
-            let text = composer_text(&view);
-            if text.trim().is_empty() {
+        let into = composer.clone();
+        composer.view.add_controller(submit_keys(move || {
+            let text = composer_text(&into.view);
+            let attach = into.take_attachments();
+            // A file on its own is a message: Mattermost sends a post
+            // with no text and the attachment under it.
+            if text.trim().is_empty() && attach.is_empty() {
                 return;
             }
             let Some(channel) = selected.borrow().clone() else {
@@ -2219,9 +2397,10 @@ fn wire(
                     channel,
                     text,
                     root: None,
+                    attach,
                 })
                 .ok();
-            view.buffer().set_text("");
+            into.view.buffer().set_text("");
         }));
     }
 }
@@ -2303,44 +2482,6 @@ fn push_blocks(blocks: &[mm_md::Block], quoted: bool, out: &mut Vec<BlockView>) 
             }),
         }
     }
-}
-
-/// The trailing line: what is attached, and how many replies there are.
-///
-/// Without this a post whose only content is a file renders as an author, a
-/// timestamp and nothing at all, which reads as the client being broken.
-/// The line under a message for anything that is not the message: files,
-/// and nothing else.
-///
-/// Replies used to be listed here too, which meant a post with a thread
-/// said "3 replies" twice -- once as text and once as the button that
-/// actually opens it.
-fn describe_extras(post: &mm_types::Post) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for file in post.attachments() {
-        // An image drawn in the row names itself. The line is still where a
-        // document goes, and where an image goes whose dimensions the server
-        // did not state -- that one is not drawn, so without this it would
-        // vanish from the message entirely.
-        if file.is_image() && file.fitted(IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT).is_some() {
-            continue;
-        }
-        let icon = if file.is_image() { "🖼" } else { "📎" };
-        let name = if file.name.is_empty() {
-            // Some endpoints omit metadata, leaving only the id. Saying a file
-            // is there beats showing nothing.
-            "attachment".to_owned()
-        } else {
-            file.name.clone()
-        };
-        let size = file.human_size();
-        if size.is_empty() {
-            parts.push(format!("{icon} {name}"));
-        } else {
-            parts.push(format!("{icon} {name} ({size})"));
-        }
-    }
-    parts.join("   ")
 }
 
 /// `HH:MM` in local time.
@@ -2667,13 +2808,13 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     // A box of blocks rather than one label: a code block is a panel and a
     // rule is a line, and neither is expressible as Pango markup.
     let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    // Attachments and "N replies" -- the line that keeps a post whose
-    // only content is a file from rendering as an author and nothing.
-    let meta = gtk::Label::builder()
-        .xalign(0.0)
-        .wrap(true)
-        .css_classes(["dim-label", "caption"])
-        .build();
+    // Everything attached that is not drawn as a picture above: a
+    // document, an archive, an image whose size the server never
+    // stated. One row each, with somewhere to click to keep it --
+    // without which a post whose only content is a file rendered as an
+    // author, a timestamp and nothing at all.
+    let files = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    files.set_margin_top(4);
     // Reaction chips. Rebuilt on every bind rather than recycled: a row can
     // carry none one moment and four the next, and four buttons is cheap.
     let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -2701,7 +2842,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     main.append(&body);
     main.append(&cards);
     main.append(&images);
-    main.append(&meta);
+    main.append(&files);
     main.append(&reactions);
 
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -3269,6 +3410,91 @@ fn quick_reaction_button(
     button
 }
 
+/// Draw a row for everything attached that is not a picture above.
+fn bind_files(
+    files: &gtk::Box,
+    data: &PostRow,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) {
+    while let Some(old) = files.first_child() {
+        files.remove(&old);
+    }
+    let attached = data.files();
+    files.set_visible(!attached.is_empty());
+    for file in attached {
+        files.append(&file_row(&file, commands));
+    }
+}
+
+/// One attachment: what it is, how big, and a button to keep it.
+fn file_row(
+    file: &mm_types::FileRef,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) -> gtk::Box {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.add_css_class("card");
+    line.set_halign(gtk::Align::Start);
+    line.set_margin_start(2);
+
+    let icon = gtk::Image::from_icon_name(if file.is_image() {
+        "image-x-generic-symbolic"
+    } else {
+        "mail-attachment-symbolic"
+    });
+    icon.set_margin_start(10);
+    icon.add_css_class("dim-label");
+    line.append(&icon);
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.set_margin_top(8);
+    column.set_margin_bottom(8);
+    // Some endpoints omit the metadata, leaving only an id. Saying a
+    // file is there beats showing nothing.
+    let name = if file.name.is_empty() {
+        "attachment"
+    } else {
+        &file.name
+    };
+    column.append(
+        &gtk::Label::builder()
+            .label(name)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(44)
+            .build(),
+    );
+    let size = file.human_size();
+    if !size.is_empty() {
+        column.append(
+            &gtk::Label::builder()
+                .label(&size)
+                .xalign(0.0)
+                .css_classes(["dim-label", "caption"])
+                .build(),
+        );
+    }
+    line.append(&column);
+
+    let save = gtk::Button::from_icon_name("document-save-symbolic");
+    save.set_tooltip_text(Some("Save to Downloads"));
+    save.add_css_class("flat");
+    save.set_valign(gtk::Align::Center);
+    save.set_margin_end(6);
+    let commands = commands.clone();
+    let wanted = file.id.clone();
+    let as_named = name.to_owned();
+    save.connect_clicked(move |_| {
+        commands
+            .send(Command::SaveFile {
+                file: wanted.clone(),
+                name: as_named.clone(),
+            })
+            .ok();
+    });
+    line.append(&save);
+    line
+}
+
 /// Open an attached image in a window of its own.
 ///
 /// Mattermost opens a lightbox over the channel; this is a window,
@@ -3610,7 +3836,7 @@ struct RowWidgets {
     body: gtk::Box,
     cards: gtk::Box,
     images: gtk::Box,
-    meta: gtk::Label,
+    files: gtk::Box,
     reactions: gtk::Box,
 }
 
@@ -3628,8 +3854,8 @@ impl RowWidgets {
         let body = header.next_sibling().and_downcast::<gtk::Box>()?;
         let cards = body.next_sibling().and_downcast::<gtk::Box>()?;
         let images = cards.next_sibling().and_downcast::<gtk::Box>()?;
-        let meta = images.next_sibling().and_downcast::<gtk::Label>()?;
-        let reactions = meta.next_sibling().and_downcast::<gtk::Box>()?;
+        let files = images.next_sibling().and_downcast::<gtk::Box>()?;
+        let reactions = files.next_sibling().and_downcast::<gtk::Box>()?;
         Some(Self {
             row,
             day,
@@ -3642,7 +3868,7 @@ impl RowWidgets {
             body,
             cards,
             images,
-            meta,
+            files,
             reactions,
         })
     }
@@ -3665,7 +3891,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         body,
         cards,
         images,
-        meta,
+        files,
         reactions,
     }) = RowWidgets::find(item)
     else {
@@ -3727,9 +3953,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     bind_cards(&cards, &data, commands, links);
     bind_images(&images, &data, commands, viewer);
 
-    let extra = data.meta();
-    meta.set_text(&extra);
-    meta.set_visible(!extra.is_empty());
+    bind_files(&files, &data, commands);
 
     while let Some(chip) = reactions.first_child() {
         reactions.remove(&chip);
@@ -5082,7 +5306,14 @@ impl Ui {
             time: &clock_time(post.create_at.millis()),
             ago: &describe_ago(post.create_at),
             full_time: &full_time(post.create_at.millis()),
-            meta: &describe_extras(post),
+            files: post
+                .attachments()
+                .into_iter()
+                // Anything drawn as a picture above names itself.
+                .filter(|f| {
+                    !(f.is_image() && f.fitted(IMAGE_MAX_WIDTH, IMAGE_MAX_HEIGHT).is_some())
+                })
+                .collect(),
             flags: crate::row::PostRowFlags {
                 grouped,
                 voice: if system {

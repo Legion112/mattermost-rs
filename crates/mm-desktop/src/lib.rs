@@ -7,9 +7,13 @@
 //! which has no session bus at all.
 
 pub mod deeplink;
+pub mod download;
+pub mod geometry;
 pub mod notify;
 
 pub use deeplink::{DeepLink, DeepLinkError, parse as parse_deep_link};
+pub use download::{destination, safe_name};
+pub use geometry::Geometry;
 pub use notify::{
     DesktopNotify, Notification, NotifySettings, Suppressed, notification_for, summarize,
 };

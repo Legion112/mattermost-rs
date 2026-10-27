@@ -39,6 +39,10 @@ pub enum Command {
         channel: ChannelId,
         text: String,
         root: Option<PostId>,
+        /// Files chosen from disk, to upload and attach. Uploaded by
+        /// the engine first, because a post carries file *ids* and the
+        /// ids do not exist until the bytes are on the server.
+        attach: Vec<std::path::PathBuf>,
     },
     /// Load a thread so it can be read beside the channel.
     OpenThread(PostId),
@@ -93,6 +97,12 @@ pub enum Command {
     FetchFile {
         file: FileId,
         preview: bool,
+    },
+    /// Write an attachment into the reader's download folder, under
+    /// the name the server gave it.
+    SaveFile {
+        file: FileId,
+        name: String,
     },
     /// Fetch the picture a link preview offered, from whatever host the
     /// link points at. Asked once per URL, and never with a credential.
