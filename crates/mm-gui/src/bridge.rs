@@ -135,6 +135,11 @@ pub enum Command {
         root: PostId,
         following: bool,
     },
+    /// Say where this reader is: online, away, do not disturb, offline.
+    ///
+    /// The server stops moving a status it was told, so choosing one is
+    /// also choosing to keep it until it is changed again.
+    SetPresence(mm_types::Presence),
     /// Mute a channel, or let it speak again.
     SetMuted {
         channel: ChannelId,

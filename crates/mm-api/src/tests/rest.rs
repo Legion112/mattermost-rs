@@ -1095,3 +1095,27 @@ fn an_empty_emoji_page_is_null_not_an_array() {
         Err(ApiError::Forbidden(_))
     ));
 }
+
+/// The body repeats the id the path already carries, which is what the
+/// server wants rather than a redundancy worth trimming -- it rejects a
+/// body without it. And `PUT`, which is what marks the status manual so
+/// the server stops moving it on its own.
+#[test]
+fn saying_where_you_are_repeats_your_id_in_the_body() {
+    let me = UserId::new("u1");
+    let req = set_status(&me, mm_types::Presence::Dnd);
+    assert_eq!(req.method, Method::Put);
+    assert_eq!(req.path, "/api/v4/users/u1/status");
+    let Body::Json(body) = &req.body else {
+        panic!("expected a JSON body, got {:?}", req.body);
+    };
+    assert!(body.contains(r#""user_id":"u1""#), "{body}");
+    assert!(body.contains(r#""status":"dnd""#), "{body}");
+
+    let back = parse_status(&ok(r#"{"user_id":"u1","status":"dnd","manual":true}"#)).unwrap();
+    assert_eq!(back.presence(), mm_types::Presence::Dnd);
+    assert!(back.manual);
+
+    let err = HttpResponse::new(403, r#"{"id":"api.no","message":"nope"}"#);
+    assert!(matches!(parse_status(&err), Err(ApiError::Forbidden(_))));
+}

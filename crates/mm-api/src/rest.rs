@@ -873,6 +873,25 @@ pub fn parse_statuses(resp: &HttpResponse) -> Result<Vec<Status>, ApiError> {
     parse_json(resp, "POST /users/status/ids")
 }
 
+/// Say where this reader is.
+///
+/// `PUT`, and the body repeats the user id the path already carries --
+/// which is what the server wants, not a redundancy worth trimming:
+/// it rejects a body without it. Setting a status this way marks it
+/// **manual**, so the server stops moving it on its own, which is the
+/// whole point of choosing one.
+#[must_use]
+pub fn set_status(user: &UserId, presence: mm_types::Presence) -> HttpRequest {
+    HttpRequest::put(format!("{API}/users/{user}/status")).json(&serde_json::json!({
+        "user_id": user.as_str(),
+        "status": presence.as_str(),
+    }))
+}
+
+pub fn parse_status(resp: &HttpResponse) -> Result<Status, ApiError> {
+    parse_json(resp, "PUT /users/{user}/status")
+}
+
 // ---------------------------------------------------------------- prefs
 
 #[must_use]

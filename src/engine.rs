@@ -921,6 +921,27 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::SetPresence(presence) => {
+            match fetch(
+                &a.client,
+                &rest::set_status(&UserId::new(&a.session.user_id), presence),
+                rest::parse_status,
+            )
+            .await
+            {
+                Ok(status) => {
+                    let _ = events.send(Event::Statuses(vec![status])).await;
+                }
+                // Worth a complaint, unlike most of these: the reader
+                // chose this and the dot not moving is the only sign
+                // they would otherwise get.
+                Err(e) => {
+                    let _ = events
+                        .send(Event::Failed(format!("could not set your status: {e}")))
+                        .await;
+                }
+            }
+        }
         Command::FetchEmoji { name, id } => {
             spawn_download(a, events.clone(), Download::Emoji { name, id });
         }
@@ -1395,21 +1416,7 @@ async fn sync(
     snapshot.teams.clone_from(&teams);
     let _ = events.send(Event::Teams(teams)).await;
 
-    // DM labels come from the roster: a DM's own display_name is empty and its
-    // name is the two user ids joined by `__`.
-    if !dm_ids.is_empty() {
-        dm_ids.sort();
-        dm_ids.dedup();
-        if let Ok(users) = fetch(client, &rest::users_by_ids(&dm_ids), rest::parse_users).await {
-            snapshot.users.clone_from(&users);
-            let _ = events.send(Event::Users(users)).await;
-        }
-        // Who is at their desk, for the dots on the sidebar's faces.
-        // Not worth a complaint if it fails: every dot then reads
-        // offline, which is what it read a moment ago anyway.
-        let ids: Vec<UserId> = dm_ids.iter().map(UserId::new).collect();
-        send_statuses(client, &ids, events).await;
-    }
+    send_people(client, session, &mut dm_ids, &mut snapshot, events).await;
     // The server's own emoji. After the sidebar, because nothing on
     // screen waits for it: a message holding `:party_parrot:` reads as
     // `:party_parrot:` until the list lands and then becomes a picture.
@@ -1456,6 +1463,35 @@ async fn send_snapshot(
 /// Silent on failure by design: a dot that says offline when somebody is
 /// online is a smaller wrong than an error in front of the reader, and
 /// the WebSocket corrects it the moment they do anything.
+/// The people behind the DMs, and where everybody is.
+///
+/// DM labels come from the roster: a DM's own `display_name` is empty
+/// and its `name` is the two user ids joined by `__`.
+async fn send_people(
+    client: &Client,
+    session: &Session,
+    dm_ids: &mut Vec<String>,
+    snapshot: &mut crate::snapshot::Snapshot,
+    events: &async_channel::Sender<Event>,
+) {
+    if !dm_ids.is_empty() {
+        dm_ids.sort();
+        dm_ids.dedup();
+        if let Ok(users) = fetch(client, &rest::users_by_ids(dm_ids), rest::parse_users).await {
+            snapshot.users.clone_from(&users);
+            let _ = events.send(Event::Users(users)).await;
+        }
+    }
+    // Who is at their desk, for the dots on the sidebar's faces --
+    // **and this reader**, who is on no DM list of their own and whose
+    // status the window draws on the control that sets it. Not worth a
+    // complaint if it fails: every dot then reads offline, which is
+    // what it read a moment ago anyway.
+    let mut ids: Vec<UserId> = dm_ids.iter().map(UserId::new).collect();
+    ids.push(UserId::new(&session.user_id));
+    send_statuses(client, &ids, events).await;
+}
+
 async fn send_statuses(client: &Client, users: &[UserId], events: &async_channel::Sender<Event>) {
     if users.is_empty() {
         return;

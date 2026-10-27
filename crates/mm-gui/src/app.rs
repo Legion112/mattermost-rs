@@ -114,6 +114,8 @@ struct Ui {
     drafts_list: gtk::ListBox,
     sidebar: gtk::ListBox,
     identity: gtk::Label,
+    /// This reader's own dot, which is also the button that moves it.
+    presence: gtk::Button,
     /// Decoded avatars, by user. A texture is a GPU-side object and must be
     /// built on this thread, so the engine sends bytes and the decode
     /// happens here.
@@ -665,7 +667,13 @@ fn build_thread_pane(
 }
 
 /// The channel list, under a line naming the account this window shows.
-fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::ToggleButton, gtk::Box) {
+fn build_sidebar() -> (
+    gtk::ListBox,
+    gtk::Label,
+    gtk::ToggleButton,
+    gtk::Button,
+    gtk::Box,
+) {
     let sidebar = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
         .css_classes(["navigation-sidebar"])
@@ -696,9 +704,19 @@ fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::ToggleButton, gtk::Box) {
         .tooltip_text("Show unread channels only")
         .css_classes(["flat"])
         .build();
+    // The reader's own dot, and the only way to move it. Beside the
+    // account it belongs to, which is where Mattermost puts it too --
+    // behind the avatar there, but this window has no avatar up here.
+    let presence = gtk::Button::builder()
+        .css_classes(["flat"])
+        .tooltip_text("Set your status")
+        .child(&presence_dot(mm_types::Presence::Offline))
+        .build();
+
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     identity.set_hexpand(true);
     top.append(&identity);
+    top.append(&presence);
     top.append(&unread_only);
     top.set_margin_end(6);
 
@@ -706,7 +724,24 @@ fn build_sidebar() -> (gtk::ListBox, gtk::Label, gtk::ToggleButton, gtk::Box) {
     sidebar_pane.set_size_request(260, -1);
     sidebar_pane.append(&top);
     sidebar_pane.append(&sidebar_scroll);
-    (sidebar, identity, unread_only, sidebar_pane)
+    (sidebar, identity, unread_only, presence, sidebar_pane)
+}
+
+/// A standalone presence dot, for the places there is no face to put
+/// one on the corner of.
+fn presence_dot(presence: mm_types::Presence) -> gtk::Box {
+    let dot = gtk::Box::builder()
+        .css_classes(["mmrs-dot", "mmrs-dot-alone"])
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .build();
+    // Offline is a drawn ring here rather than nothing. On a message
+    // row nothing is right -- a column of grey dots beside old messages
+    // is noise -- but a button with nothing on it is a button nobody
+    // can find.
+    dot.add_css_class(presence.as_str());
+    dot.set_tooltip_text(Some(&format!("You are {}", presence.label())));
+    dot
 }
 
 /// Styling this window needs that the theme does not provide.
@@ -744,7 +779,8 @@ fn install_styles() {
          }\n\
          .mmrs-dot.online { background: #3db887; }\n\
          .mmrs-dot.away { background: #ffbc1f; }\n\
-         .mmrs-dot.dnd { background: #d24b4e; }",
+         .mmrs-dot.dnd { background: #d24b4e; }\n\
+         .mmrs-dot-alone { min-width: 10px; min-height: 10px; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -876,7 +912,7 @@ fn build(
     remember: &Rc<dyn Fn(mm_desktop::Restored)>,
 ) -> Ui {
     install_styles();
-    let (sidebar, identity, unread_only, sidebar_pane) = build_sidebar();
+    let (sidebar, identity, unread_only, presence, sidebar_pane) = build_sidebar();
 
     // The store and the server's URL are made here rather than in the
     // `Ui` below, because the post list's widgets are built before it
@@ -947,6 +983,7 @@ fn build(
         drafts_list: drafts_list.clone(),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
+        presence: presence.clone(),
         thread_posts: thread_posts.clone(),
         thread_view: thread_view.clone(),
         thread_pane: thread_pane.clone(),
@@ -1021,7 +1058,59 @@ fn wire_everything(ui: &Ui, composer: &Composer, thread_composer: &Composer) {
     attach_both_composers(ui, &composer.view, &thread_composer.view);
     wire_views(ui);
     wire_switcher(ui, &ui.window);
+    wire_presence(ui);
     remember_geometry(ui);
+}
+
+/// The dot beside the account name, and the menu that moves it.
+fn wire_presence(ui: &Ui) {
+    let menu = ui.clone();
+    ui.presence.connect_clicked(move |button| {
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["navigation-sidebar"])
+            .build();
+        let popup = gtk::Popover::builder().child(&list).build();
+        popup.set_parent(button);
+        popup.connect_closed(gtk::Popover::unparent);
+
+        let now = menu.my_presence();
+        for presence in mm_types::Presence::ALL {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            line.set_margin_start(6);
+            line.set_margin_end(6);
+            line.append(&presence_dot(*presence));
+            let label = gtk::Label::new(Some(presence.label()));
+            // Capitalised the way a menu entry is, without a second
+            // spelling of each state to keep in step with the first.
+            label.set_markup(&format!(
+                "<span>{}{}</span>",
+                presence.label()[..1].to_uppercase(),
+                glib::markup_escape_text(&presence.label()[1..])
+            ));
+            line.append(&label);
+            let row = gtk::ListBoxRow::builder().child(&line).build();
+            // The one it is already on is shown but not offered: asking
+            // the server to set what it already says is a round trip
+            // for nothing.
+            row.set_activatable(*presence != now);
+            row.set_sensitive(*presence != now);
+            row.set_widget_name(presence.as_str());
+            list.append(&row);
+        }
+
+        let ui = menu.clone();
+        let popdown = popup.clone();
+        list.connect_row_activated(move |_, row| {
+            ui.commands
+                .send(Command::SetPresence(mm_types::Presence::parse(
+                    &row.widget_name(),
+                )))
+                .ok();
+            popdown.popdown();
+        });
+        popup.popup();
+    });
 }
 
 /// Connect the sign-in form.
@@ -6568,6 +6657,18 @@ impl Ui {
         list_row
     }
 
+    /// Where this reader is, as far as the store knows.
+    fn my_presence(&self) -> mm_types::Presence {
+        let store = self.store.borrow();
+        store.presence(&store.me)
+    }
+
+    /// Redraw the dot beside the account name.
+    fn refresh_presence(&self) {
+        self.presence
+            .set_child(Some(&presence_dot(self.my_presence())));
+    }
+
     fn refresh_sidebar(&self) {
         self.refresh_badge();
         let sections = self.store.borrow().sidebar_sections();
@@ -7036,6 +7137,7 @@ impl Ui {
             }
             Event::Statuses(statuses) => {
                 if !self.store.borrow_mut().apply_statuses(&statuses).is_empty() {
+                    self.refresh_presence();
                     self.redraw_soon();
                 }
             }
@@ -7227,13 +7329,14 @@ impl Ui {
         let ui = self.clone();
         glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
             ui.redraw_queued.set(false);
+            // Cheap, and the alternative is a second path for the one
+            // case that moves it from outside: a `status_change` for
+            // this reader, sent when they set it in another client.
+            ui.refresh_presence();
             ui.redraw_everything();
         });
     }
 
-    /// Decode a face and redraw wherever it appears.
-    ///
-    /// `Texture::from_bytes` decodes on this thread. The plan puts image
     /// The server's own emoji: the list, and the pictures.
     fn on_emoji(&self, event: Event) {
         match event {
@@ -7257,6 +7360,9 @@ impl Ui {
         }
     }
 
+    /// Decode a face and redraw wherever it appears.
+    ///
+    /// `Texture::from_bytes` decodes on this thread. The plan puts image
     /// decode on the engine, and for message images it will stay there -- an
     /// avatar is at most 128px and decodes in well under a millisecond,
     /// which is cheaper than the round trip that moving it would cost.

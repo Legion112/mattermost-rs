@@ -440,7 +440,7 @@ id       = "users.presence"
 area     = "users"
 upstream = "server-api"
 status   = "partial"
-endpoints = ["POST /api/v4/users/status/ids"]
+endpoints = ["POST /api/v4/users/status/ids", "PUT /api/v4/users/{user_id}/status"]
 ws_events = ["status_change"]
 verified_against = "12.0.1"
 notes = """
@@ -454,10 +454,29 @@ put everyone the reader is looking at into an access log. Kept current by \
 `status_change`, and a repeat of what is already held produces no change so \
 a second device reporting the same state does not redraw every row. An \
 unrecognised status reads as offline rather than failing the batch. \
-Verified on a live account: aragorn's face carries a green dot. NOT built: \
-setting your own status, and there is no periodic re-poll -- a person who \
-goes away while nothing else happens keeps their old dot until the server \
-says otherwise."""
+Verified on a live account: aragorn's face carries a green dot.
+
+A dot beside the account name in the sidebar is this reader's own, and the \
+button that moves it: Online, Away, Do not disturb, Offline, with the one \
+it is already on shown but not offered -- asking the server to set what it \
+already says is a round trip for nothing. Mattermost puts this behind the \
+avatar in its header; there is no avatar up here, so it sits beside the \
+account it belongs to. This reader is on no DM list of their own, so the \
+sync now asks for their status along with everybody else's, and a \
+`status_change` from another client moves the dot because the coalesced \
+redraw refreshes it. Unlike most requests here a failure is worth a \
+complaint: the reader chose this, and the dot not moving is the only sign \
+they would otherwise get.
+
+Verified against the live account: the menu set it to Away, the dot turned \
+amber, setting it back to Online turned it green, and the server's own \
+`GET /users/{id}/status` then read `online` with `manual:false` -- the \
+server clears the manual flag when a status goes back to online, so \
+choosing one leaves nothing behind.
+
+NOT built: a do-not-disturb timer, custom status text, and there is no \
+periodic re-poll -- a person who goes away while nothing else happens keeps \
+their old dot until the server says otherwise."""
 
 [[feature]]
 id       = "posts.typing"
