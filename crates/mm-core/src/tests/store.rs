@@ -1466,3 +1466,69 @@ fn mentions_resolve_against_the_roster() {
         assert_eq!(store.mentioned(group), Some(mm_md::Mentioned::Someone));
     }
 }
+
+/// `/stats` counts only active members, so a group DM of five with two
+/// deactivated people reported three -- under a title listing all five.
+/// The participants are the names in that title.
+#[test]
+fn a_group_dm_is_counted_by_the_names_in_its_title() {
+    let mut store = store();
+    let mut group = channel("g1", 0, 0);
+    group.kind = ChannelType::Group;
+    group.display_name = "aiksandr, diogen, legion".into();
+    store.apply_channels(vec![group]);
+    store.apply_stats(mm_types::ChannelStats {
+        channel_id: ChannelId::new("g1"),
+        // What the server said, and what must not be shown.
+        member_count: 2,
+        ..mm_types::ChannelStats::default()
+    });
+
+    let (name, count) = store.channel_heading(&ChannelId::new("g1"));
+    assert_eq!(name, "aiksandr, diogen, legion");
+    assert_eq!(count, Some(3));
+}
+
+/// A one-to-one DM gets no count: "2 members" over somebody's name tells
+/// the reader nothing, and Mattermost shows none either.
+#[test]
+fn a_direct_message_has_no_member_count() {
+    let mut store = store();
+    store.apply_users(vec![person("u-1", "jane", "")]);
+    store.apply_channels(vec![dm_channel("d1", "u-1")]);
+    store.apply_stats(mm_types::ChannelStats {
+        channel_id: ChannelId::new("d1"),
+        member_count: 2,
+        ..mm_types::ChannelStats::default()
+    });
+
+    assert_eq!(
+        store.channel_heading(&ChannelId::new("d1")),
+        ("jane".to_owned(), None)
+    );
+}
+
+/// An ordinary channel still uses the server's count, which is what that
+/// number means there.
+#[test]
+fn an_ordinary_channel_uses_the_servers_count() {
+    let mut store = store();
+    store.apply_channels(vec![channel("c1", 0, 0)]);
+    store.apply_stats(mm_types::ChannelStats {
+        channel_id: ChannelId::new("c1"),
+        member_count: 34,
+        ..mm_types::ChannelStats::default()
+    });
+    assert_eq!(store.channel_heading(&ChannelId::new("c1")).1, Some(34));
+}
+
+/// A group DM with no title yet shows no count rather than one.
+#[test]
+fn a_group_dm_with_no_title_has_no_count() {
+    let mut store = store();
+    let mut group = channel("g2", 0, 0);
+    group.kind = ChannelType::Group;
+    group.display_name = String::new();
+    store.apply_channels(vec![group]);
+    assert_eq!(store.channel_heading(&ChannelId::new("g2")).1, None);
+}

@@ -68,6 +68,14 @@ impl User {
     #[must_use]
     pub fn name_as(&self, format: NameFormat) -> String {
         let fallback = || self.username.clone();
+        // A bot is shown by its display name whatever the setting says,
+        // which is what Mattermost does. The bot record's display name is
+        // kept in the account's `first_name`, so a bot called "System" has
+        // the username `system-bot` and showing that is simply wrong --
+        // and wrong invisibly for a bot whose two names happen to match.
+        if self.is_bot && !self.first_name.is_empty() {
+            return self.first_name.clone();
+        }
         match format {
             NameFormat::Username => fallback(),
             NameFormat::NicknameFullName => {
@@ -318,5 +326,67 @@ mod name_format_tests {
             ..User::default()
         };
         assert_eq!(last_only.name_as(NameFormat::FullName), "Иванов");
+    }
+}
+
+#[cfg(test)]
+mod bot_name_tests {
+    use super::*;
+
+    fn bot(username: &str, display: &str) -> User {
+        User {
+            username: username.into(),
+            first_name: display.into(),
+            is_bot: true,
+            ..User::default()
+        }
+    }
+
+    /// The bug this exists for: a DM with the `System` bot was listed as
+    /// `system-bot`, because the server's name format is `username` and
+    /// this followed it faithfully. Mattermost does not: a bot is its
+    /// display name under every format.
+    #[test]
+    fn a_bot_is_its_display_name_under_every_format() {
+        let system = bot("system-bot", "System");
+        for format in [
+            NameFormat::Username,
+            NameFormat::NicknameFullName,
+            NameFormat::FullName,
+            NameFormat::ShowFullName,
+        ] {
+            assert_eq!(system.name_as(format), "System", "{format:?}");
+        }
+    }
+
+    /// The case that hides the bug: a bot whose two names match reads
+    /// correctly either way, which is why only one of two bots looked wrong.
+    #[test]
+    fn a_bot_whose_names_match_reads_the_same_either_way() {
+        assert_eq!(
+            bot("deploy-info", "deploy-info").name_as(NameFormat::Username),
+            "deploy-info"
+        );
+    }
+
+    /// A bot with no display name still has to be called something.
+    #[test]
+    fn a_nameless_bot_falls_back_to_its_username() {
+        assert_eq!(
+            bot("quiet-bot", "").name_as(NameFormat::Username),
+            "quiet-bot"
+        );
+    }
+
+    /// And a person is unaffected: the rule is about bots only.
+    #[test]
+    fn a_person_still_follows_the_servers_format() {
+        let person = User {
+            username: "lowroar".into(),
+            first_name: "Павел".into(),
+            ..User::default()
+        };
+        assert_eq!(person.name_as(NameFormat::Username), "lowroar");
+        assert_eq!(person.name_as(NameFormat::FullName), "Павел");
     }
 }

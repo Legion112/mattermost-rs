@@ -36,6 +36,19 @@ pub enum Change {
     ReadState,
 }
 
+/// How many people are named in a group DM's title.
+///
+/// The server builds that title by joining the participants' usernames
+/// with ", ", and a username cannot contain a comma, so counting them is
+/// exact rather than a guess.
+fn participants(display_name: &str) -> Option<i64> {
+    let named = display_name
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .count();
+    (named > 0).then(|| i64::try_from(named).unwrap_or(i64::MAX))
+}
+
 /// One emoji's worth of reaction on a post.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReactionSummary {
@@ -160,11 +173,22 @@ impl Store {
     /// header while the first sync is still in flight.
     #[must_use]
     pub fn channel_heading(&self, channel: &ChannelId) -> (String, Option<i64>) {
-        let name = self
-            .channels
-            .get(channel)
-            .map_or_else(|| channel.to_string(), |c| self.channel_label(c));
-        (name, self.stats.get(channel).map(|s| s.member_count))
+        let Some(open) = self.channels.get(channel) else {
+            return (channel.to_string(), None);
+        };
+        let name = self.channel_label(open);
+        let count = match open.kind {
+            // "2 members" over somebody's name says nothing anybody needed
+            // to be told, and Mattermost shows no count for a DM either.
+            ChannelType::Direct => None,
+            // `/stats` counts only *active* members, so a group of five
+            // with two deactivated people in it reported three -- under a
+            // title listing all five. The participants are the names in
+            // that title, which is the number the reader can check.
+            ChannelType::Group => participants(&open.display_name),
+            _ => self.stats.get(channel).map(|s| s.member_count),
+        };
+        (name, count)
     }
 
     /// What to call a person, in the format this server asked for.

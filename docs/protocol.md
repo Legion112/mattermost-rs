@@ -445,3 +445,22 @@ silently, because the parse error was swallowed by a fallback to the default.
 `mm_types::wire::nullable` is the deserializer for this, and every field of
 an attachment uses it. Any other type that reads a `props` blob should
 expect the same thing.
+
+## Two counts and a name that are not what they look like
+
+**A bot is shown by its display name, whatever `TeammateNameDisplay` says.**
+The bot record's display name is kept in the account's `first_name`, so the
+`System` bot has the username `system-bot`, and a client that follows the
+name format faithfully lists the DM as `system-bot`. Mattermost does not.
+Easy to miss, because a bot whose username and display name happen to match
+— `deploy-info` — reads correctly either way.
+
+**`GET /channels/{id}/stats` counts only active members.** Verified on a
+group DM of five whose title named all five and whose `member_count` was
+three: two of the participants were deactivated. For a group DM the number
+a reader can check is the number of names in the title, which the server
+builds by joining usernames with ", " — and a username cannot contain a
+comma, so counting them is exact.
+
+**A one-to-one DM shows no member count at all**, in Mattermost and now
+here. "2 members" over somebody's name tells the reader nothing.
