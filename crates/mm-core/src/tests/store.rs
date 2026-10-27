@@ -3016,3 +3016,54 @@ fn the_last_message_in_a_channel_is_the_one_shift_up_replies_to() {
     );
     assert_eq!(store.last_post(&channel).map(|p| p.id.as_str()), Some("p2"));
 }
+
+/// Marking a followed thread read is applied here as well as sent:
+/// the server announces it as a `thread_read_changed`, which this
+/// client does not decode, so without this the row stays bold until
+/// the next sync and the click reads as one that missed.
+#[test]
+fn a_thread_marked_read_stops_being_unread_at_once() {
+    let mut store = store();
+    let list = mm_types::ThreadList {
+        threads: vec![
+            mm_types::UserThread {
+                id: PostId::new("p1"),
+                unread_replies: 3,
+                unread_mentions: 1,
+                last_reply_at: Timestamp(50),
+                post: Some(post("p1", "c1", 10)),
+                ..mm_types::UserThread::default()
+            },
+            mm_types::UserThread {
+                id: PostId::new("p2"),
+                unread_replies: 1,
+                post: Some(post("p2", "c1", 20)),
+                ..mm_types::UserThread::default()
+            },
+        ],
+        total_unread_threads: 7,
+        total_unread_mentions: 4,
+        ..mm_types::ThreadList::default()
+    };
+    store.apply_threads(&list);
+    assert_eq!(store.thread_totals.unread_threads, 7);
+
+    let changed = store.read_thread_locally(&PostId::new("p1"));
+    assert_eq!(changed, [Change::Threads, Change::Sidebar]);
+    let read = store
+        .followed_threads()
+        .into_iter()
+        .find(|t| t.id == PostId::new("p1"))
+        .expect("still listed");
+    assert!(!read.is_unread());
+    assert_eq!(read.last_viewed_at, Timestamp(50));
+    // The totals are the server's account-wide ones, so they are
+    // adjusted rather than recounted: this page is not all there is.
+    assert_eq!(store.thread_totals.unread_threads, 6);
+    assert_eq!(store.thread_totals.unread_mentions, 3);
+
+    // Again is not a change, and a thread nobody follows is not one
+    // either.
+    assert!(store.read_thread_locally(&PostId::new("p1")).is_empty());
+    assert!(store.read_thread_locally(&PostId::new("nope")).is_empty());
+}

@@ -8,7 +8,7 @@ use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
     CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, CustomEmoji,
     Draft, EmojiId, FileId, FileRef, Post, PostId, PostList, Preference, Reaction, Status, Team,
-    TeamId, ThreadList, User, UserId,
+    TeamId, ThreadList, Timestamp, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -503,6 +503,26 @@ pub fn my_threads(user: &UserId, team: &TeamId, per_page: u32) -> HttpRequest {
 
 pub fn parse_threads(resp: &HttpResponse) -> Result<ThreadList, ApiError> {
     parse_json(resp, "GET /users/{user}/teams/{team}/threads")
+}
+
+/// Mark a followed thread read up to a moment.
+///
+/// The timestamp is in the **path**, not a body or a query -- and it
+/// is the moment to mark read *up to*, so the last reply's own
+/// `create_at` leaves that reply unread on some servers. The last
+/// reply's time plus one is what the webapp sends.
+#[must_use]
+pub fn read_thread(user: &UserId, team: &TeamId, root: &PostId, upto: Timestamp) -> HttpRequest {
+    HttpRequest::put(format!(
+        "{API}/users/{user}/teams/{team}/threads/{root}/read/{}",
+        upto.millis()
+    ))
+}
+
+/// Mark every followed thread read.
+#[must_use]
+pub fn read_all_threads(user: &UserId, team: &TeamId) -> HttpRequest {
+    HttpRequest::put(format!("{API}/users/{user}/teams/{team}/threads/read"))
 }
 
 /// This reader's unsent messages for a team.

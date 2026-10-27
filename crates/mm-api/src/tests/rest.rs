@@ -1198,3 +1198,28 @@ fn autocompleting_a_mention_names_the_team_as_well_as_the_channel() {
     assert!(empty.users.is_empty() && empty.out_of_channel.is_empty());
     assert!(!format!("{empty:?}").is_empty());
 }
+
+/// The moment goes in the **path**, not a body or a query, and it is
+/// the moment to mark read *up to* -- so the last reply's own
+/// `create_at` can leave that reply unread, which is why the webapp
+/// sends one millisecond past it.
+#[test]
+fn a_thread_is_marked_read_up_to_a_moment_in_the_path() {
+    let request = read_thread(
+        &UserId::new("u1"),
+        &TeamId::new("t1"),
+        &PostId::new("p9"),
+        mm_types::Timestamp(1_793_000_000_001),
+    );
+    assert_eq!(request.method, Method::Put);
+    assert_eq!(
+        request.path,
+        "/api/v4/users/u1/teams/t1/threads/p9/read/1793000000001"
+    );
+    assert!(request.query.is_empty());
+    assert_eq!(request.body, Body::Empty);
+
+    let all = read_all_threads(&UserId::new("u1"), &TeamId::new("t1"));
+    assert_eq!(all.method, Method::Put);
+    assert_eq!(all.path, "/api/v4/users/u1/teams/t1/threads/read");
+}

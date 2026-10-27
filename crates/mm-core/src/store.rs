@@ -348,6 +348,34 @@ impl Store {
     /// The followed threads worth drawing, the ones with new replies
     /// first and then by when they were last replied to.
     ///
+    /// Record that a followed thread has been read.
+    ///
+    /// Applied here as well as sent. The server announces this as a
+    /// `thread_read_changed`, which this client does not decode, so
+    /// without it the row stays bold until the next sync -- and a
+    /// "mark read" that leaves the row looking unread reads as a
+    /// click that missed.
+    pub fn read_thread_locally(&mut self, root: &PostId) -> Vec<Change> {
+        let Some(thread) = self.threads.iter_mut().find(|held| held.id == *root) else {
+            return Vec::new();
+        };
+        if !thread.is_unread() {
+            return Vec::new();
+        }
+        // The account-wide totals behind the sidebar badge are the
+        // server's, so they are adjusted rather than recounted: this
+        // page is not all the threads there are.
+        self.thread_totals.unread_threads = self.thread_totals.unread_threads.saturating_sub(1);
+        self.thread_totals.unread_mentions = self
+            .thread_totals
+            .unread_mentions
+            .saturating_sub(thread.unread_mentions);
+        thread.unread_replies = 0;
+        thread.unread_mentions = 0;
+        thread.last_viewed_at = thread.last_reply_at;
+        vec![Change::Threads, Change::Sidebar]
+    }
+
     /// Mattermost sorts the view by last reply alone. Unread first is a
     /// deliberate difference and the same rule the sidebar already uses:
     /// the reason to open this view is to find what has moved.

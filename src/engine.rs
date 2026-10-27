@@ -932,6 +932,14 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::ReadThread { team, root, upto } => {
+            let user = UserId::new(&a.session.user_id);
+            // One past the last reply: the endpoint marks read *up to*
+            // the moment given, and the reply's own `create_at` leaves
+            // that reply unread.
+            let past = mm_types::Timestamp(upto.millis().saturating_add(1));
+            best_effort(a, &rest::read_thread(&user, &team, &root, past), events).await;
+        }
         Command::Statuses(users) => send_statuses(&a.client, &users, events).await,
         Command::MentionsLike {
             team,

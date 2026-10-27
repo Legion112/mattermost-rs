@@ -7201,6 +7201,47 @@ impl Ui {
         }
     }
 
+    /// The button that marks one followed thread read.
+    ///
+    /// Only on a thread that has something unread in it: a button
+    /// that does nothing on two rows in three is noise, and
+    /// Mattermost shows it the same way.
+    fn mark_thread_read_button(&self, thread: &mm_types::UserThread) -> Option<gtk::Button> {
+        if !thread.is_unread() {
+            return None;
+        }
+        let team = self
+            .store
+            .borrow()
+            .teams
+            .first()
+            .map(|team| team.id.clone())?;
+        let button = gtk::Button::from_icon_name("mail-mark-read-symbolic");
+        button.add_css_class("flat");
+        button.set_tooltip_text(Some("Mark this thread read"));
+        // Or the click reaches the row underneath and opens the very
+        // thread that is being dismissed.
+        button.set_can_focus(false);
+        let ui = self.clone();
+        let root = thread.id.clone();
+        let upto = thread.last_reply_at;
+        button.connect_clicked(move |_| {
+            if !ui.store.borrow_mut().read_thread_locally(&root).is_empty() {
+                ui.sidebar_stale.set(true);
+                ui.refresh_threads_view();
+                ui.sidebar_soon();
+            }
+            ui.commands
+                .send(Command::ReadThread {
+                    team: team.clone(),
+                    root: root.clone(),
+                    upto,
+                })
+                .ok();
+        });
+        Some(button)
+    }
+
     /// Whose face is drawn anywhere right now.
     ///
     /// The sidebar's one-to-one conversations and the open channel's
@@ -7410,7 +7451,7 @@ impl Ui {
                     .collect(),
                 face_names: who.iter().map(|id| store.user_label(id)).collect(),
                 unread: thread.is_unread(),
-                action: None,
+                action: self.mark_thread_read_button(thread),
             });
             row.set_widget_name(thread.id.as_str());
             self.threads_list.append(&row);

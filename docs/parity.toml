@@ -241,7 +241,10 @@ id       = "threads.view"
 area     = "threads"
 upstream = "server-api"
 status   = "partial"
-endpoints = ["GET /api/v4/users/{user_id}/teams/{team_id}/threads"]
+endpoints = [
+  "GET /api/v4/users/{user_id}/teams/{team_id}/threads",
+  "PUT /api/v4/users/{user_id}/teams/{team_id}/threads/{thread_id}/read/{timestamp}",
+]
 verified_against = "12.0.1"
 notes = """
 The followed-thread list, with the root message, the channel, the \
@@ -259,8 +262,26 @@ server, because the thread object comes from there and inventing one would \
 draw a row from a guess. Setting the toggle to match a thread being opened \
 is guarded against its own handler, or opening a followed thread would \
 immediately unfollow it. Verified on a live account: pressed for a thread in \
-the list, flat for one opened from a channel. NOT built: the filter control \
-beside the tabs, and marking a thread read from the list."""
+the list, flat for one opened from a channel.
+
+**A thread can be marked read from the list**, with a button on the row, \
+shown only where there is something unread -- a button that does nothing on \
+two rows in three is noise, and Mattermost shows it the same way. Applied \
+here as well as sent, because the server announces it as a \
+`thread_read_changed`, which this client does not decode, and a "mark read" \
+that leaves the row bold reads as a click that missed. The account-wide \
+totals behind the sidebar badge are adjusted rather than recounted: they \
+are the server's, and this page is not all the threads there are.
+
+The moment goes in the **path**, and it is the moment to mark read *up to* \
+-- so the last reply's own `create_at` can leave that reply unread, which \
+is why one millisecond past it is what gets sent. Verified on a live \
+account, on a thread made unread for the purpose: the row left the Unreads \
+tab at once, the sidebar badge went with it, and the server's own thread \
+list then reported no unread threads.
+
+NOT built: the filter control beside the tabs, and marking every thread \
+read at once."""
 
 [[feature]]
 id       = "drafts.view"
