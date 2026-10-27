@@ -3548,6 +3548,28 @@ impl Ui {
         out
     }
 
+    /// Whether the server says this channel has never had a message.
+    ///
+    /// The channel's own counter, not "we hold nothing": the second is
+    /// also true of a channel whose page is still in flight.
+    fn known_empty(store: &Store, channel: &ChannelId) -> bool {
+        store
+            .channels
+            .get(channel)
+            .is_some_and(|c| c.total_msg_count == 0)
+    }
+
+    /// What an empty channel says, the way Mattermost opens one.
+    fn channel_intro(store: &Store, channel: &ChannelId) -> String {
+        let name = store.channel_heading(channel).name;
+        let direct = store.channels.get(channel).is_some_and(|c| c.kind.is_dm());
+        if direct {
+            format!("This is the start of your conversation with {name}")
+        } else {
+            format!("This is the start of {name}")
+        }
+    }
+
     /// Draw the open thread, or hide the panel when there is none.
     fn refresh_thread(&self) {
         let Some(root) = self.thread_root.borrow().clone() else {
@@ -3906,6 +3928,19 @@ impl Ui {
             };
             rows.push(self.row_for(&store, post, grouped, &quick));
         }
+        // A channel nobody has written in yet says so. Without this it
+        // draws as a blank pane, which reads as a channel that failed to
+        // load -- there is no way for the reader to tell the difference,
+        // and the first report of it was exactly that.
+        //
+        // Only when the channel is *known* empty, from the message count
+        // the server keeps on it, never merely because nothing has
+        // arrived yet: saying "no messages" for the third of a second
+        // before a page lands would be worse than the blank.
+        if rows.is_empty() && Self::known_empty(&store, channel) {
+            rows.push(PostRow::separator(&Self::channel_intro(&store, channel)));
+        }
+
         // Only what changed. Appending emits `items_changed` per item and
         // `ListView` answers each one by measuring what it holds, so the
         // rows are built first and handed over together; and because
