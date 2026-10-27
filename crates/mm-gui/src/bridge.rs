@@ -142,6 +142,17 @@ pub enum Command {
     /// Write what is half-typed, so it survives a restart and follows
     /// the reader to their other clients. An empty one is a deletion.
     SaveDraft(mm_types::Draft),
+    /// Ask the server who else matches a half-typed `@`.
+    ///
+    /// The store only knows the people this client has seen, which on
+    /// a large server is a fraction of the team: without this,
+    /// mentioning somebody you have not spoken to means typing their
+    /// username in full and hoping.
+    MentionsLike {
+        team: mm_types::TeamId,
+        channel: ChannelId,
+        prefix: String,
+    },
     /// Tell the channel somebody is writing. Over the WebSocket, not
     /// REST: it is an action on the socket, and the server forgets it
     /// after five seconds whether or not anything else is sent.
@@ -290,6 +301,15 @@ pub enum Event {
     EmojiImage {
         name: String,
         image: Vec<u8>,
+    },
+    /// Who the server offered for a half-typed `@`, in the channel and
+    /// outside it, with the prefix it answered so a reply to something
+    /// already typed past can be ignored.
+    MentionsLike {
+        channel: ChannelId,
+        prefix: String,
+        in_channel: Vec<User>,
+        elsewhere: Vec<User>,
     },
     /// Who is in one channel, from the roster fetched when it opened.
     ///

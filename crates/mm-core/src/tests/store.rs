@@ -2951,3 +2951,36 @@ fn a_draft_written_here_is_held_until_it_is_empty() {
     // Another channel's draft is its own.
     assert!(store.draft_for(&ChannelId::new("c2"), None).is_none());
 }
+
+/// The answer to a half-typed `@` is deliberately partial, so it is
+/// added to the roster rather than becoming it: replacing a channel's
+/// members with whoever's name starts with "al" would shrink the
+/// channel to those people.
+#[test]
+fn names_offered_for_a_mention_join_the_roster_rather_than_replace_it() {
+    let mut store = store();
+    let channel = ChannelId::new("c1");
+    let person = |id: &str| User {
+        id: UserId::new(id),
+        username: id.to_owned(),
+        ..User::default()
+    };
+
+    store.apply_channel_roster(&channel, vec![person("ann"), person("bob")]);
+    assert_eq!(store.channel_roster(&channel).len(), 2);
+
+    store.extend_channel_roster(&channel, vec![person("alukard")]);
+    let roster: Vec<&str> = store
+        .channel_roster(&channel)
+        .iter()
+        .map(|u| u.username.as_str())
+        .collect();
+    assert_eq!(roster, ["alukard", "ann", "bob"]);
+    // And somebody already there is not duplicated.
+    store.extend_channel_roster(&channel, vec![person("ann")]);
+    assert_eq!(store.channel_roster(&channel).len(), 3);
+
+    // A channel with no roster yet gets one, rather than being skipped.
+    store.extend_channel_roster(&ChannelId::new("c2"), vec![person("zed")]);
+    assert_eq!(store.channel_roster(&ChannelId::new("c2")).len(), 1);
+}

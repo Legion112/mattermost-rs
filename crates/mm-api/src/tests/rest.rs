@@ -1170,3 +1170,31 @@ fn a_draft_is_deleted_by_channel_and_by_root() {
     let reply = delete_draft(&user, &channel, Some(&PostId::new("p9")));
     assert_eq!(reply.path, "/api/v4/users/u1/channels/c1/drafts?root_id=p9");
 }
+
+/// `in_team` is required whenever `in_channel` is given: without it
+/// the server answers **500**, not 400, with "Team id parameter is
+/// required to autocomplete by channel" -- which reads like a server
+/// fault rather than a missing parameter.
+#[test]
+fn autocompleting_a_mention_names_the_team_as_well_as_the_channel() {
+    let request = autocomplete_users(&TeamId::new("t1"), &ChannelId::new("c1"), "al", 8);
+    assert_eq!(request.method, Method::Get);
+    assert_eq!(request.path, "/api/v4/users/autocomplete");
+    assert_eq!(
+        request.route_key(),
+        "GET /api/v4/users/autocomplete?in_team=t1&in_channel=c1&name=al&limit=8"
+    );
+
+    // Two lists, and the in-channel one is called `users`.
+    let found = parse_autocomplete(&ok(r#"{"users":[{"id":"u1","username":"alukard"}],
+            "out_of_channel":[{"id":"u2","username":"alextim"}]}"#))
+    .unwrap();
+    assert_eq!(found.users[0].username, "alukard");
+    assert_eq!(found.out_of_channel[0].username, "alextim");
+
+    // A server that sends neither list is a server with nobody to
+    // offer, not a parse failure.
+    let empty = parse_autocomplete(&ok("{}")).unwrap();
+    assert!(empty.users.is_empty() && empty.out_of_channel.is_empty());
+    assert!(!format!("{empty:?}").is_empty());
+}

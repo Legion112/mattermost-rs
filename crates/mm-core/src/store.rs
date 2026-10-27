@@ -658,6 +658,20 @@ impl Store {
     }
 
     /// Record who is in a channel, and the people themselves.
+    /// Add people to a channel's roster without replacing it.
+    ///
+    /// For an answer that is deliberately partial -- the first few
+    /// names matching what is being typed after an `@`. Replacing the
+    /// roster with those would shrink the channel to whoever's name
+    /// happens to start with "al".
+    pub fn extend_channel_roster(&mut self, channel: &ChannelId, users: Vec<User>) -> Vec<Change> {
+        self.channel_members
+            .entry(channel.clone())
+            .or_default()
+            .extend(users.iter().map(|u| u.id.clone()));
+        self.apply_users(users)
+    }
+
     pub fn apply_channel_roster(&mut self, channel: &ChannelId, users: Vec<User>) -> Vec<Change> {
         self.channel_members.insert(
             channel.clone(),

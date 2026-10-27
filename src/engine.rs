@@ -932,6 +932,25 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::MentionsLike {
+            team,
+            channel,
+            prefix,
+        } => {
+            let request = rest::autocomplete_users(&team, &channel, &prefix, MENTIONS_ASKED);
+            if let Ok(found) = fetch(&a.client, &request, rest::parse_autocomplete).await {
+                // Not worth a complaint if it fails: the local names
+                // are still offered, which is where this started.
+                let _ = events
+                    .send(Event::MentionsLike {
+                        channel,
+                        prefix,
+                        in_channel: found.users,
+                        elsewhere: found.out_of_channel,
+                    })
+                    .await;
+            }
+        }
         Command::Typing { channel, root } => {
             // Straight to the socket task, and nothing waits on it:
             // being a moment late with "is typing" costs nothing, and
@@ -1277,6 +1296,11 @@ const CHANNEL_ROSTER: u32 = 200;
 /// configured. Asking for sixty and being handed a hundred would make
 /// the client's idea of a full page a lie in both directions.
 const SEARCH_PAGE: u32 = 100;
+
+/// How many names to ask the server for behind a half-typed `@`.
+/// More than the popup shows, because the two lists it answers with
+/// are merged with the local ones and then ranked again.
+const MENTIONS_ASKED: u32 = 20;
 const SAVED_PAGE: u32 = 60;
 /// How many people one quick-switcher query asks about.
 const ELSEWHERE_PEOPLE: u32 = 20;

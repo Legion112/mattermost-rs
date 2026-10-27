@@ -255,6 +255,13 @@ struct Ui {
     /// The thread panel's own box, so a half-typed reply can be
     /// written down and brought back like a channel's.
     thread_composer: Composer,
+    /// The last half-typed `@` the server was asked about, so asking
+    /// again for the same letters costs nothing.
+    mentions_asked: Rc<RefCell<String>>,
+    /// How to draw the open mention popup again, while one is open --
+    /// the server's answer arrives after it was drawn from what the
+    /// store knew.
+    mentions_refill: Rc<RefCell<Option<PickerRefill>>>,
     /// Set while a composer is being filled from a draft, so putting
     /// yesterday's half-typed message back does not announce to the
     /// channel that somebody is writing.
@@ -1073,6 +1080,8 @@ fn build(
         title,
         composer: composer.clone(),
         thread_composer: thread_composer.clone(),
+        mentions_asked: Rc::new(RefCell::new(String::new())),
+        mentions_refill: Rc::new(RefCell::new(None)),
         restoring: Rc::new(std::cell::Cell::new(false)),
         composer_pane: composer.pane.clone(),
         stack,
@@ -2276,6 +2285,7 @@ fn profile_card(
     store: &Rc<RefCell<Store>>,
     avatars: &Avatars,
     user: &mm_types::User,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) -> gtk::Popover {
     let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
     column.set_margin_start(18);
@@ -2347,7 +2357,30 @@ fn profile_card(
         column.append(&facts);
     }
 
-    gtk::Popover::builder().child(&column).build()
+    let card = gtk::Popover::builder().child(&column).build();
+    // The one thing a card is for, after reading it: say something to
+    // this person. Not offered for the reader themself -- Mattermost
+    // has a self-DM and this is not how anyone reaches it -- nor for
+    // somebody who has left, who cannot be written to.
+    let me = store.borrow().me.clone();
+    if user.id != me && !user.is_deactivated() {
+        let message = gtk::Button::builder()
+            .label("Message")
+            .css_classes(["suggested-action"])
+            .margin_top(14)
+            .build();
+        let commands = commands.clone();
+        let who = user.id.clone();
+        let card = card.clone();
+        message.connect_clicked(move |_| {
+            // The server makes the conversation if there is not one
+            // yet, and answers with the channel to go to.
+            commands.send(Command::OpenDirect(who.clone())).ok();
+            card.popdown();
+        });
+        column.append(&message);
+    }
+    card
 }
 
 /// The smiley that opens the whole emoji table.
@@ -2531,6 +2564,7 @@ fn show_profile(
     item: &gtk::ListItem,
     store: &Rc<RefCell<Store>>,
     avatars: &Avatars,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
@@ -2544,7 +2578,7 @@ fn show_profile(
         // show, and an empty card would be worse than no card.
         return;
     };
-    let card = profile_card(store, avatars, &user);
+    let card = profile_card(store, avatars, &user, commands);
     card.set_parent(at);
     // Taken down and detached on close, or every click leaves another
     // popover parented to the same label.
@@ -2909,14 +2943,29 @@ fn attach_mentions(
             let caret = composer_caret(&view);
             let Some((_, prefix)) = mention_being_typed(&composer_text(&view), caret) else {
                 popup.popdown();
+                ui.mentions_refill.borrow_mut().take();
                 return;
             };
-            fill_mentions(&ui, &list, &prefix, channel(&ui).as_ref());
-            if list.row_at_index(0).is_none() {
-                popup.popdown();
-            } else {
-                popup.popup();
-            }
+            let draw = {
+                let ui = ui.clone();
+                let list = list.clone();
+                let popup = popup.clone();
+                let prefix = prefix.clone();
+                let channel = channel(&ui);
+                move || {
+                    fill_mentions(&ui, &list, &prefix, channel.as_ref());
+                    if list.row_at_index(0).is_none() {
+                        popup.popdown();
+                    } else {
+                        popup.popup();
+                    }
+                }
+            };
+            draw();
+            // The server's answer lands after this, and the popup is
+            // not in any list the redraw walks, so it keeps a way to
+            // draw itself again.
+            *ui.mentions_refill.borrow_mut() = Some(Rc::new(draw));
         });
     }
     {
@@ -3035,6 +3084,15 @@ fn accept_shortcode(view: &gtk::TextView, name: &str) {
     buffer.place_cursor(&caret);
 }
 
+/// How many names the local store has to offer before the server is
+/// asked for more. Below this the typing has probably reached somebody
+/// this client has never seen.
+const MENTIONS_ENOUGH: usize = 3;
+
+/// The shortest half-typed `@` worth a request. One letter matches a
+/// third of a company.
+const MENTIONS_SHORTEST: usize = 2;
+
 /// The popup's keys, while it is up: move, accept, dismiss.
 ///
 /// Capture phase, like the switcher's: a `GtkEntry` with the focus
@@ -3129,6 +3187,8 @@ fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str, channel: Option<&Ch
     if let Some(first) = first_selectable(list, 0, 1) {
         list.select_row(Some(&first));
     }
+    drop(store);
+    ui.ask_for_mentions(prefix, channel);
 }
 
 /// One of `@all`, `@channel`, `@here`, with what it does beside it.
@@ -4126,7 +4186,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
         let ctx = ctx.clone();
         let at = target.clone();
         click.connect_released(move |_, _, _, _| {
-            show_profile(&at, &item, &ctx.store, &ctx.avatars);
+            show_profile(&at, &item, &ctx.store, &ctx.avatars, &ctx.commands);
         });
         target.add_controller(click);
     }
@@ -7053,6 +7113,67 @@ impl Ui {
         self.sidebar_soon();
     }
 
+    /// Take in the names the server offered for a half-typed `@`.
+    fn on_mentions_like(&self, event: Event) {
+        let Event::MentionsLike {
+            channel,
+            prefix,
+            in_channel,
+            elsewhere,
+        } = event
+        else {
+            return;
+        };
+        // An answer to letters already typed past is not wrong, only
+        // late: the names still go in, but the popup is not redrawn
+        // from them.
+        let wanted = *self.mentions_asked.borrow() == prefix;
+        {
+            let mut store = self.store.borrow_mut();
+            store.extend_channel_roster(&channel, in_channel);
+            store.apply_users(elsewhere);
+        }
+        let refill = self.mentions_refill.borrow().clone();
+        if let (true, Some(refill)) = (wanted, refill) {
+            refill();
+        }
+    }
+
+    /// Ask the server for more names behind a half-typed `@`.
+    ///
+    /// Only when the store is short of them: on a small server, or
+    /// for a name already seen, the local list is the whole answer and
+    /// a request would be waste. And only once per prefix, because
+    /// this runs on every keystroke.
+    fn ask_for_mentions(&self, prefix: &str, channel: Option<&ChannelId>) {
+        let Some(channel) = channel else { return };
+        if prefix.chars().count() < MENTIONS_SHORTEST {
+            return;
+        }
+        let (enough, team) = {
+            let store = self.store.borrow();
+            (
+                store
+                    .mention_candidates(Some(channel), prefix, MENTIONS_OFFERED)
+                    .len()
+                    >= MENTIONS_ENOUGH,
+                store.teams.first().map(|team| team.id.clone()),
+            )
+        };
+        let Some(team) = team else { return };
+        if enough || *self.mentions_asked.borrow() == *prefix {
+            return;
+        }
+        prefix.clone_into(&mut self.mentions_asked.borrow_mut());
+        self.commands
+            .send(Command::MentionsLike {
+                team,
+                channel: channel.clone(),
+                prefix: prefix.to_owned(),
+            })
+            .ok();
+    }
+
     /// Put a thread's half-typed reply back in its box.
     fn restore_thread_draft(&self, root: &PostId) {
         let text = {
@@ -7907,6 +8028,7 @@ impl Ui {
                 }
             }
             Event::CustomEmoji(_) | Event::EmojiImage { .. } => self.on_emoji(event),
+            Event::MentionsLike { .. } => self.on_mentions_like(event),
             Event::ChannelRoster { channel, users } => {
                 self.store
                     .borrow_mut()

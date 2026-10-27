@@ -296,6 +296,45 @@ pub fn parse_user_search(resp: &HttpResponse) -> Result<Vec<User>, ApiError> {
     parse_json(resp, "POST /users/search")
 }
 
+/// People whose name begins with what is being typed after an `@`.
+///
+/// **`in_team` is required whenever `in_channel` is given** -- without
+/// it the server answers 500, not 400, with "Team id parameter is
+/// required to autocomplete by channel", which reads like a server
+/// fault rather than a missing parameter.
+///
+/// The answer is two lists: who is in the channel, and who is on the
+/// team but not in it. Both are worth offering -- Mattermost offers
+/// the second under a heading, because mentioning somebody who cannot
+/// read the message is a mistake worth seeing before it is made.
+#[must_use]
+pub fn autocomplete_users(
+    team: &TeamId,
+    channel: &ChannelId,
+    prefix: &str,
+    limit: u32,
+) -> HttpRequest {
+    HttpRequest::get(format!("{API}/users/autocomplete"))
+        .q("in_team", team)
+        .q("in_channel", channel)
+        .q("name", prefix)
+        .q("limit", limit)
+}
+
+/// Who the server offered, in the channel and outside it.
+#[derive(Debug, Default, Deserialize)]
+pub struct Autocompleted {
+    /// In the channel. The server calls this field `users`.
+    #[serde(default)]
+    pub users: Vec<User>,
+    #[serde(default)]
+    pub out_of_channel: Vec<User>,
+}
+
+pub fn parse_autocomplete(resp: &HttpResponse) -> Result<Autocompleted, ApiError> {
+    parse_json(resp, "GET /users/autocomplete")
+}
+
 /// Join a channel.
 ///
 /// The answer is the new membership; the channel itself has to be
