@@ -196,6 +196,52 @@ impl Post {
             == Some("true")
     }
 
+    /// The link previews the server resolved for URLs in this message.
+    ///
+    /// Read out of `metadata.embeds` by hand rather than derived, because
+    /// an embed is a tagged union whose `data` is `null` for every type
+    /// but this one -- and `null` for this one too until the server has
+    /// fetched the page, or forever if link previews are switched off.
+    /// A preview with no title and no description is not drawn: a card
+    /// showing only a URL says less than the link already in the text.
+    #[must_use]
+    pub fn link_previews(&self) -> Vec<LinkPreview> {
+        let Some(embeds) = self
+            .metadata
+            .get("embeds")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Vec::new();
+        };
+        embeds
+            .iter()
+            .filter(|embed| {
+                embed.get("type").and_then(serde_json::Value::as_str) == Some("opengraph")
+            })
+            .filter_map(|embed| {
+                let data = embed.get("data")?;
+                let text = |key: &str| {
+                    data.get(key)
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                let preview = LinkPreview {
+                    url: embed
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    title: text("title"),
+                    description: text("description"),
+                    site_name: text("site_name"),
+                    image: first_image(data),
+                };
+                (!preview.title.is_empty() || !preview.description.is_empty()).then_some(preview)
+            })
+            .collect()
+    }
+
     /// The reactions the server attached to this post, or `None` when the
     /// endpoint did not include metadata at all.
     ///
@@ -307,6 +353,74 @@ impl PostList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Google Meet invitation renders as a card, which is the whole
+    /// point of `metadata.embeds`: the server has already fetched the
+    /// page, so the client draws what it found instead of showing a bare
+    /// URL. The other embed types carry `data: null` and must not
+    /// produce an empty card.
+    #[test]
+    fn link_previews_are_read_out_of_the_embeds_metadata() {
+        let post = Post {
+            metadata: serde_json::json!({
+                "embeds": [
+                    { "type": "link", "url": "https://jira.example/PP-1", "data": null },
+                    {
+                        "type": "opengraph",
+                        "url": "https://meet.google.com/oty-uizw-zhg",
+                        "data": {
+                            "title": "Meet",
+                            "description": "Real-time meetings by Google.",
+                            "site_name": "Google",
+                            "images": [
+                                { "url": "", "secure_url": "https://ssl.gstatic.com/meet.png" }
+                            ]
+                        }
+                    },
+                    {
+                        "type": "opengraph",
+                        "url": "https://nothing.example/",
+                        "data": { "title": "", "description": "" }
+                    }
+                ]
+            }),
+            ..Post::default()
+        };
+        assert_eq!(
+            post.link_previews(),
+            [LinkPreview {
+                url: "https://meet.google.com/oty-uizw-zhg".into(),
+                title: "Meet".into(),
+                description: "Real-time meetings by Google.".into(),
+                site_name: "Google".into(),
+                image: Some("https://ssl.gstatic.com/meet.png".into()),
+            }]
+        );
+
+        // No metadata at all, and metadata with no embeds, are both
+        // simply no previews rather than a panic.
+        assert!(Post::default().link_previews().is_empty());
+        assert!(
+            Post {
+                metadata: serde_json::json!({ "embeds": null }),
+                ..Post::default()
+            }
+            .link_previews()
+            .is_empty()
+        );
+        // An image list with nothing usable in it still gives a card.
+        let bare = Post {
+            metadata: serde_json::json!({
+                "embeds": [{
+                    "type": "opengraph",
+                    "url": "https://x.example/",
+                    "data": { "title": "X", "images": [] }
+                }]
+            }),
+            ..Post::default()
+        };
+        assert_eq!(bare.link_previews()[0].image, None);
+    }
 
     fn post(id: &str, root: &str) -> Post {
         Post {
@@ -671,4 +785,33 @@ mod webhook_tests {
             .expect("parses");
         assert_eq!(blank.override_username(), None);
     }
+}
+
+/// What the server found behind a link in a message.
+///
+/// Not a serde type: the server's own shape is a union with a `data`
+/// that is `null` for most of its variants, so it is read field by field
+/// out of the opaque metadata instead. See `Post::link_previews`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkPreview {
+    pub url: String,
+    pub title: String,
+    pub description: String,
+    pub site_name: String,
+    /// The first image the page offered, if any. `secure_url` is
+    /// preferred over `url`: the plain one is often `http://` even when
+    /// the page is served over TLS.
+    pub image: Option<String>,
+}
+
+/// The first usable image URL in an `OpenGraph` payload.
+fn first_image(data: &serde_json::Value) -> Option<String> {
+    let images = data.get("images")?.as_array()?;
+    images.iter().find_map(|image| {
+        ["secure_url", "url"]
+            .iter()
+            .filter_map(|key| image.get(*key).and_then(serde_json::Value::as_str))
+            .find(|url| !url.is_empty())
+            .map(ToOwned::to_owned)
+    })
 }

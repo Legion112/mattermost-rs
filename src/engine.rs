@@ -141,6 +141,8 @@ enum Download {
         user: UserId,
         version: mm_types::Timestamp,
     },
+    /// A link preview's picture, from somebody else's web server.
+    Link { url: String },
 }
 
 /// Fetch an image without holding up the command loop.
@@ -194,6 +196,15 @@ fn spawn_download(a: &Active, events: async_channel::Sender<Event>, what: Downlo
                     image
                 };
                 let _ = events.send(Event::Avatar { user, image }).await;
+            }
+            Download::Link { url } => {
+                // No cache and no complaint: the card still reads
+                // without its picture, and a dead image host must not
+                // put an error in front of the reader.
+                let Ok(image) = client.fetch_public(&url).await else {
+                    return;
+                };
+                let _ = events.send(Event::LinkImage { url, image }).await;
             }
         }
     });
@@ -477,6 +488,9 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         }
         Command::FetchAvatar { user, version } => {
             spawn_download(a, events.clone(), Download::Avatar { user, version });
+        }
+        Command::FetchLinkImage(url) => {
+            spawn_download(a, events.clone(), Download::Link { url });
         }
         Command::React { post, emoji, add } => {
             // Best effort, like MarkRead: the `reaction_added` event
@@ -962,6 +976,11 @@ async fn sync(
             snapshot.users.clone_from(&users);
             let _ = events.send(Event::Users(users)).await;
         }
+        // Who is at their desk, for the dots on the sidebar's faces.
+        // Not worth a complaint if it fails: every dot then reads
+        // offline, which is what it read a moment ago anyway.
+        let ids: Vec<UserId> = dm_ids.iter().map(UserId::new).collect();
+        send_statuses(client, &ids, events).await;
     }
     // What the server actually has, now that it has all been asked for.
     // The only place allowed to remove a channel: every `apply_*` merges,
@@ -999,6 +1018,20 @@ async fn send_snapshot(
     let _ = events.send(Event::Users(held.users)).await;
 }
 
+/// Ask for a batch of presences and pass on whatever comes back.
+///
+/// Silent on failure by design: a dot that says offline when somebody is
+/// online is a smaller wrong than an error in front of the reader, and
+/// the WebSocket corrects it the moment they do anything.
+async fn send_statuses(client: &Client, users: &[UserId], events: &async_channel::Sender<Event>) {
+    if users.is_empty() {
+        return;
+    }
+    if let Ok(statuses) = fetch(client, &rest::statuses_for(users), rest::parse_statuses).await {
+        let _ = events.send(Event::Statuses(statuses)).await;
+    }
+}
+
 async fn open_channel(
     client: &Client,
     channel: &ChannelId,
@@ -1026,8 +1059,17 @@ async fn open_channel(
     }
     // Not worth a complaint: without it `@` offers only the people who
     // have spoken, which is a smaller list rather than a broken one.
+    let roster: Vec<UserId> = members
+        .as_ref()
+        .map(|members| members.iter().map(|u| u.id.clone()).collect())
+        .unwrap_or_default();
     if let Ok(members) = members {
-        let _ = events.send(Event::Users(members)).await;
+        let _ = events
+            .send(Event::ChannelRoster {
+                channel: channel.clone(),
+                users: members,
+            })
+            .await;
     }
 
     match posts {
@@ -1062,6 +1104,10 @@ async fn open_channel(
             let _ = events.send(Event::Failed(e)).await;
         }
     }
+
+    // Last, once the messages are drawn: the dots are decoration, and a
+    // round trip for them in front of the conversation would be felt.
+    send_statuses(client, &roster, events).await;
 }
 
 /// Connect, read frames, and reconnect with backoff.

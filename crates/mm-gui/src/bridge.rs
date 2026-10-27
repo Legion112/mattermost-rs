@@ -65,6 +65,9 @@ pub enum Command {
     /// Fetch an image attached to a message. `preview` asks for the
     /// server's downscaled copy, which is what a message row wants.
     FetchFile { file: FileId, preview: bool },
+    /// Fetch the picture a link preview offered, from whatever host the
+    /// link points at. Asked once per URL, and never with a credential.
+    FetchLinkImage(String),
     /// Fetch one person's avatar. The window asks per author it has not
     /// drawn yet, and asks once: the engine answers with bytes either from
     /// its file cache or from the server.
@@ -141,12 +144,28 @@ pub enum Event {
         user: UserId,
         image: Vec<u8>,
     },
+    /// A link preview's picture, keyed by the URL it was asked for.
+    LinkImage {
+        url: String,
+        image: Vec<u8>,
+    },
     /// An attached image, as encoded image bytes.
     File {
         file: FileId,
         image: Vec<u8>,
     },
     Users(Vec<User>),
+    /// Where people are, for the dot on their face.
+    Statuses(Vec<mm_types::Status>),
+    /// Who is in one channel, from the roster fetched when it opened.
+    ///
+    /// Separate from `Users` because the channel is the point: `users`
+    /// is everyone this client has ever seen, and `@` must offer the
+    /// people in the conversation first.
+    ChannelRoster {
+        channel: ChannelId,
+        users: Vec<User>,
+    },
     /// The reader's preferences, which carry saved posts among much else.
     Preferences(Vec<mm_types::Preference>),
     /// The threads this reader follows, with the account-wide totals

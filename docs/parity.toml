@@ -273,18 +273,21 @@ status   = "partial"
 endpoints = ["GET /api/v4/users"]
 verified_against = "12.0.1"
 notes = """
-Typing `@` offers the channel's members, with the name beside the username \
-the way Mattermost shows it: the username is what the mention becomes, the \
-name is what the reader was thinking of. Tab or Return completes, Up and Down \
-move, Escape dismisses. In both composers. Ranked locally -- the username \
-being typed first, then somebody whose human name begins with it, then a \
-username merely containing it -- over the channel's roster, fetched once when \
-the channel opens rather than per keystroke the way the web app does it. \
-Verified on a live account: `@ar` offers aragorn, alukard, lowroar and \
-yaarny, and Tab completes to `@aragorn `. NOT built: `@all`, `@channel` and \
-`@here`, and anybody outside the open channel -- there is no \
-`/users/autocomplete` call, so mentioning somebody who is not a member is \
-typed out in full."""
+Typing `@` offers the open channel's members under a CHANNEL MEMBERS heading \
+and everybody else under NOT IN CHANNEL, with the name beside the username \
+the way Mattermost shows it. Tab or Return completes, Up and Down move over \
+the headings, Escape dismisses. In both composers, each knowing its own \
+channel -- the thread composer takes it from the root post, not from whatever \
+is open behind it. Ranked locally on four keys: the people in this \
+conversation first, then match quality (username prefix, then human-name \
+prefix, then a username merely containing it), then whoever spoke here most \
+recently, and the alphabet only to break a tie. The roster is fetched once \
+when the channel opens rather than per keystroke the way the web app does it; \
+a channel never opened falls back to everyone known. Verified on a live \
+account: `@` in Клиенты offers aragorn first, who had just posted, where it \
+previously offered an alphabetical mix drawn from every channel visited. NOT \
+built: `@all`, `@channel` and `@here`, and there is no `/users/autocomplete` \
+call, so somebody this client has never seen is typed out in full."""
 
 [[feature]]
 id       = "posts.warm_channels"
@@ -343,3 +346,81 @@ notes = """
 No message search, and no searching for people or for channels the reader is \
 not already in. The largest remaining gap against the Electron client, and the \
 one most likely to send a reader back to it."""
+
+[[feature]]
+id       = "posts.link_previews"
+area     = "posts"
+upstream = "webapp"
+status   = "done"
+endpoints = ["GET /api/v4/channels/{channel_id}/posts"]
+verified_against = ""
+notes = """
+A URL the server has already resolved draws as a card under the message: the \
+site name, the title as a link, the description, and the picture the page \
+offered. Read out of `metadata.embeds`, where only the `opengraph` entries \
+carry a `data` at all -- the others are `null`, and a card with neither title \
+nor description is not drawn, because a card showing only a URL says less \
+than the link already in the text. The picture is fetched straight from \
+whoever hosts it, over https only and deliberately **without the session \
+token**: sending a Mattermost credential to a third party because somebody \
+pasted a URL would be a security bug. Asked once per URL and held in memory \
+for the session; a dead image host leaves the card's text and no picture."""
+
+[[feature]]
+id       = "users.presence"
+area     = "users"
+upstream = "server-api"
+status   = "partial"
+endpoints = ["POST /api/v4/users/status/ids"]
+ws_events = ["status_change"]
+verified_against = "12.0.1"
+notes = """
+A dot in the corner of every face: green for online, amber for away, red for \
+do not disturb, and nothing at all for offline, which is what Mattermost \
+does rather than draw a column of grey dots about people who are simply not \
+at work. Fetched in one POST for the sidebar's DM partners after a sync and \
+for a channel's roster after it opens -- the ids go in the body because a \
+roster is two hundred of them, which is past the usual proxy limit and would \
+put everyone the reader is looking at into an access log. Kept current by \
+`status_change`, and a repeat of what is already held produces no change so \
+a second device reporting the same state does not redraw every row. An \
+unrecognised status reads as offline rather than failing the batch. \
+Verified on a live account: aragorn's face carries a green dot. NOT built: \
+setting your own status, and there is no periodic re-poll -- a person who \
+goes away while nothing else happens keeps their old dot until the server \
+says otherwise."""
+
+[[feature]]
+id       = "posts.typing"
+area     = "posts"
+upstream = "webapp"
+status   = "partial"
+endpoints = []
+ws_events = ["typing"]
+verified_against = ""
+notes = """
+"somebody is typing…" between the last message and the box being typed into, \
+naming one person, two by name, or "Several people" beyond that. Held in the \
+window rather than the store because it expires on a clock and the store is \
+deliberately clock-free so that replaying events stays exact; an entry older \
+than seven seconds is dropped, which is longer than the server's own \
+five-second `TimeBetweenUserTypingUpdatesMilliseconds` throttle so the line \
+does not flicker between a typist's keystrokes. NOT built: **sending** \
+`user_typing`, so colleagues are not told when this client is typing. The \
+socket loop only reads; announcing would mean splitting the stream so a \
+writer can share it."""
+
+[[feature]]
+id       = "posts.message_times"
+area     = "posts"
+upstream = "webapp"
+status   = "done"
+endpoints = []
+verified_against = ""
+notes = """
+The channel shows a clock time under a day separator, the way Mattermost \
+does. The thread panel has no separators, so it says how long ago instead -- \
+"6 days ago", "last week", "2 weeks ago" -- and falls back to a date past a \
+month. Either way the whole moment, down to the second, is the tooltip on \
+the time: two messages a moment apart show the same clock time, and that is \
+where a reader goes to tell them apart."""

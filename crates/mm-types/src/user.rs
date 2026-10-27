@@ -136,6 +136,32 @@ pub enum Presence {
 }
 
 impl Presence {
+    /// Every variant, so a test over all of them can be exhaustive.
+    pub const ALL: &'static [Self] = &[Self::Online, Self::Away, Self::Dnd, Self::Offline];
+
+    /// Read the wire form leniently: anything unrecognised is offline.
+    ///
+    /// Deliberately not the `Deserialize` derive, which rejects an
+    /// unknown value and would take a whole batch of statuses down with
+    /// it the first time the server adds a fifth one.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|known| known.as_str() == raw)
+            .unwrap_or(Self::Offline)
+    }
+
+    /// What a tooltip says, which is not always the wire form.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dnd => "do not disturb",
+            other => other.as_str(),
+        }
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -212,6 +238,20 @@ mod tests {
         assert_eq!(u.username, "a");
         assert_eq!(u.email, "");
         assert!(!u.is_bot);
+    }
+
+    /// Parsing is lenient where deserializing is not: a presence the
+    /// client has never heard of must read as offline rather than take
+    /// a whole batch of statuses down with it.
+    #[test]
+    fn presence_parses_leniently_and_names_itself_for_a_tooltip() {
+        for known in Presence::ALL {
+            assert_eq!(Presence::parse(known.as_str()), *known);
+            assert!(!known.label().is_empty());
+        }
+        assert_eq!(Presence::parse("in_a_meeting"), Presence::Offline);
+        assert_eq!(Presence::parse(""), Presence::Offline);
+        assert_eq!(Presence::Dnd.label(), "do not disturb");
     }
 
     #[test]

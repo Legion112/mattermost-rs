@@ -91,6 +91,8 @@ mod imp {
         /// whose text lives in `body`.
         pub blocks: RefCell<Vec<super::BlockView>>,
         pub time: RefCell<String>,
+        pub ago: RefCell<String>,
+        pub full_time: RefCell<String>,
         /// A trailing line for attachments and reply counts; empty hides it.
         pub meta: RefCell<String>,
         /// A day boundary rather than a message. `body` carries the label.
@@ -119,6 +121,8 @@ mod imp {
         pub images: RefCell<Vec<super::Attachment>>,
         /// Webhook attachments, already rendered.
         pub cards: RefCell<Vec<super::AttachmentView>>,
+        pub previews: RefCell<Vec<mm_types::LinkPreview>>,
+        pub presence: std::cell::Cell<mm_types::Presence>,
     }
 
     #[glib::object_subclass]
@@ -143,6 +147,13 @@ pub struct PostRowFields<'a> {
     pub body: &'a str,
     pub blocks: Vec<BlockView>,
     pub time: &'a str,
+    /// The same moment said as a distance -- "2 weeks ago" -- which is
+    /// what the thread pane shows, where there are no day separators to
+    /// put a bare clock time in any context.
+    pub ago: &'a str,
+    /// The whole date and time, for the tooltip on the clock. A message
+    /// says "17:01" and the reader needs to know which day that was.
+    pub full_time: &'a str,
     pub meta: &'a str,
     pub flags: PostRowFlags,
     pub reactions: Vec<mm_core::ReactionSummary>,
@@ -150,6 +161,10 @@ pub struct PostRowFields<'a> {
     pub replies: i64,
     pub images: Vec<Attachment>,
     pub cards: Vec<AttachmentView>,
+    /// What the server found behind the links in the message.
+    pub previews: Vec<mm_types::LinkPreview>,
+    /// Where the author is, for the dot on their face.
+    pub presence: mm_types::Presence,
     pub quick_reactions: Vec<String>,
     pub plain_body: String,
 }
@@ -190,6 +205,8 @@ impl PostRow {
         inner.body.replace(fields.body.to_owned());
         inner.blocks.replace(fields.blocks);
         inner.time.replace(fields.time.to_owned());
+        inner.ago.replace(fields.ago.to_owned());
+        inner.full_time.replace(fields.full_time.to_owned());
         inner.meta.replace(fields.meta.to_owned());
         inner.voice.set(fields.flags.voice);
         inner.grouped.set(fields.flags.grouped);
@@ -200,6 +217,8 @@ impl PostRow {
         inner.quick_reactions.replace(fields.quick_reactions);
         inner.plain_body.replace(fields.plain_body);
         inner.cards.replace(fields.cards);
+        inner.previews.replace(fields.previews);
+        inner.presence.set(fields.presence);
         this
     }
 
@@ -242,9 +261,12 @@ impl PostRow {
             && *a.author.borrow() == *b.author.borrow()
             && *a.body.borrow() == *b.body.borrow()
             && *a.time.borrow() == *b.time.borrow()
+            && *a.ago.borrow() == *b.ago.borrow()
             && *a.meta.borrow() == *b.meta.borrow()
             && *a.blocks.borrow() == *b.blocks.borrow()
             && *a.cards.borrow() == *b.cards.borrow()
+            && *a.previews.borrow() == *b.previews.borrow()
+            && a.presence.get() == b.presence.get()
             && *a.images.borrow() == *b.images.borrow()
             && *a.reactions.borrow() == *b.reactions.borrow()
             && *a.quick_reactions.borrow() == *b.quick_reactions.borrow()
@@ -264,6 +286,16 @@ impl PostRow {
     #[must_use]
     pub fn cards(&self) -> Vec<AttachmentView> {
         self.imp().cards.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn previews(&self) -> Vec<mm_types::LinkPreview> {
+        self.imp().previews.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn presence(&self) -> mm_types::Presence {
+        self.imp().presence.get()
     }
 
     #[must_use]
@@ -329,6 +361,16 @@ impl PostRow {
     #[must_use]
     pub fn time(&self) -> String {
         self.imp().time.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn ago(&self) -> String {
+        self.imp().ago.borrow().clone()
+    }
+
+    #[must_use]
+    pub fn full_time(&self) -> String {
+        self.imp().full_time.borrow().clone()
     }
 
     #[must_use]

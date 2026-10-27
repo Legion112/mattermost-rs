@@ -88,6 +88,38 @@ impl Client {
         self.token.is_some()
     }
 
+    /// Fetch bytes from a URL that is not this server.
+    ///
+    /// A link preview's image is hosted by whoever the link points at, so
+    /// this deliberately builds the request by hand and **never attaches
+    /// the session token**: sending a Mattermost credential to an
+    /// arbitrary third party because somebody pasted a URL would be a
+    /// security bug, not a convenience. Only `https` is followed, for the
+    /// same reason the rest of the client refuses plain HTTP.
+    pub async fn fetch_public(&self, url: &str) -> Result<Vec<u8>, TransportError> {
+        let parsed = Url::parse(url).map_err(|e| TransportError::Url(format!("{url}: {e}")))?;
+        if parsed.scheme() != "https" {
+            return Err(TransportError::Url(format!("{url}: not https")));
+        }
+        let response = self
+            .http
+            .get(parsed)
+            .send()
+            .await
+            .map_err(|e| TransportError::Network(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(TransportError::Network(format!(
+                "{url}: {}",
+                response.status()
+            )));
+        }
+        response
+            .bytes()
+            .await
+            .map(|bytes| bytes.to_vec())
+            .map_err(|e| TransportError::Network(e.to_string()))
+    }
+
     /// Perform one request built by `mm-api`.
     ///
     /// Note what is *not* sent: no cookie jar. The server checks the

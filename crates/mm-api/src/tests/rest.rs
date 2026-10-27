@@ -757,3 +757,32 @@ fn saving_a_post_writes_a_preference() {
     let unsave = set_saved(&UserId::new("u1"), &PostId::new("p1"), false);
     assert_eq!(unsave.path, "/api/v4/users/u1/preferences/delete");
 }
+
+/// Presence for a set of people goes in one POST with the ids in the
+/// body, not a query string: a channel roster is two hundred ids, which
+/// is past the usual proxy limit and would put everyone the reader is
+/// looking at into an access log.
+#[test]
+fn statuses_for_sends_the_ids_in_the_body() {
+    let request = statuses_for(&[UserId::new("u1"), UserId::new("u2")]);
+    assert_eq!(request.path, "/api/v4/users/status/ids");
+    assert_eq!(request.method, Method::Post);
+    assert!(request.query.is_empty());
+    match &request.body {
+        crate::http::Body::Json(json) => assert_eq!(json, r#"["u1","u2"]"#),
+        other => panic!("expected a JSON body, got {other:?}"),
+    }
+    // Asking about nobody is still well-formed, which is what keeps the
+    // caller from needing a special case for an empty channel.
+    match &statuses_for(&[]).body {
+        crate::http::Body::Json(json) => assert_eq!(json, "[]"),
+        other => panic!("expected a JSON body, got {other:?}"),
+    }
+
+    let statuses = parse_statuses(&ok(
+        r#"[{"user_id":"u1","status":"online","manual":false,"last_activity_at":17}]"#,
+    ))
+    .unwrap();
+    assert_eq!(statuses[0].presence(), mm_types::Presence::Online);
+    assert!(parse_statuses(&ok("not json")).is_err());
+}

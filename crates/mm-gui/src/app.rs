@@ -91,6 +91,16 @@ struct Ui {
     /// built on this thread, so the engine sends bytes and the decode
     /// happens here.
     avatars: Rc<RefCell<HashMap<UserId, gdk::Texture>>>,
+    /// Who has typed in a channel lately, and when they last did.
+    ///
+    /// View state, not store state: it expires on a clock, and the store
+    /// is deliberately clock-free so that replaying events is exact. An
+    /// entry older than `TYPING_LIFETIME` is simply not shown.
+    typing: Typing,
+    typing_line: gtk::Label,
+    /// Pictures fetched for link previews, shared with the post rows that
+    /// draw them.
+    link_images: LinkImages,
     /// Decoded images attached to messages, by file id. Seeded from the
     /// `mini_preview` thumbnail that already rides in the metadata, then
     /// replaced by the real image when it arrives.
@@ -199,6 +209,26 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
     app.run_with_args::<&str>(&[])
 }
 
+/// The one hover toolbar currently on screen, so the next one can take
+/// it down.
+///
+/// Leave events alone are not enough: `ListView` recycles a row widget
+/// under a motionless pointer, so a row that was hovered can be rebound
+/// to a different message without ever being left, and its toolbar stays
+/// up over somebody else's words. Both post lists share one of these, so
+/// the thread pane cannot leave one showing behind the channel either.
+type ShownTools = Rc<RefCell<Option<gtk::Box>>>;
+
+/// Pictures fetched for link previews, keyed by the URL they came from.
+///
+/// A present key means the picture has been asked for, so a row drawn
+/// again -- and a recycled row is drawn constantly -- does not ask a
+/// second time. `None` is "asked, not here yet".
+type LinkImages = Rc<RefCell<HashMap<String, Option<gdk::Texture>>>>;
+
+/// Who has typed in each channel lately, and when they last did.
+type Typing = Rc<RefCell<HashMap<ChannelId, Vec<(UserId, std::time::Instant)>>>>;
+
 /// The thread panel: a post list, a heading with a close button, and a
 /// composer that replies into the open thread.
 ///
@@ -209,6 +239,8 @@ fn build_thread_pane(
     store: &Rc<RefCell<Store>>,
     server: &Rc<RefCell<String>>,
     viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    shown: &ShownTools,
+    links: &LinkImages,
 ) -> (
     gio::ListStore,
     gtk::ListView,
@@ -218,7 +250,7 @@ fn build_thread_pane(
     gtk::ScrolledWindow,
 ) {
     let (thread_posts, thread_view, thread_scroller) =
-        build_post_list(commands, store, server, viewer);
+        build_post_list(commands, store, server, viewer, shown, links, true);
     let thread_title = gtk::Label::builder()
         .label("Thread")
         .xalign(0.0)
@@ -332,7 +364,17 @@ fn install_styles() {
              background: alpha(currentColor, 0.1); \
              border-radius: 4px; \
              padding: 0 6px; \
-         }",
+         }\n\
+         .mmrs-dot { \
+             min-width: 7px; \
+             min-height: 7px; \
+             border-radius: 9999px; \
+             border: 2px solid @view_bg_color; \
+             background: @insensitive_fg_color; \
+         }\n\
+         .mmrs-dot.online { background: #3db887; }\n\
+         .mmrs-dot.away { background: #ffbc1f; }\n\
+         .mmrs-dot.dnd { background: #d24b4e; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -410,24 +452,19 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let server = Rc::new(RefCell::new(String::new()));
 
     let viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>> = Rc::new(RefCell::new(None));
-    let (posts, post_view, scroller) = build_post_list(commands, &store, &server, &viewer);
+    let shown_tools: ShownTools = Rc::new(RefCell::new(None));
+    let link_images: LinkImages = Rc::new(RefCell::new(HashMap::new()));
+    let (posts, post_view, scroller) = build_post_list(
+        commands,
+        &store,
+        &server,
+        &viewer,
+        &shown_tools,
+        &link_images,
+        false,
+    );
 
-    let composer = gtk::Entry::builder()
-        .placeholder_text("Write a message…")
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(6)
-        .margin_bottom(12)
-        .sensitive(false)
-        .build();
-
-    let status = gtk::Label::builder()
-        .xalign(0.0)
-        .margin_start(12)
-        .margin_bottom(4)
-        .css_classes(["dim-label", "caption"])
-        .label("starting…")
-        .build();
+    let (composer, status) = build_composer_row();
 
     // The conversation, the Threads view and the Drafts view take turns
     // in the same space. The status line and the composer stay put under
@@ -435,29 +472,25 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     // to send to.
     let (threads_list, drafts_list, unreads_tab, middle) = build_middle(&scroller);
 
+    let typing_line = build_typing_line();
+
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&middle);
+    content.append(&typing_line);
     content.append(&status);
     content.append(&composer);
 
     let (thread_posts, thread_view, thread_pane, thread_close, thread_composer, thread_scroller) =
-        build_thread_pane(commands, &store, &server, &viewer);
+        build_thread_pane(
+            commands,
+            &store,
+            &server,
+            &viewer,
+            &shown_tools,
+            &link_images,
+        );
 
-    let conversation = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&content)
-        .end_child(&thread_pane)
-        .resize_end_child(false)
-        .shrink_end_child(false)
-        .build();
-
-    let split = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&sidebar_pane)
-        .end_child(&conversation)
-        .resize_start_child(false)
-        .position(260)
-        .build();
+    let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
     let (title, refresh, login, stack, window) = build_window(app, &split);
 
@@ -490,6 +523,9 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
         avatars: Rc::new(RefCell::new(HashMap::new())),
+        typing: Rc::new(RefCell::new(HashMap::new())),
+        typing_line,
+        link_images: Rc::clone(&link_images),
         images: Rc::new(RefCell::new(HashMap::new())),
         viewer: Rc::clone(&viewer),
         asked: Rc::new(RefCell::new(HashSet::new())),
@@ -509,8 +545,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     wire_views(&ui);
     wire_switcher(&ui, &window);
     wire_unread_filter(&ui, &unread_only);
-    attach_mentions(&ui, &composer);
-    attach_mentions(&ui, &thread_composer);
+    attach_both_composers(&ui, &composer, &thread_composer);
 
     wire_thread(&ui, &thread_close, &thread_composer, commands);
     wire_login(&login, commands);
@@ -978,22 +1013,138 @@ fn mention_being_typed(text: &str, caret: usize) -> Option<(usize, String)> {
     Some((upto[..at].chars().count(), prefix.to_owned()))
 }
 
+/// The sidebar, the conversation and the thread panel, side by side.
+///
+/// Two nested `Paned` rather than one `OverlaySplitView` each side: the
+/// thread panel keeps its width when the window is resized, and the
+/// sidebar keeps its own, which is what the reader set them to.
+fn build_panes(
+    sidebar: &gtk::Box,
+    content: &gtk::Box,
+    thread: &gtk::Box,
+) -> (gtk::Paned, gtk::Paned) {
+    let conversation = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(content)
+        .end_child(thread)
+        .resize_end_child(false)
+        .shrink_end_child(false)
+        .build();
+    let split = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(sidebar)
+        .end_child(&conversation)
+        .resize_start_child(false)
+        .position(260)
+        .build();
+    (conversation, split)
+}
+
+/// A face with a presence dot in its bottom corner.
+///
+/// An overlay rather than a badge: `adw::Avatar` has no notion of one,
+/// and a dot drawn as a sibling would take width from the message.
+fn face_with_dot(size: i32) -> (gtk::Overlay, adw::Avatar, gtk::Box) {
+    let face = adw::Avatar::builder()
+        .size(size)
+        .show_initials(true)
+        .valign(gtk::Align::Start)
+        .build();
+    let dot = gtk::Box::builder()
+        .css_classes(["mmrs-dot"])
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::End)
+        .visible(false)
+        .build();
+    let gutter = gtk::Overlay::builder().child(&face).build();
+    gutter.add_overlay(&dot);
+    gutter.set_valign(gtk::Align::Start);
+    (gutter, face, dot)
+}
+
+/// Colour the dot, or hide it for somebody who is not there.
+///
+/// Offline is drawn as nothing rather than a grey dot: Mattermost does
+/// the same, and a column of grey dots beside every old message is
+/// noise about people who are simply not at work.
+fn set_presence(dot: &gtk::Box, presence: mm_types::Presence) {
+    for state in mm_types::Presence::ALL {
+        dot.remove_css_class(state.as_str());
+    }
+    if presence == mm_types::Presence::Offline {
+        dot.set_visible(false);
+        return;
+    }
+    dot.add_css_class(presence.as_str());
+    dot.set_tooltip_text(Some(presence.label()));
+    dot.set_visible(true);
+}
+
+/// The box messages are typed into, and the status line above it.
+///
+/// Insensitive until a channel is open: a composer that accepts text
+/// with nowhere to send it is a message the reader will lose.
+fn build_composer_row() -> (gtk::Entry, gtk::Label) {
+    let composer = gtk::Entry::builder()
+        .placeholder_text("Write a message…")
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(12)
+        .sensitive(false)
+        .build();
+    let status = gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_bottom(4)
+        .css_classes(["dim-label", "caption"])
+        .label("starting…")
+        .build();
+    (composer, status)
+}
+
+/// The "somebody is typing" line, between the last message and the box
+/// being typed into, which is where Mattermost puts it.
+///
+/// Hidden when nobody is, so it takes no height from the conversation
+/// and the messages do not shift up and down as people type.
+fn build_typing_line() -> gtk::Label {
+    gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(14)
+        .margin_bottom(2)
+        .visible(false)
+        .css_classes(["dim-label", "caption"])
+        .build()
+}
+
+/// Give both composers their `@` popup.
+///
+/// Each is told which conversation it is in, so the names it offers are
+/// that channel's members. The thread's channel comes from its root
+/// post, never from whatever is open behind it -- the same mistake that
+/// once sent replies to the wrong channel.
+fn attach_both_composers(ui: &Ui, composer: &gtk::Entry, thread_composer: &gtk::Entry) {
+    attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
+    attach_mentions(ui, thread_composer, |ui| {
+        let root = ui.thread_root.borrow().clone()?;
+        let store = ui.store.borrow();
+        store.posts.get(&root).map(|post| post.channel_id.clone())
+    });
+}
+
 /// Offer the people a half-typed `@` might mean, and complete it.
 ///
 /// Both composers get one: a mention is as likely in a reply as in a
 /// message, and Mattermost offers it in both.
-fn attach_mentions(ui: &Ui, entry: &gtk::Entry) {
+fn attach_mentions(
+    ui: &Ui,
+    entry: &gtk::Entry,
+    channel: impl Fn(&Ui) -> Option<ChannelId> + 'static,
+) {
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Browse)
         .css_classes(["navigation-sidebar"])
-        .build();
-    let heading = gtk::Label::builder()
-        .label("CHANNEL MEMBERS")
-        .xalign(0.0)
-        .margin_start(12)
-        .margin_top(6)
-        .margin_bottom(2)
-        .css_classes(["dim-label", "caption-heading"])
         .build();
     // Sized to what is in it, not to the space available: a popover
     // over one name should be one name tall.
@@ -1005,7 +1156,6 @@ fn attach_mentions(ui: &Ui, entry: &gtk::Entry) {
         .build();
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.set_size_request(MENTIONS_WIDTH, -1);
-    column.append(&heading);
     column.append(&scroll);
 
     let popup = gtk::Popover::builder()
@@ -1026,7 +1176,7 @@ fn attach_mentions(ui: &Ui, entry: &gtk::Entry) {
                 popup.popdown();
                 return;
             };
-            fill_mentions(&ui, &list, &prefix);
+            fill_mentions(&ui, &list, &prefix, channel(&ui).as_ref());
             if list.row_at_index(0).is_none() {
                 popup.popdown();
             } else {
@@ -1078,12 +1228,8 @@ fn mention_keys(
             }
             gdk::Key::Down | gdk::Key::Up => {
                 let at = list.selected_row().map_or(0, |r| r.index());
-                let next = if key == gdk::Key::Down {
-                    at + 1
-                } else {
-                    at - 1
-                };
-                if let Some(row) = list.row_at_index(next.max(0)) {
+                let step = if key == gdk::Key::Down { 1 } else { -1 };
+                if let Some(row) = first_selectable(&list, at + step, step) {
                     list.select_row(Some(&row));
                 }
                 glib::Propagation::Stop
@@ -1098,42 +1244,99 @@ fn mention_keys(
 /// Draw the people who match, with the name beside the username the way
 /// Mattermost does: the username is what the mention becomes, the name
 /// is what the reader was thinking of.
-fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str) {
+fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str, channel: Option<&ChannelId>) {
     while let Some(old) = list.first_child() {
         list.remove(&old);
     }
     let store = ui.store.borrow();
-    for user in store.mention_candidates(prefix, MENTIONS_OFFERED) {
-        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        line.set_margin_start(12);
-        line.set_margin_end(12);
-        line.set_margin_top(2);
-        line.set_margin_bottom(2);
-        let face = adw::Avatar::new(20, Some(&user.username), true);
-        face.set_custom_image(ui.avatars.borrow().get(&user.id));
-        line.append(&face);
-        line.append(
-            &gtk::Label::builder()
-                .label(format!("@{}", user.username))
-                .css_classes(["heading"])
-                .build(),
-        );
-        let human = format!("{} {}", user.first_name, user.last_name);
-        if !human.trim().is_empty() {
-            line.append(
-                &gtk::Label::builder()
-                    .label(human.trim())
-                    .css_classes(["dim-label"])
-                    .build(),
-            );
+    let mut heading_drawn = (false, false);
+    for found in store.mention_candidates(channel, prefix, MENTIONS_OFFERED) {
+        // Two sections, like Mattermost's: the people in this
+        // conversation, then anyone else the typing matches. The second
+        // heading only appears once somebody is under it.
+        let drawn = if found.in_channel {
+            &mut heading_drawn.0
+        } else {
+            &mut heading_drawn.1
+        };
+        if !*drawn {
+            *drawn = true;
+            let text = if found.in_channel {
+                "CHANNEL MEMBERS"
+            } else {
+                "NOT IN CHANNEL"
+            };
+            list.append(&mention_heading(text));
         }
-        let row = gtk::ListBoxRow::builder().child(&line).build();
-        row.set_widget_name(&user.username);
-        list.append(&row);
+        list.append(&mention_row(ui, found.user));
     }
-    if let Some(first) = list.row_at_index(0) {
+    if let Some(first) = first_selectable(list, 0, 1) {
         list.select_row(Some(&first));
     }
+}
+
+/// A section label, as a row that cannot be selected or activated so the
+/// arrow keys and a click both pass over it.
+fn mention_heading(text: &str) -> gtk::ListBoxRow {
+    let label = gtk::Label::builder()
+        .label(text)
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_top(6)
+        .margin_bottom(2)
+        .css_classes(["dim-label", "caption-heading"])
+        .build();
+    let row = gtk::ListBoxRow::builder().child(&label).build();
+    row.set_selectable(false);
+    row.set_activatable(false);
+    row
+}
+
+/// One person, with the name beside the username the way Mattermost
+/// does: the username is what the mention becomes, the name is what the
+/// reader was thinking of.
+fn mention_row(ui: &Ui, user: &mm_types::User) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.set_margin_start(12);
+    line.set_margin_end(12);
+    line.set_margin_top(2);
+    line.set_margin_bottom(2);
+    let face = adw::Avatar::new(20, Some(&user.username), true);
+    face.set_custom_image(ui.avatars.borrow().get(&user.id));
+    line.append(&face);
+    line.append(
+        &gtk::Label::builder()
+            .label(format!("@{}", user.username))
+            .css_classes(["heading"])
+            .build(),
+    );
+    let human = format!("{} {}", user.first_name, user.last_name);
+    if !human.trim().is_empty() {
+        line.append(
+            &gtk::Label::builder()
+                .label(human.trim())
+                .css_classes(["dim-label"])
+                .build(),
+        );
+    }
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.set_widget_name(&user.username);
+    row
+}
+
+/// The first row at or after `from` that can hold the selection, walking
+/// in `step`'s direction. The section headings sit in the same list, so
+/// stepping by one would land the selection on a label.
+fn first_selectable(list: &gtk::ListBox, from: i32, step: i32) -> Option<gtk::ListBoxRow> {
+    let mut at = from;
+    while at >= 0 {
+        let row = list.row_at_index(at)?;
+        if row.is_selectable() {
+            return Some(row);
+        }
+        at += step;
+    }
+    None
 }
 
 /// Put the chosen username where the half-typed one was, and a space
@@ -1557,7 +1760,29 @@ fn describe_ago(at: mm_types::Timestamp) -> String {
     if days < 7 {
         return plural(days, "day");
     }
+    // Mattermost counts in weeks for about a month before giving up and
+    // printing a date, and says "last week" rather than "1 week ago".
+    if days < 14 {
+        return "last week".to_owned();
+    }
+    if days < 31 {
+        return plural(days / 7, "week");
+    }
     dt.format("%-d %b").to_string()
+}
+
+/// The whole moment, spelled out, for the tooltip on a message's time.
+///
+/// Mattermost writes it "October 15 at 17:01:35", and the seconds are
+/// there on purpose: two messages a moment apart show the same clock
+/// time, and this is where a reader goes to tell them apart.
+fn full_time(millis: i64) -> String {
+    use chrono::{Local, TimeZone};
+    if let chrono::offset::LocalResult::Single(dt) = Local.timestamp_millis_opt(millis) {
+        dt.format("%B %-d, %Y at %H:%M:%S").to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn clock_time(millis: i64) -> String {
@@ -1619,6 +1844,7 @@ fn build_message_tools(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
     server: &Rc<RefCell<String>>,
+    shown: &ShownTools,
 ) -> gtk::Box {
     // The hover toolbar: the one-click reactions this reader uses most,
     // then save and reply, then the overflow menu. Mattermost reveals
@@ -1739,9 +1965,14 @@ fn build_message_tools(
         // pointer a leave, which hid the toolbar, which took the popover
         // down with it -- the menu appeared and vanished in one frame.
         let more = more.clone();
+        let shown = Rc::clone(shown);
         hover.connect_leave(move |_| {
             if !more.is_active() {
                 tools.set_visible(false);
+                let mut shown = shown.borrow_mut();
+                if shown.as_ref() == Some(&tools) {
+                    *shown = None;
+                }
             }
         });
     }
@@ -1755,6 +1986,7 @@ fn setup_post_row(
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
     server: &Rc<RefCell<String>>,
+    shown: &ShownTools,
 ) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     row.set_margin_start(12);
@@ -1799,11 +2031,7 @@ fn setup_post_row(
     // face, so grouped messages line up under the one that named them.
     // `adw::Avatar` draws initials when there is no picture, which means a
     // row never has to wait on the network to look finished.
-    let face = adw::Avatar::builder()
-        .size(32)
-        .show_initials(true)
-        .valign(gtk::Align::Start)
-        .build();
+    let (gutter, _, _) = face_with_dot(32);
     let main = gtk::Box::new(gtk::Orientation::Vertical, 2);
     main.set_hexpand(true);
     // Attached images, above the file line that names them. Rebuilt on each
@@ -1825,7 +2053,7 @@ fn setup_post_row(
     main.append(&reactions);
 
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    line.append(&face);
+    line.append(&gutter);
     line.append(&main);
 
     row.append(&day);
@@ -1853,13 +2081,15 @@ fn setup_post_row(
         let commands = commands.clone();
         let store = Rc::clone(store);
         let server = Rc::clone(server);
+        let shown = Rc::clone(shown);
         first_hover.connect_enter(move |_, _, _| {
             // The overlay's last child is the toolbar once there is one;
             // before that it is the message itself.
             let tools = match floating.last_child().and_downcast::<gtk::Box>() {
                 Some(tools) if tools.has_css_class("mmrs-tools") => tools,
                 _ => {
-                    let tools = build_message_tools(&row, &item, &commands, &store, &server);
+                    let tools =
+                        build_message_tools(&row, &item, &commands, &store, &server, &shown);
                     floating.add_overlay(&tools);
                     tools
                 }
@@ -1873,12 +2103,51 @@ fn setup_post_row(
                 }
                 label_quick_reactions(&tools, &data);
                 tools.set_visible(true);
+                show_only(&shown, &tools);
             }
         });
     }
     row.add_controller(first_hover);
 
     item.set_child(Some(&row));
+}
+
+/// Make this the only toolbar on screen.
+///
+/// The leave event is the usual way one goes away, but it does not
+/// always come: `ListView` can recycle the row under a still pointer,
+/// and a popover grabbing the pointer sends a leave that is deliberately
+/// ignored. One cell holding whichever toolbar is up makes the invariant
+/// -- at most one -- true by construction rather than by hoping every
+/// crossing arrives.
+fn show_only(shown: &ShownTools, tools: &gtk::Box) {
+    let previous = shown.borrow_mut().replace(tools.clone());
+    if let Some(previous) = previous
+        && previous != *tools
+    {
+        previous.set_visible(false);
+    }
+}
+
+/// Take down the toolbar of a row that is about to show a different
+/// message.
+fn hide_tools(item: &gtk::ListItem, shown: &ShownTools) {
+    let Some(tools) = item
+        .child()
+        .and_downcast::<gtk::Box>()
+        .and_then(|row| row.last_child())
+        .and_downcast::<gtk::Overlay>()
+        .and_then(|floating| floating.last_child())
+        .and_downcast::<gtk::Box>()
+        .filter(|tools| tools.has_css_class("mmrs-tools"))
+    else {
+        return;
+    };
+    tools.set_visible(false);
+    let mut shown = shown.borrow_mut();
+    if shown.as_ref() == Some(&tools) {
+        *shown = None;
+    }
 }
 
 /// Put this message's one-click reactions on the toolbar's buttons.
@@ -1964,12 +2233,18 @@ fn bind_author(author: &gtk::Label, data: &PostRow) {
 /// Each one is a coloured bar beside a column of text, which is how every
 /// other Mattermost client draws them and how an alert channel is read at a
 /// glance: the colour is the severity.
-fn bind_cards(cards: &gtk::Box, data: &PostRow) {
+fn bind_cards(
+    cards: &gtk::Box,
+    data: &PostRow,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    links: &LinkImages,
+) {
     while let Some(old) = cards.first_child() {
         cards.remove(&old);
     }
     let views = data.cards();
-    cards.set_visible(!views.is_empty());
+    let previews = data.previews();
+    cards.set_visible(!views.is_empty() || !previews.is_empty());
 
     for view in views {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -2018,6 +2293,74 @@ fn bind_cards(cards: &gtk::Box, data: &PostRow) {
         card.append(&column);
         cards.append(&card);
     }
+
+    for preview in previews {
+        cards.append(&preview_card(&preview, commands, links));
+    }
+}
+
+/// What the server found behind a link: the site, the title as a link,
+/// the description, and the picture the page offered.
+///
+/// Mattermost draws this under the message rather than replacing the
+/// URL in it, so the link the author typed stays where they put it.
+fn preview_card(
+    preview: &mm_types::LinkPreview,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    links: &LinkImages,
+) -> gtk::Widget {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    column.set_hexpand(true);
+    if !preview.site_name.is_empty() {
+        column.append(&card_label(
+            &preview.site_name,
+            false,
+            &["dim-label", "caption"],
+        ));
+    }
+    if !preview.title.is_empty() {
+        let markup = format!(
+            "<a href=\"{}\">{}</a>",
+            mm_md::escape(&preview.url),
+            mm_md::escape(&preview.title)
+        );
+        column.append(&card_label(&markup, true, &["heading"]));
+    }
+    if !preview.description.is_empty() {
+        column.append(&card_label(&preview.description, false, &["dim-label"]));
+    }
+
+    let card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    card.add_css_class("card");
+    card.set_margin_start(10);
+    card.set_margin_top(4);
+    card.set_halign(gtk::Align::Start);
+    card.set_size_request(PREVIEW_WIDTH, -1);
+    column.set_margin_start(12);
+    column.set_margin_end(12);
+    column.set_margin_top(10);
+    column.set_margin_bottom(10);
+    card.append(&column);
+
+    if let Some(url) = &preview.image {
+        let picture = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Contain)
+            .valign(gtk::Align::Center)
+            .margin_end(10)
+            .build();
+        picture.set_size_request(PREVIEW_IMAGE, PREVIEW_IMAGE);
+        match links.borrow_mut().entry(url.clone()) {
+            std::collections::hash_map::Entry::Occupied(held) => {
+                picture.set_paintable(held.get().as_ref());
+            }
+            std::collections::hash_map::Entry::Vacant(empty) => {
+                empty.insert(None);
+                let _ = commands.send(Command::FetchLinkImage(url.clone()));
+            }
+        }
+        card.append(&picture);
+    }
+    card.upcast()
 }
 
 /// Build the widgets for a message body, a block at a time.
@@ -2585,53 +2928,92 @@ fn bind_message_tools(floating: &gtk::Overlay, data: &PostRow) {
     }
 }
 
+/// The widgets one recycled post row is made of.
+///
+/// Found by walking the tree `setup_post_row` built, by position rather
+/// than by `first_child`/`last_child`: there are a dozen now, and
+/// `last_child()` silently became the wrong one the day the meta line
+/// was added. A missing one means the tree changed and this walk did
+/// not, so every lookup is fallible and the row simply does not bind.
+struct RowWidgets {
+    row: gtk::Box,
+    day: gtk::Box,
+    floating: gtk::Overlay,
+    line: gtk::Box,
+    face: adw::Avatar,
+    dot: gtk::Box,
+    main: gtk::Box,
+    header: gtk::Box,
+    body: gtk::Box,
+    cards: gtk::Box,
+    images: gtk::Box,
+    meta: gtk::Label,
+    reactions: gtk::Box,
+}
+
+impl RowWidgets {
+    fn find(item: &gtk::ListItem) -> Option<Self> {
+        let row = item.child().and_downcast::<gtk::Box>()?;
+        let day = row.first_child().and_downcast::<gtk::Box>()?;
+        let floating = day.next_sibling().and_downcast::<gtk::Overlay>()?;
+        let line = floating.child().and_downcast::<gtk::Box>()?;
+        let gutter = line.first_child().and_downcast::<gtk::Overlay>()?;
+        let face = gutter.child().and_downcast::<adw::Avatar>()?;
+        let dot = gutter.last_child().and_downcast::<gtk::Box>()?;
+        let main = gutter.next_sibling().and_downcast::<gtk::Box>()?;
+        let header = main.first_child().and_downcast::<gtk::Box>()?;
+        let body = header.next_sibling().and_downcast::<gtk::Box>()?;
+        let cards = body.next_sibling().and_downcast::<gtk::Box>()?;
+        let images = cards.next_sibling().and_downcast::<gtk::Box>()?;
+        let meta = images.next_sibling().and_downcast::<gtk::Label>()?;
+        let reactions = meta.next_sibling().and_downcast::<gtk::Box>()?;
+        Some(Self {
+            row,
+            day,
+            floating,
+            line,
+            face,
+            dot,
+            main,
+            header,
+            body,
+            cards,
+            images,
+            meta,
+            reactions,
+        })
+    }
+}
+
 fn bind_post_row(
     item: &gtk::ListItem,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    links: &LinkImages,
+    relative: bool,
 ) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
     };
-    let Some(row) = item.child().and_downcast::<gtk::Box>() else {
+    let Some(RowWidgets {
+        row,
+        day,
+        floating,
+        line,
+        face,
+        dot,
+        main,
+        header,
+        body,
+        cards,
+        images,
+        meta,
+        reactions,
+    }) = RowWidgets::find(item)
+    else {
         return;
     };
-    // Walk the children by position rather than first/last: there are
-    // four now, and last_child() silently became the wrong one when the
-    // meta line was added.
-    let Some(day) = row.first_child().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(floating) = day.next_sibling().and_downcast::<gtk::Overlay>() else {
-        return;
-    };
-    let Some(line) = floating.child().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(face) = line.first_child().and_downcast::<adw::Avatar>() else {
-        return;
-    };
-    let Some(main) = face.next_sibling().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(header) = main.first_child().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(body) = header.next_sibling().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(cards) = body.next_sibling().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(images) = cards.next_sibling().and_downcast::<gtk::Box>() else {
-        return;
-    };
-    let Some(meta) = images.next_sibling().and_downcast::<gtk::Label>() else {
-        return;
-    };
-    let Some(reactions) = meta.next_sibling().and_downcast::<gtk::Box>() else {
-        return;
-    };
+    set_presence(&dot, data.presence());
 
     // A separator is a day label and nothing else.
     let is_separator = data.is_separator();
@@ -2670,7 +3052,10 @@ fn bind_post_row(
         bind_author(&author, &data);
     }
     if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
-        time.set_text(&data.time());
+        let said = if relative { data.ago() } else { data.time() };
+        time.set_text(&said);
+        // The clock is short either way, so the whole date lives here.
+        time.set_tooltip_text(Some(&data.full_time()));
     }
 
     fill_blocks(&body, &data.blocks());
@@ -2682,7 +3067,7 @@ fn bind_post_row(
 
     bind_message_tools(&floating, &data);
 
-    bind_cards(&cards, &data);
+    bind_cards(&cards, &data, commands, links);
     bind_images(&images, &data, commands, viewer);
 
     let extra = data.meta();
@@ -2727,6 +3112,19 @@ const EDITOR_HEIGHT: i32 = 260;
 /// How many people the mention popup offers before the reader should
 /// type another letter rather than scroll a list.
 const MENTIONS_OFFERED: usize = 8;
+/// How wide a link preview card is drawn, and how big a side the picture
+/// in it gets. Fixed rather than fitted: a page's `OpenGraph` image can be
+/// a 1200px banner, and a row that resizes itself when one arrives moves
+/// everything the reader was looking at.
+/// How long a `typing` event stands for before the line goes away.
+///
+/// The server re-sends while somebody keeps typing, throttled by
+/// `TimeBetweenUserTypingUpdatesMilliseconds`, which defaults to five
+/// seconds -- so the window has to be longer than that or the line
+/// flickers off between a typist's own keystrokes.
+const TYPING_LIFETIME: std::time::Duration = std::time::Duration::from_secs(7);
+const PREVIEW_WIDTH: i32 = 520;
+const PREVIEW_IMAGE: i32 = 80;
 const MENTIONS_WIDTH: i32 = 340;
 const MENTIONS_HEIGHT: i32 = 260;
 
@@ -2969,6 +3367,12 @@ fn build_post_list(
     store: &Rc<RefCell<Store>>,
     server: &Rc<RefCell<String>>,
     viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    shown: &ShownTools,
+    links: &LinkImages,
+    // `relative`: say how long ago each message was instead of what the
+    // clock said. The thread pane has no day separators, so a bare
+    // "17:01" there could be today or a fortnight ago.
+    relative: bool,
 ) -> (gio::ListStore, gtk::ListView, gtk::ScrolledWindow) {
     let posts = gio::ListStore::new::<PostRow>();
     let factory = gtk::SignalListItemFactory::new();
@@ -2976,16 +3380,29 @@ fn build_post_list(
     let sender = commands.clone();
     let store_for_setup = Rc::clone(store);
     let server_for_setup = Rc::clone(server);
+    let shown_for_setup = Rc::clone(shown);
     factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(item, &sender, &store_for_setup, &server_for_setup);
+            setup_post_row(
+                item,
+                &sender,
+                &store_for_setup,
+                &server_for_setup,
+                &shown_for_setup,
+            );
         }
     });
     let sender = commands.clone();
     let viewer_for_bind = Rc::clone(viewer);
+    let shown_for_bind = Rc::clone(shown);
+    let links_for_bind = Rc::clone(links);
     factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            bind_post_row(item, &sender, &viewer_for_bind);
+            // This widget may have been showing the previous occupant's
+            // toolbar. The message under it has just changed, so the
+            // toolbar is wrong whatever the pointer is doing.
+            hide_tools(item, &shown_for_bind);
+            bind_post_row(item, &sender, &viewer_for_bind, &links_for_bind, relative);
         }
     });
     let post_view = gtk::ListView::builder()
@@ -3078,6 +3495,11 @@ impl Ui {
                     self.refresh_posts(&channel);
                 }
             }
+            Event::Ws(mm_api::ws::WsEvent::Typing {
+                channel_id,
+                user_id,
+                ..
+            }) => self.on_typing(channel_id, UserId::new(&user_id)),
             Event::Ws(ws) => {
                 self.maybe_notify(&ws);
                 let changes = self.store.borrow_mut().apply_ws(&ws);
@@ -3692,6 +4114,8 @@ impl Ui {
             body: "",
             blocks,
             time: &clock_time(post.create_at.millis()),
+            ago: &describe_ago(post.create_at),
+            full_time: &full_time(post.create_at.millis()),
             meta: &describe_extras(post),
             flags: crate::row::PostRowFlags {
                 grouped,
@@ -3715,6 +4139,8 @@ impl Ui {
                 .iter()
                 .map(|a| render_card(a, store))
                 .collect(),
+            previews: post.link_previews(),
+            presence: store.presence(&post.user_id),
             // A reply never opens a thread of its own: in Mattermost the
             // whole conversation hangs off the root, and offering "2
             // replies" on a reply would open its parent under a different
@@ -3877,6 +4303,15 @@ impl Ui {
             Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
             Event::Avatar { user, image } => self.on_avatar(user, image),
             Event::File { file, image } => self.on_file(file, image),
+            Event::LinkImage { url, image } => {
+                let bytes = glib::Bytes::from_owned(image);
+                if let Ok(texture) = gdk::Texture::from_bytes(&bytes) {
+                    self.link_images.borrow_mut().insert(url, Some(texture));
+                    // The card is drawn on bind, so the row has to be
+                    // drawn again for the picture to reach it.
+                    self.redraw_soon();
+                }
+            }
             Event::NameFormat(format) => {
                 self.store.borrow_mut().name_format = format;
                 self.redraw_everything();
@@ -3925,6 +4360,17 @@ impl Ui {
             Event::Preferences(prefs) => {
                 self.store.borrow_mut().apply_preferences(&prefs);
             }
+            Event::Statuses(statuses) => {
+                if !self.store.borrow_mut().apply_statuses(&statuses).is_empty() {
+                    self.redraw_soon();
+                }
+            }
+            Event::ChannelRoster { channel, users } => {
+                self.store
+                    .borrow_mut()
+                    .apply_channel_roster(&channel, users);
+                self.redraw_soon();
+            }
             Event::Users(users) => {
                 self.store.borrow_mut().apply_users(users);
                 // The roster arrives after the posts that needed it -- the
@@ -3938,6 +4384,61 @@ impl Ui {
             // Every other variant has its own arm in `on_event`.
             _ => {}
         }
+    }
+
+    /// Somebody is typing in a channel.
+    ///
+    /// Recorded against the clock rather than in the store, and redrawn
+    /// once the entry has had time to expire so the line clears itself
+    /// without the reader doing anything.
+    fn on_typing(&self, channel: ChannelId, who: UserId) {
+        // Never announce the reader to themselves. The server sends the
+        // event to everybody in the channel, the sender included.
+        if who == self.store.borrow().me {
+            return;
+        }
+        let now = std::time::Instant::now();
+        {
+            let mut typing = self.typing.borrow_mut();
+            let people = typing.entry(channel).or_default();
+            people.retain(|(id, at)| *id != who && now.duration_since(*at) < TYPING_LIFETIME);
+            people.push((who, now));
+        }
+        self.refresh_typing();
+        let ui = self.clone();
+        glib::timeout_add_local_once(
+            TYPING_LIFETIME + std::time::Duration::from_millis(100),
+            move || {
+                ui.refresh_typing();
+            },
+        );
+    }
+
+    /// Redraw the "is typing" line for the open channel, dropping
+    /// anybody whose last keystroke has gone stale.
+    fn refresh_typing(&self) {
+        let Some(channel) = self.selected.borrow().clone() else {
+            self.typing_line.set_visible(false);
+            return;
+        };
+        let now = std::time::Instant::now();
+        let mut typing = self.typing.borrow_mut();
+        let people = typing.entry(channel).or_default();
+        people.retain(|(_, at)| now.duration_since(*at) < TYPING_LIFETIME);
+        let store = self.store.borrow();
+        let names: Vec<String> = people
+            .iter()
+            .filter_map(|(id, _)| store.users.get(id))
+            .map(|user| user.name_as(store.name_format))
+            .collect();
+        let said = match names.as_slice() {
+            [] => String::new(),
+            [one] => format!("{one} is typing…"),
+            [one, two] => format!("{one} and {two} are typing…"),
+            _ => "Several people are typing…".to_owned(),
+        };
+        self.typing_line.set_visible(!said.is_empty());
+        self.typing_line.set_text(&said);
     }
 
     /// Merge a page of history fetched because the reader reached the top.
@@ -3973,6 +4474,9 @@ impl Ui {
     /// them -- a setting, rather than one message.
     fn redraw_everything(&self) {
         self.refresh_sidebar();
+        // The line belongs to the channel on screen, so switching away
+        // from one somebody is typing in has to clear it.
+        self.refresh_typing();
         // Whatever is actually on show. Redrawing the conversation while
         // a view is up put the channel's name back in the title bar the
         // moment an avatar landed -- and spent the cost of drawing a
@@ -4055,13 +4559,13 @@ impl Ui {
     /// writing in front of the company and writing in front of six people.
     fn channel_mark(&self, row: &mm_core::SidebarRow) -> gtk::Widget {
         if let Some(user) = &row.avatar_user {
-            let face = adw::Avatar::builder()
-                .size(20)
-                .show_initials(true)
-                .text(&row.display_name)
-                .build();
+            let (gutter, face, dot) = face_with_dot(20);
+            face.set_text(Some(&row.display_name));
             face.set_custom_image(self.avatars.borrow().get(user));
-            return face.upcast();
+            // The sidebar is the one place presence is actually used for
+            // a decision: it is where the reader picks who to ask.
+            set_presence(&dot, self.store.borrow().presence(user));
+            return gutter.upcast();
         }
         // Icon names are not checked at build time: a name the theme does
         // not have renders as a broken-image placeholder, which is how the

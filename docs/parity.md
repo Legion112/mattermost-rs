@@ -83,9 +83,12 @@ real server yet.
 | `ws.live_events` | partial | 12.0.1 | posted / post_edited / post_deleted confirmed live, including the `post` payload being a JSON document inside a JSON string. A hello carrying a NEW connection id is treated as lost events; an event-sequence hole is treated the same way. NOT yet done: acting on either signal with a REST resync -- the GUI currently re-syncs the sidebar but does not close a post gap, which is why mm-core::Timeline refuses to merge a page whose adjacency it cannot establish. |
 | `posts.timeline_gaps` | partial | — | The timeline holds one contiguous run and REFUSES to merge a page whose adjacency cannot be established, rather than joining two disjoint runs and letting the reader scroll past messages with nothing on screen to say so. The plan's full multi-segment model is not built, which is what `since`-based backfill needs. Until then every fetch is anchored to what is held. |
 | `posts.reactions` | done | 12.0.1 | Reactions on the message and one-click reactions on the hover toolbar, both toggles: there is no separate way to take a reaction back, here or anywhere in Mattermost. The one-click buttons are ranked by what this reader uses most. Custom emoji are NOT fetched, so one resolves to its shortcode rather than an image. |
-| `posts.mention_autocomplete` | partial | 12.0.1 | Typing `@` offers the channel's members, with the name beside the username the way Mattermost shows it: the username is what the mention becomes, the name is what the reader was thinking of. Tab or Return completes, Up and Down move, Escape dismisses. In both composers. Ranked locally -- the username being typed first, then somebody whose human name begins with it, then a username merely containing it -- over the channel's roster, fetched once when the channel opens rather than per keystroke the way the web app does it. Verified on a live account: `@ar` offers aragorn, alukard, lowroar and yaarny, and Tab completes to `@aragorn `. NOT built: `@all`, `@channel` and `@here`, and anybody outside the open channel -- there is no `/users/autocomplete` call, so mentioning somebody who is not a member is typed out in full. |
+| `posts.mention_autocomplete` | partial | 12.0.1 | Typing `@` offers the open channel's members under a CHANNEL MEMBERS heading and everybody else under NOT IN CHANNEL, with the name beside the username the way Mattermost shows it. Tab or Return completes, Up and Down move over the headings, Escape dismisses. In both composers, each knowing its own channel -- the thread composer takes it from the root post, not from whatever is open behind it. Ranked locally on four keys: the people in this conversation first, then match quality (username prefix, then human-name prefix, then a username merely containing it), then whoever spoke here most recently, and the alphabet only to break a tie. The roster is fetched once when the channel opens rather than per keystroke the way the web app does it; a channel never opened falls back to everyone known. Verified on a live account: `@` in Клиенты offers aragorn first, who had just posted, where it previously offered an alphabetical mix drawn from every channel visited. NOT built: `@all`, `@channel` and `@here`, and there is no `/users/autocomplete` call, so somebody this client has never seen is typed out in full. |
 | `posts.warm_channels` | done | 12.0.1 | The thirty most recently active channels are fetched in the background once the sync is done, two at a time with a gap between starts, so that clicking one does not cost a round trip. Opening a channel draws what is already held first and splices in the answer when it comes, which is what removes the wait -- measured on a live account: 31 pages warmed within twenty seconds of launch, and a click then draws 95 rows in 99 ms with no request in the path. Bounded on purpose: a channel outside the thirty, or one silent for months, is still fetched the ordinary way. |
 | `posts.edit` | partial | — | Edit message, on the reader's own messages, opening the markdown they wrote in a window of its own rather than turning the row into a text box: a recycled `ListView` row is taken out from under the caret the moment anything else arrives. NOT verified against a live server -- doing so means editing a real message in a real channel -- so what is confirmed is the request shape and the dialog, not the round trip. `PostEditTimeLimit` is not read either, so a message too old to edit is refused by the server rather than by the menu. |
+| `posts.link_previews` | done | — | A URL the server has already resolved draws as a card under the message: the site name, the title as a link, the description, and the picture the page offered. Read out of `metadata.embeds`, where only the `opengraph` entries carry a `data` at all -- the others are `null`, and a card with neither title nor description is not drawn, because a card showing only a URL says less than the link already in the text. The picture is fetched straight from whoever hosts it, over https only and deliberately **without the session token**: sending a Mattermost credential to a third party because somebody pasted a URL would be a security bug. Asked once per URL and held in memory for the session; a dead image host leaves the card's text and no picture. |
+| `posts.typing` | partial | — | "somebody is typing…" between the last message and the box being typed into, naming one person, two by name, or "Several people" beyond that. Held in the window rather than the store because it expires on a clock and the store is deliberately clock-free so that replaying events stays exact; an entry older than seven seconds is dropped, which is longer than the server's own five-second `TimeBetweenUserTypingUpdatesMilliseconds` throttle so the line does not flicker between a typist's keystrokes. NOT built: **sending** `user_typing`, so colleagues are not told when this client is typing. The socket loop only reads; announcing would mean splitting the stream so a writer can share it. |
+| `posts.message_times` | done | — | The channel shows a clock time under a day separator, the way Mattermost does. The thread panel has no separators, so it says how long ago instead -- "6 days ago", "last week", "2 weeks ago" -- and falls back to a date past a month. Either way the whole moment, down to the second, is the tooltip on the time: two messages a moment apart show the same clock time, and that is where a reader goes to tell them apart. |
 
 <details><summary><code>ws.live_events</code> wire</summary>
 
@@ -127,6 +130,18 @@ real server yet.
 
 - `PUT /api/v4/posts/{post_id}`
 - ws `post_edited`
+
+</details>
+
+<details><summary><code>posts.link_previews</code> wire</summary>
+
+- `GET /api/v4/channels/{channel_id}/posts`
+
+</details>
+
+<details><summary><code>posts.typing</code> wire</summary>
+
+- ws `typing`
 
 </details>
 
@@ -175,5 +190,18 @@ real server yet.
 - `POST /api/v4/channels/members/me/view`
 - ws `channel_member_updated`
 - ws `multiple_channels_viewed`
+
+</details>
+
+## users
+
+| feature | status | verified | notes |
+|---|---|---|---|
+| `users.presence` | partial | 12.0.1 | A dot in the corner of every face: green for online, amber for away, red for do not disturb, and nothing at all for offline, which is what Mattermost does rather than draw a column of grey dots about people who are simply not at work. Fetched in one POST for the sidebar's DM partners after a sync and for a channel's roster after it opens -- the ids go in the body because a roster is two hundred of them, which is past the usual proxy limit and would put everyone the reader is looking at into an access log. Kept current by `status_change`, and a repeat of what is already held produces no change so a second device reporting the same state does not redraw every row. An unrecognised status reads as offline rather than failing the batch. Verified on a live account: aragorn's face carries a green dot. NOT built: setting your own status, and there is no periodic re-poll -- a person who goes away while nothing else happens keeps their old dot until the server says otherwise. |
+
+<details><summary><code>users.presence</code> wire</summary>
+
+- `POST /api/v4/users/status/ids`
+- ws `status_change`
 
 </details>

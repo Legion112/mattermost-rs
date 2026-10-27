@@ -533,16 +533,13 @@ fn users_and_teams_are_stored() {
     assert_eq!(s.users[&UserId::new("u1")].username, "janet");
 }
 
-/// Presence, typing and unrecognised events carry no state this store owns.
-/// Returning no changes is correct, not a stub.
+/// Typing and unrecognised events carry no state this store owns.
+/// Returning no changes is correct, not a stub: typing expires on a
+/// clock, and this store deliberately has none.
 #[test]
 fn events_the_store_does_not_model_produce_no_changes() {
     let mut s = seeded();
     for event in [
-        WsEvent::StatusChange {
-            user_id: "u1".into(),
-            status: "online".into(),
-        },
         WsEvent::Typing {
             channel_id: ChannelId::new("c1"),
             user_id: "u1".into(),
@@ -2035,19 +2032,19 @@ fn mention_candidates_rank_username_then_name_then_anywhere() {
     ]);
 
     let names: Vec<&str> = store
-        .mention_candidates("pre", 10)
+        .mention_candidates(None, "pre", 10)
         .into_iter()
-        .map(|u| u.username.as_str())
+        .map(|m| m.user.username.as_str())
         .collect();
     // presenceaura's username starts with it; diogen's first name does;
     // supreme only contains it; quant matches nothing.
     assert_eq!(names, ["presenceaura", "diogen", "supreme"]);
 
     // Case does not matter, and no query offers everybody.
-    assert_eq!(store.mention_candidates("PRE", 10).len(), 3);
-    assert_eq!(store.mention_candidates("", 10).len(), 4);
-    assert_eq!(store.mention_candidates("", 2).len(), 2);
-    assert!(store.mention_candidates("zzz", 10).is_empty());
+    assert_eq!(store.mention_candidates(None, "PRE", 10).len(), 3);
+    assert_eq!(store.mention_candidates(None, "", 10).len(), 4);
+    assert_eq!(store.mention_candidates(None, "", 2).len(), 2);
+    assert!(store.mention_candidates(None, "zzz", 10).is_empty());
 }
 
 /// A deactivated person and a bot are not offered: mentioning the first
@@ -2075,9 +2072,9 @@ fn mention_candidates_skip_deactivated_people_and_bots() {
         },
     ]);
     let names: Vec<&str> = store
-        .mention_candidates("go", 10)
+        .mention_candidates(None, "go", 10)
         .into_iter()
-        .map(|u| u.username.as_str())
+        .map(|m| m.user.username.as_str())
         .collect();
     assert_eq!(names, ["good"]);
 }
@@ -2132,4 +2129,130 @@ fn a_dm_with_an_unknown_person_stays_in_the_sidebar() {
     }]);
     store.apply_members(vec![member("c1", 0, 0, 0)]);
     assert_eq!(store.sidebar().len(), 1);
+}
+
+/// `@` offers the people in the open channel before anyone else, and the
+/// ones who have just spoken before the ones who never have.
+///
+/// The roster is per channel because `users` is everyone this client has
+/// ever seen: post authors from elsewhere, DM partners, and the roster of
+/// every channel visited so far. Ranking that flat list alphabetically is
+/// what made the popup offer strangers under a "CHANNEL MEMBERS" heading.
+#[test]
+fn mention_candidates_put_the_channels_own_people_first() {
+    let mut store = store();
+    let person = |id: &str, username: &str| User {
+        id: UserId::new(id),
+        username: username.to_owned(),
+        ..User::default()
+    };
+    // Somebody from another channel entirely, alphabetically first.
+    store.apply_users(vec![person("u9", "aaron")]);
+    let c1 = ChannelId::new("c1");
+    store.apply_channel_roster(
+        &c1,
+        vec![
+            person("u1", "diogen"),
+            person("u2", "presenceaura"),
+            person("u3", "zinaida"),
+        ],
+    );
+    let said = |id: &str, who: &str, at: i64| Post {
+        user_id: UserId::new(who),
+        ..post(id, "c1", at)
+    };
+    store.apply_post_list(
+        &c1,
+        &page(vec![said("p1", "u3", 10), said("p2", "u2", 20)]),
+        PageAnchor::Newest,
+    );
+
+    let offered: Vec<(&str, bool)> = store
+        .mention_candidates(Some(&c1), "", 10)
+        .into_iter()
+        .map(|m| (m.user.username.as_str(), m.in_channel))
+        .collect();
+    assert_eq!(
+        offered,
+        [
+            // Spoke last, spoke before that, then the member who has not
+            // spoken at all -- and only then the outsider.
+            ("presenceaura", true),
+            ("zinaida", true),
+            ("diogen", true),
+            ("aaron", false),
+        ]
+    );
+
+    // A channel whose roster has never been fetched falls back to
+    // everyone rather than offering nothing.
+    let unknown = ChannelId::new("c2");
+    assert_eq!(store.mention_candidates(Some(&unknown), "", 10).len(), 4);
+    assert!(
+        store
+            .mention_candidates(Some(&unknown), "", 10)
+            .iter()
+            .all(|m| !m.in_channel)
+    );
+
+    // Matching still narrows it, and a member still leads.
+    let narrowed: Vec<&str> = store
+        .mention_candidates(Some(&c1), "a", 10)
+        .into_iter()
+        .map(|m| m.user.username.as_str())
+        .collect();
+    assert_eq!(narrowed, ["presenceaura", "zinaida", "aaron"]);
+}
+
+/// Presence is fetched in batches and then kept current over the
+/// WebSocket. A repeat of what is already held produces no change, so a
+/// second device reporting the same state does not redraw every row
+/// that person appears on.
+#[test]
+fn presence_comes_from_a_batch_and_stays_current_over_the_socket() {
+    let mut store = store();
+    let status = |id: &str, state: &str| mm_types::Status {
+        user_id: UserId::new(id),
+        status: state.to_owned(),
+        ..mm_types::Status::default()
+    };
+
+    assert_eq!(
+        store.presence(&UserId::new("u1")),
+        mm_types::Presence::Offline
+    );
+    let changed = store.apply_statuses(&[status("u1", "online"), status("u2", "dnd")]);
+    assert_eq!(
+        changed,
+        [
+            Change::User(UserId::new("u1")),
+            Change::User(UserId::new("u2"))
+        ]
+    );
+    assert_eq!(
+        store.presence(&UserId::new("u1")),
+        mm_types::Presence::Online
+    );
+    assert_eq!(store.presence(&UserId::new("u2")), mm_types::Presence::Dnd);
+    // Saying the same thing again changes nothing.
+    assert!(store.apply_statuses(&[status("u1", "online")]).is_empty());
+
+    let away = WsEvent::StatusChange {
+        user_id: "u1".into(),
+        status: "away".into(),
+    };
+    assert_eq!(store.apply_ws(&away), [Change::User(UserId::new("u1"))]);
+    assert_eq!(store.presence(&UserId::new("u1")), mm_types::Presence::Away);
+    assert!(store.apply_ws(&away).is_empty());
+
+    // Typing is the window's business, not the store's.
+    assert!(
+        store
+            .apply_ws(&WsEvent::Typing {
+                channel_id: ChannelId::new("c1"),
+                user_id: "u1".into(),
+                parent_id: String::new(),
+            })
+            .is_empty()
+    );
 }

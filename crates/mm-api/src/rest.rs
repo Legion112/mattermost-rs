@@ -7,7 +7,7 @@ use crate::error::ApiError;
 use crate::http::{HttpRequest, HttpResponse};
 use mm_types::{
     CategoryList, Channel, ChannelCategory, ChannelId, ChannelMember, ChannelStats, Draft, FileId,
-    Post, PostId, PostList, Preference, Reaction, Team, TeamId, ThreadList, User, UserId,
+    Post, PostId, PostList, Preference, Reaction, Status, Team, TeamId, ThreadList, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -591,6 +591,25 @@ pub fn users_in_channel(channel: &ChannelId, per_page: u32) -> HttpRequest {
 
 pub fn parse_users_in_channel(resp: &HttpResponse) -> Result<Vec<User>, ApiError> {
     parse_json(resp, "GET /users?in_channel")
+}
+
+/// Presence for a set of people, in one request.
+///
+/// `POST` rather than `GET` because the ids go in the body: a channel
+/// roster is two hundred ids, and a query string of those is both over
+/// the usual proxy limit and a log line naming everybody the reader is
+/// looking at.
+#[must_use]
+pub fn statuses_for(users: &[UserId]) -> HttpRequest {
+    let ids: Vec<serde_json::Value> = users
+        .iter()
+        .map(|id| serde_json::Value::String(id.to_string()))
+        .collect();
+    HttpRequest::post(format!("{API}/users/status/ids")).json(&serde_json::Value::Array(ids))
+}
+
+pub fn parse_statuses(resp: &HttpResponse) -> Result<Vec<Status>, ApiError> {
+    parse_json(resp, "POST /users/status/ids")
 }
 
 // ---------------------------------------------------------------- prefs

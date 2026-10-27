@@ -63,6 +63,18 @@ fn participants(display_name: &str) -> Option<i64> {
     (named > 0).then(|| i64::try_from(named).unwrap_or(i64::MAX))
 }
 
+/// One name the `@` popup is offering, and whether they are in the channel.
+///
+/// The flag is what lets the popup draw Mattermost's two headings:
+/// everyone in the conversation first, then anyone else who matches.
+/// Mentioning a non-member is legal -- the server says so in the channel
+/// afterwards -- so they are offered, just never first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mention<'a> {
+    pub user: &'a User,
+    pub in_channel: bool,
+}
+
 /// How well a person answers `@prefix`: 0 is best, `None` is no match.
 ///
 /// The username leads because it is what the mention actually becomes;
@@ -190,6 +202,20 @@ pub struct Store {
     pub prefs: BTreeMap<(String, String), String>,
     /// Member counts, fetched per channel when it is opened.
     pub stats: HashMap<ChannelId, ChannelStats>,
+    /// Who belongs to a channel, from the roster fetched when it opened.
+    ///
+    /// Kept per channel because `users` is everyone this client has ever
+    /// heard of -- post authors, DM partners, and the roster of every
+    /// channel visited so far -- so offering all of it to `@` suggests
+    /// people who cannot read the message. Absent until the channel has
+    /// been opened once, which is why the ordering below falls back
+    /// rather than showing nothing.
+    pub channel_members: HashMap<ChannelId, BTreeSet<UserId>>,
+    /// Who is at their desk. Fetched for the people on screen and kept
+    /// current by `status_change` over the WebSocket. Absent means
+    /// "never asked", which draws the same as offline but is not the
+    /// same thing, so it is not defaulted into the map.
+    pub statuses: HashMap<UserId, mm_types::Presence>,
     /// The threads this reader follows, as the server last listed them,
     /// and the account-wide totals that go on the sidebar badge. Replaced
     /// wholesale rather than merged: unlike a channel's posts this is a
@@ -343,18 +369,94 @@ impl Store {
     /// it. Deactivated people are left out -- mentioning one does
     /// nothing -- and so are bots, which do not read their mentions.
     #[must_use]
-    pub fn mention_candidates(&self, prefix: &str, limit: usize) -> Vec<&User> {
+    pub fn mention_candidates(
+        &self,
+        channel: Option<&ChannelId>,
+        prefix: &str,
+        limit: usize,
+    ) -> Vec<Mention<'_>> {
         let wanted = prefix.trim().to_lowercase();
-        let mut found: Vec<(u8, &User)> = self
+        let members = channel.and_then(|c| self.channel_members.get(c));
+        let spoke = channel.map(|c| self.last_spoke(c)).unwrap_or_default();
+        // Four keys, in the order the reader thinks: the people here
+        // before anyone else, the better match before the worse one, the
+        // person who just said something before the one who never has,
+        // and the alphabet only to break a genuine tie.
+        let mut found: Vec<(u8, u8, std::cmp::Reverse<i64>, &User)> = self
             .users
             .values()
             .filter(|u| u.delete_at.is_zero() && !u.is_bot && !u.username.is_empty())
-            .filter_map(|u| mention_rank(u, &wanted).map(|tier| (tier, u)))
+            .filter_map(|u| {
+                let tier = mention_rank(u, &wanted)?;
+                let here = u8::from(!members.is_some_and(|m| m.contains(&u.id)));
+                let said = spoke.get(&u.id).copied().unwrap_or(0);
+                Some((here, tier, std::cmp::Reverse(said), u))
+            })
             .collect();
-        found.sort_by(|(tier, a), (other, b)| {
-            tier.cmp(other).then_with(|| a.username.cmp(&b.username))
-        });
-        found.into_iter().map(|(_, u)| u).take(limit).collect()
+        found.sort_by(
+            |(here, tier, said, a), (other_here, other_tier, other_said, b)| {
+                here.cmp(other_here)
+                    .then_with(|| tier.cmp(other_tier))
+                    .then_with(|| said.cmp(other_said))
+                    .then_with(|| a.username.cmp(&b.username))
+            },
+        );
+        found
+            .into_iter()
+            .map(|(here, _, _, user)| Mention {
+                user,
+                in_channel: here == 0,
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// When each person last said anything in a channel.
+    ///
+    /// Replies count, unlike `channel_posts`: someone answering in a
+    /// thread is still part of the conversation, and is exactly who the
+    /// reader is about to mention.
+    fn last_spoke(&self, channel: &ChannelId) -> HashMap<&UserId, i64> {
+        let mut latest: HashMap<&UserId, i64> = HashMap::new();
+        for post in self
+            .timelines
+            .get(channel)
+            .into_iter()
+            .flat_map(Timeline::keys)
+            .filter_map(|key: &PostKey| self.posts.get(&key.id))
+        {
+            let at = post.create_at.millis();
+            let seen = latest.entry(&post.user_id).or_insert(at);
+            *seen = (*seen).max(at);
+        }
+        latest
+    }
+
+    /// Record a batch of presences, as the status endpoint answered.
+    pub fn apply_statuses(&mut self, statuses: &[mm_types::Status]) -> Vec<Change> {
+        statuses
+            .iter()
+            .filter_map(|status| {
+                let presence = status.presence();
+                let known = self.statuses.insert(status.user_id.clone(), presence);
+                (known != Some(presence)).then(|| Change::User(status.user_id.clone()))
+            })
+            .collect()
+    }
+
+    /// Where somebody is, as far as this client knows.
+    #[must_use]
+    pub fn presence(&self, user: &UserId) -> mm_types::Presence {
+        self.statuses.get(user).copied().unwrap_or_default()
+    }
+
+    /// Record who is in a channel, and the people themselves.
+    pub fn apply_channel_roster(&mut self, channel: &ChannelId, users: Vec<User>) -> Vec<Change> {
+        self.channel_members.insert(
+            channel.clone(),
+            users.iter().map(|u| u.id.clone()).collect(),
+        );
+        self.apply_users(users)
     }
 
     /// Fold a category shut, or open it again.
@@ -869,11 +971,20 @@ impl Store {
                 self.users.insert(id.clone(), user.clone());
                 vec![Change::User(id)]
             }
-            // Presence, typing and anything unrecognised carry no state this
-            // store owns yet. Returning no changes is correct, not a stub.
-            WsEvent::StatusChange { .. } | WsEvent::Typing { .. } | WsEvent::Unknown { .. } => {
-                Vec::new()
+            WsEvent::StatusChange { user_id, status } => {
+                let id = UserId::new(user_id);
+                let presence = mm_types::Presence::parse(status);
+                if self.statuses.insert(id.clone(), presence) == Some(presence) {
+                    // The server repeats a presence when a second device
+                    // reports it; redrawing every row for that is waste.
+                    return Vec::new();
+                }
+                vec![Change::User(id)]
             }
+            // Typing expires on a clock, which this store deliberately
+            // does not have, so it is the window's to hold. Returning no
+            // changes is correct, not a stub.
+            WsEvent::Typing { .. } | WsEvent::Unknown { .. } => Vec::new(),
         }
     }
 
