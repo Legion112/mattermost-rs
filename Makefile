@@ -100,8 +100,32 @@ test-doc: ## Run the doctests (they do NOT count toward the coverage gate)
 check-deps: ## Assert every member is classified and no gated crate can reach I/O
 	$(XTASK) check-deps
 
+# How many checks to run at once. The useful parallelism here is two
+# cargos, not more: `clippy`, `test` and `check-deps` share `target/` and
+# take turns on its lock, while `cover-gate` builds into
+# `target/llvm-cov-target` with instrumenting rustflags and so has a lock
+# and a cache of its own. Running those two streams together is most of
+# the wall clock back; running four cargos would only queue three of them
+# on one lock and halve the file cache each gets.
+JOBS ?= 4
+
+.PHONY: parity
+parity: ## Regenerate docs/parity.md from docs/parity.toml
+	$(XTASK) parity
+
+.PHONY: parity-check
+parity-check: ## Assert the parity matrix matches the code and docs/parity.md
+	$(XTASK) parity --check
+
 .PHONY: check
-check: fmt-check clippy test check-deps cover-gate ## Fast local checks (no network)
+check: ## Fast local checks (no network)
+	@# `-O` groups each target's output instead of interleaving two cargos
+	@# line by line, which is the difference between a parallel build you
+	@# can read and one you cannot.
+	@$(MAKE) --no-print-directory -j$(JOBS) -O check-all
+
+.PHONY: check-all
+check-all: fmt-check clippy test check-deps parity-check cover-gate
 
 .PHONY: ci
 ci: check audit ## Exactly what CI runs — use this before pushing

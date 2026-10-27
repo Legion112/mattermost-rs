@@ -7,10 +7,12 @@
 //! this binary, and CI calls it directly.
 
 mod aptdeps;
+mod check;
 mod coverage;
 mod deps;
 mod doctor;
 mod package;
+mod parity;
 mod version;
 
 use std::process::ExitCode;
@@ -39,7 +41,9 @@ fn main() -> ExitCode {
     let rest = &args[1..];
 
     let result = match task.as_str() {
+        "check" => check::run(rest),
         "check-deps" => deps::run(),
+        "parity" => parity::run(rest),
         "coverage" => coverage::run(rest),
         "doctor" => doctor::run(),
         "apt-deps" => aptdeps::run(),

@@ -25,7 +25,7 @@ upstream = "server-api"
 status   = "done"
 endpoints = [
   "GET /api/v4/users/me/teams/{team_id}/channels/members",
-  "POST /api/v4/channels/members/{user_id}/view",
+  "POST /api/v4/channels/members/me/view",
 ]
 ws_events        = ["channel_member_updated", "multiple_channels_viewed"]
 verified_against = "12.0.1"
@@ -161,3 +161,98 @@ adjacency cannot be established, rather than joining two disjoint runs and \
 letting the reader scroll past messages with nothing on screen to say so. The \
 plan's full multi-segment model is not built, which is what `since`-based \
 backfill needs. Until then every fetch is anchored to what is held."""
+
+[[feature]]
+id       = "sidebar.categories"
+area     = "sidebar"
+upstream = "server-api"
+status   = "done"
+endpoints = [
+  "GET /api/v4/users/{user_id}/teams/{team_id}/channels/categories",
+  "PUT /api/v4/users/{user_id}/teams/{team_id}/channels/categories/{category_id}",
+]
+verified_against = "12.0.1"
+notes = """
+The server's grouping and ordering, including Favorites, Direct Messages and \
+the user's own categories, with the stacking taken from `order` rather than \
+from the array. Folding a category is written back: verified on a live server \
+by folding one from the client and reading the flag back, false then true then \
+false. A folded category still shows its unread channels and whichever channel \
+is open, which is what folding means in Mattermost. An empty `sorting` -- what \
+the server sends for a category nobody has reordered -- is drawn \
+alphabetically, which is inferred from the web app rather than read from the \
+server."""
+
+[[feature]]
+id       = "threads.view"
+area     = "threads"
+upstream = "server-api"
+status   = "partial"
+endpoints = ["GET /api/v4/users/{user_id}/teams/{team_id}/threads"]
+verified_against = "12.0.1"
+notes = """
+The followed-thread list, with the root message, the channel, the \
+participants' faces and the reply count, and Followed/Unreads tabs. The totals \
+behind the sidebar badge are the server's account-wide ones, not a count of \
+the page: confirmed on a live server reporting 961 threads while returning 50. \
+NOT built: the filter control beside the tabs, and following or unfollowing a \
+thread from here."""
+
+[[feature]]
+id       = "drafts.view"
+area     = "drafts"
+upstream = "server-api"
+status   = "partial"
+endpoints = ["GET /api/v4/users/{user_id}/teams/{team_id}/drafts"]
+verified_against = "12.0.1"
+notes = """
+Drafts are server-side, so what was typed in the web app is listed here, and \
+choosing one goes to its channel. Verified against a live account holding 11 \
+of them. NOT built: this client writes no drafts of its own, so a message \
+half-typed here is lost on switching channels -- the composer's text is still \
+widget state rather than a draft in the store."""
+
+[[feature]]
+id       = "posts.reactions"
+area     = "posts"
+upstream = "server-api"
+status   = "done"
+endpoints = [
+  "POST /api/v4/reactions",
+  "DELETE /api/v4/users/{user_id}/posts/{post_id}/reactions/{emoji_name}",
+]
+ws_events        = ["reaction_added", "reaction_removed"]
+verified_against = "12.0.1"
+notes = """
+Reactions on the message and one-click reactions on the hover toolbar, both \
+toggles: there is no separate way to take a reaction back, here or anywhere in \
+Mattermost. The one-click buttons are ranked by what this reader uses most. \
+Custom emoji are NOT fetched, so one resolves to its shortcode rather than an \
+image."""
+
+[[feature]]
+id       = "files.inline_images"
+area     = "files"
+upstream = "server-api"
+status   = "partial"
+endpoints = [
+  "GET /api/v4/files/{file_id}",
+  "GET /api/v4/files/{file_id}/preview",
+]
+verified_against = "12.0.1"
+notes = """
+An attached image is drawn in the row at the size its metadata states, from \
+the `mini_preview` thumbnail that rides in the post so the row never reflows, \
+and clicking it opens the full-size copy in a window. NOT built: upload, \
+download to disk, and any non-image attachment, which shows as a line of text. \
+An animated GIF renders its first frame."""
+
+[[feature]]
+id       = "search"
+area     = "search"
+upstream = "server-api"
+status   = "planned"
+notes = """
+No search of any kind: not messages, not channels, not people. The largest \
+single gap against the Electron client, and the one most likely to send a \
+reader back to it."""

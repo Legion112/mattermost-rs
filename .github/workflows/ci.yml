@@ -32,14 +32,25 @@ env:
 # Every step below is a single command. Anything with logic in it is a task in
 # the xtask crate, so that CI and a workstation run the same compiled code
 # rather than CI running a shell transcription of it.
+#
+# Four jobs rather than one, because they are independent and a run costs
+# what its slowest job costs rather than the sum of all of them. They are
+# split along what they *build*, not along what they check: `lint` and
+# `test` share `target/`, while `coverage` builds everything again with
+# instrumenting rustflags and so can never reuse their artifacts. Putting
+# those two in one job meant each one invalidating the other's cache.
+#
+# Each job keeps its own cache for the same reason -- a shared key would
+# have four jobs writing one entry, and the instrumented artifacts would
+# evict the ordinary ones every run.
 jobs:
-  check:
-    name: check (fmt, clippy, tests, 100% gate)
+  lint:
+    name: lint (fmt, clippy, deps, parity, audit)
     # Pinned, never ubuntu-latest: latest will roll to 26.04 and silently
     # change glibc, GTK and the .deb's dependency resolution. 24.04 is what
     # this project targets and what the maintainer runs.
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -53,14 +64,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-24.04-1.92.0
+          shared-key: ubuntu-24.04-1.92.0-lint
           # PR branches read the cache but do not thrash it.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # mm-gui has no GTK dependency yet -- it arrives in P1. Installing the
-      # headers now is cheap insurance: without this step, the commit that adds
-      # `gtk4` to mm-gui turns the build red for a reason that has nothing to
-      # do with that commit.
       - name: install system build dependencies
         run: cargo run -q -p xtask -- apt-deps
 
@@ -69,12 +76,53 @@ jobs:
 
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-features --locked
 
       # Asserts every workspace member is classified gated/ungated, and that no
       # gated crate can transitively reach tokio, reqwest, gtk4, glib, ksni,
       # zbus, rusqlite or bollard. That invariant is what makes 100% reachable.
       - run: cargo run -q -p xtask -- check-deps
+
+      # Asserts the parity matrix tells the truth, and that docs/parity.md is
+      # the file the matrix generates rather than one edited by hand.
+      - run: cargo run -q -p xtask -- parity --check
+
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-audit }
+      # Assessed advisories live in .cargo/audit.toml with their reasoning;
+      # `make audit` is the same command a developer runs locally.
+      - run: make audit
+
+  test:
+    name: test (unit and property)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: install the pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-24.04-1.92.0-test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: install system build dependencies
+        run: cargo run -q -p xtask -- apt-deps
+
+      - run: cargo test --workspace --all-features --locked
+
+  coverage:
+    name: 100% gate on the gated crates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: install the pinned toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-24.04-1.92.0-cover
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: install system build dependencies
+        run: cargo run -q -p xtask -- apt-deps
 
       - uses: taiki-e/install-action@v2
         with: { tool: cargo-llvm-cov }
@@ -98,12 +146,6 @@ jobs:
           path: target/llvm-cov/html
           retention-days: 14
 
-      - uses: taiki-e/install-action@v2
-        with: { tool: cargo-audit }
-      # Assessed advisories live in .cargo/audit.toml with their reasoning;
-      # `make audit` is the same command a developer runs locally.
-      - run: make audit
-
   build:
     name: build release binary
     runs-on: ubuntu-24.04
@@ -114,7 +156,7 @@ jobs:
         run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ubuntu-24.04-1.92.0
+          shared-key: ubuntu-24.04-1.92.0-build
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: install system build dependencies
         run: cargo run -q -p xtask -- apt-deps
