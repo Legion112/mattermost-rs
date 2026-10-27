@@ -9,12 +9,20 @@ authors.workspace      = true
 repository.workspace   = true
 
 [dependencies]
+ksni = "0.3"
 mm-desktop = { path = "../mm-desktop" }
 
 # notify-rust goes through zbus, which is pure Rust: no libdbus, no C
 # dependency, and a shorter runtime dependency list on the .deb.
 notify-rust = { version = "4", default-features = false, features = ["z"] }
-zbus = { version = "5", default-features = false, features = ["blocking-api"] }
+png = "0.17"
+# The async API, not the blocking one. `zbus::blocking` builds its own
+# multi-threaded runtime, and ksni's `tokio` feature turns zbus's on for
+# the whole graph -- so a blocking call from inside the engine's runtime
+# panics with "cannot start a runtime from within a runtime". That is a
+# feature-unification trap: the blocking call was fine until another
+# crate in the tree asked zbus for tokio.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [lints]
 workspace = true

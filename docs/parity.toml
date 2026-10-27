@@ -83,17 +83,33 @@ fallback = "OpenInBrowser permalink to the post"
 id       = "desktop.tray"
 area     = "desktop"
 upstream = "desktop"
-status   = "planned"
+status   = "partial"
+endpoints = []
+verified_against = ""
 notes = """
-**The phase-zero question is answered for this machine.** GNOME 46 dropped \
-StatusNotifierItem, so a tray icon depends on an AppIndicator extension being \
-installed -- and `gnome-extensions list` here reports \
-`ubuntu-appindicators@ubuntu.com`, which Ubuntu ships and enables by default. \
-A `ksni` tray would therefore work on this desktop, and the honest framing \
-for anyone else is "needs the AppIndicator extension" rather than "does not \
-work on GNOME". Not built yet. Note that the unread count already reaches the \
-dock without a tray at all -- see `desktop.badge` -- which was the main thing \
-a tray icon was wanted for."""
+An icon in the tray with an Open/Quit menu, and **closing the window hides \
+it there** rather than quitting -- so notifications keep arriving and the \
+unread count keeps moving, which is the entire point of having one. Only \
+when there is a tray: the engine tells the window whether an icon actually \
+registered, because hiding with nowhere to click would put the application \
+somewhere the reader cannot get it back from.
+
+Two things had to be got right, neither obvious. GNOME 46 dropped \
+`StatusNotifierItem` from the shell, so this needs an `AppIndicator` \
+extension -- Ubuntu ships and enables one, which is the answer to the \
+question phase zero left open. And the icon is served as **pixels, with no \
+icon name at all**: a host given both prefers the name, resolves it against \
+its own idea of the icon theme, fails to find an application installed under \
+`~/.local/share/icons`, and draws three dots. Which is what it did, with a \
+perfectly good pixmap sitting on the bus beside the name it could not \
+resolve.
+
+The menu has two entries and will not grow: a tray menu is reached by \
+accident as often as on purpose, and everything on it is one slip from being \
+clicked. Verified on this machine: the icon drew, closing the window left \
+the process running with the icon in place, and Open brought it back. NOT \
+built: an unread count drawn *on* the tray icon (it is in the tooltip, and \
+on the dock icon -- see `desktop.badge`), and starting hidden."""
 
 [[feature]]
 id       = "auth.password_and_pat"

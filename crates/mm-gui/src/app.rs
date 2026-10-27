@@ -201,6 +201,11 @@ struct Ui {
     /// A `mattermost://` link naming a channel this client has not
     /// heard of yet. Retried until the channel list arrives.
     pending_link: Rc<RefCell<Option<String>>>,
+    /// Whether an icon made it into the tray. Closing the window hides
+    /// it when there is one and quits when there is not: hiding with
+    /// nowhere to click would put the application somewhere the reader
+    /// cannot get it back from.
+    has_tray: Rc<std::cell::Cell<bool>>,
     /// What the server last answered for a quick-switcher query, and a
     /// way to redraw the open switcher when a later answer lands.
     /// `None` when no switcher is open, which is also what stops a
@@ -594,9 +599,18 @@ fn install_styles() {
 /// desktop decides to put it.
 fn remember_geometry(ui: &Ui) {
     let on_close = ui.clone();
-    ui.window.connect_close_request(move |_| {
+    ui.window.connect_close_request(move |window| {
         on_close.remember_state();
-        glib::Propagation::Proceed
+        if !on_close.has_tray.get() {
+            return glib::Propagation::Proceed;
+        }
+        // Closed to the tray, the way every chat client behaves:
+        // notifications keep arriving and the unread count keeps
+        // moving, which is the entire point of having the icon.
+        // Only when there *is* an icon to click -- hiding with
+        // nowhere to click would be hiding the application.
+        window.set_visible(false);
+        glib::Propagation::Stop
     });
 }
 
@@ -778,6 +792,7 @@ fn build(
         provisional: Rc::new(std::cell::Cell::new(false)),
         badge: Rc::new(std::cell::Cell::new(NO_BADGE_YET)),
         pending_link: Rc::new(RefCell::new(None)),
+        has_tray: Rc::new(std::cell::Cell::new(false)),
         elsewhere: Rc::new(RefCell::new(Elsewhere::default())),
         refill_switcher: Rc::new(RefCell::new(None)),
         window: window.clone(),
@@ -4724,6 +4739,19 @@ impl Ui {
                 if let Some(open) = self.selected.borrow().clone() {
                     self.commands.send(Command::OpenChannel(open)).ok();
                 }
+            }
+            Event::TrayReady => self.has_tray.set(true),
+            Event::Present => {
+                self.window.set_visible(true);
+                self.window.present();
+            }
+            Event::Quit => {
+                // Through the window rather than `app.quit()`, so that
+                // the close handler still writes down the size and the
+                // channel -- and it has to be told not to hide this
+                // time, which is what clearing the flag does.
+                self.has_tray.set(false);
+                self.window.close();
             }
             Event::Status(text) => self.set_status(&text),
             Event::Failed(text) => self.set_status(&format!("error: {text}")),

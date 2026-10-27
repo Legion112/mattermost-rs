@@ -31,6 +31,7 @@ pub(crate) fn install() -> Result<(), String> {
     write(&entry, mm_desktop::render_desktop_entry(&binary).as_bytes())?;
 
     println!("installed:");
+    write_theme_index()?;
     println!("  {}", entry.display());
     println!("  {}", icon.display());
     println!("  pointing at {}", binary.display());
@@ -96,6 +97,32 @@ fn entry_path() -> Result<PathBuf, String> {
     Ok(data_home()?
         .join(ENTRY_DIR)
         .join(format!("{id}.desktop", id = mm_desktop::APP_ID)))
+}
+
+/// Give `~/.local/share/icons/hicolor` an `index.theme` if it has none.
+///
+/// Without one the directory is not a theme, `gtk-update-icon-cache`
+/// refuses it, and **nothing looks the icon up by name** -- which is
+/// invisible until something asks for it by name rather than by path.
+/// The tray does exactly that, so the icon registered fine and then
+/// drew as nothing.
+///
+/// Never overwritten: a hicolor with an index already belongs to
+/// something else, very likely the distribution.
+fn write_theme_index() -> Result<(), String> {
+    let path = data_home()?.join("icons/hicolor/index.theme");
+    if path.exists() {
+        return Ok(());
+    }
+    write(
+        &path,
+        b"[Icon Theme]\nName=Hicolor\nComment=Fallback icon theme\nDirectories=scalable/apps\n\n          [scalable/apps]\nSize=48\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Applications\n",
+    )?;
+    println!(
+        "  {} (created: the directory was not a theme)",
+        path.display()
+    );
+    Ok(())
 }
 
 fn repo_root() -> PathBuf {

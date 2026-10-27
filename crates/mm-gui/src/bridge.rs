@@ -291,6 +291,14 @@ pub enum Event {
     /// The WebSocket says a resync is needed: either it reconnected with a new
     /// connection id, or the event sequence had a hole.
     ResyncRequired(String),
+    /// There is a tray, so closing the window may hide it rather than
+    /// quit. Without this the window must quit on close, or the
+    /// application goes somewhere the reader cannot get it back from.
+    TrayReady,
+    /// Bring the window to the front.
+    Present,
+    /// Leave, properly.
+    Quit,
     /// Something to show in the status line.
     Status(String),
     /// Something went wrong, in words meant for a person.

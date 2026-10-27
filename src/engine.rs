@@ -47,6 +47,12 @@ struct Active {
     /// Channels whose first page has already been asked for, so a
     /// resync does not fetch the whole account again.
     warmed: Arc<tokio::sync::Mutex<std::collections::HashSet<ChannelId>>>,
+    /// The tray icon, where there is a tray to put one in. `None` on a
+    /// desktop with no `StatusNotifierItem` host -- GNOME without an
+    /// `AppIndicator` extension, most notably -- and the window is told,
+    /// because closing to a tray that is not there would hide the
+    /// application somewhere unreachable.
+    tray: Option<mm_desktop_xdg::TrayHandle>,
 }
 
 impl Active {
@@ -359,6 +365,44 @@ async fn save_file(
     }
 }
 
+/// Put an icon in the tray, and turn its clicks into events.
+///
+/// `None` where no `StatusNotifierItem` host is listening, which the
+/// window needs to know: without a tray, closing the window has to
+/// quit rather than hide, or the application goes somewhere the reader
+/// cannot get it back from.
+///
+/// The actions arrive on a plain channel from the tray's own thread,
+/// so they are forwarded by a blocking task rather than awaited.
+async fn spawn_tray(events: &async_channel::Sender<Event>) -> Option<mm_desktop_xdg::TrayHandle> {
+    let (acts, from_tray) = std::sync::mpsc::channel();
+    let handle = match mm_desktop_xdg::show_tray(acts).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            // Said once. A desktop with no tray host is a normal
+            // state, but a tray that silently never appears looks
+            // exactly like one that is broken.
+            let _ = events.send(Event::Status(e)).await;
+            return None;
+        }
+    };
+
+    let out = events.clone();
+    std::thread::spawn(move || {
+        while let Ok(action) = from_tray.recv() {
+            let event = match action {
+                mm_desktop::TrayAction::Open => Event::Present,
+                mm_desktop::TrayAction::Quit => Event::Quit,
+            };
+            if out.send_blocking(event).is_err() {
+                return;
+            }
+        }
+    });
+    let _ = events.send(Event::TrayReady).await;
+    Some(handle)
+}
+
 /// Show a notification, and go to the channel if it is clicked.
 ///
 /// On a thread of its own, because waiting for somebody to click a
@@ -425,9 +469,13 @@ async fn follow_permalink(a: &Active, post: &PostId, events: &async_channel::Sen
 /// A desktop with nothing listening for the signal simply ignores it,
 /// so a failure here is not worth the reader's attention: it goes to
 /// the status line and nowhere else.
-async fn set_badge(mentions: i64, events: &async_channel::Sender<Event>) {
-    if let Err(e) = mm_desktop_xdg::set_badge(mm_desktop::Badge::for_mentions(mentions)) {
+async fn set_badge(a: &Active, mentions: i64, events: &async_channel::Sender<Event>) {
+    if let Err(e) = mm_desktop_xdg::set_badge(mm_desktop::Badge::for_mentions(mentions)).await {
         let _ = events.send(Event::Status(e)).await;
+    }
+    // The same number, in the other place it belongs.
+    if let Some(tray) = &a.tray {
+        mm_desktop_xdg::update_tray(tray, mentions).await;
     }
 }
 
@@ -775,7 +823,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::JoinChannel(channel) => join_channel(a, &channel, events).await,
         Command::OpenDirect(user) => open_direct(a, &user, events).await,
         Command::FollowPermalink(post) => follow_permalink(a, &post, events).await,
-        Command::Badge(mentions) => set_badge(mentions, events).await,
+        Command::Badge(mentions) => set_badge(a, mentions, events).await,
         Command::SetMuted { channel, muted } => {
             let user = UserId::new(&a.session.user_id);
             let request = rest::set_channel_muted(&channel, &user, muted);
@@ -1058,6 +1106,7 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         events.clone(),
     ));
 
+    let tray = spawn_tray(events).await;
     Some(Active {
         client,
         session,
@@ -1066,6 +1115,7 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         collapsed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         downloads: Arc::new(tokio::sync::Semaphore::new(6)),
         warmed: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        tray,
     })
 }
 
