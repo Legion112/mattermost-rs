@@ -279,7 +279,8 @@ fn install_styles() {
              border: 1px solid @borders; \
              border-radius: 6px; \
              padding: 1px; \
-         }",
+         }\n\
+         .mmrs-destructive label { color: @destructive_color; }",
     );
     if let Some(display) = gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
@@ -886,12 +887,11 @@ fn build_message_tools(
     row: &gtk::Box,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
 ) -> gtk::Box {
     // The hover toolbar: the one-click reactions this reader uses most,
-    // then reply, then copy-link. Mattermost reveals these on hover rather
-    // than drawing them on every message, and a channel with a toolbar per
-    // row is unreadable.
+    // then save and reply, then the overflow menu. Mattermost reveals
+    // these on hover rather than drawing them on every message, and a
+    // channel with a toolbar on every row is unreadable.
     //
     // The quick-reaction buttons are built once, here, and relabelled on
     // bind: `ListView` recycles rows, so a button made per bind would be a
@@ -932,30 +932,31 @@ fn build_message_tools(
     reply.set_tooltip_text(Some("Reply in thread"));
     tools.append(&reply);
 
-    let copier = gtk::Button::from_icon_name("edit-copy-symbolic");
-    copier.add_css_class("flat");
-    copier.set_tooltip_text(Some("Copy link to message"));
+    // Saving, which Mattermost puts in the toolbar as well as the menu.
+    // Copy-link moved the other way, into the menu, where Mattermost has
+    // it: a toolbar of six buttons over a message is a lot of furniture.
+    let saver = gtk::Button::from_icon_name("bookmark-new-symbolic");
+    saver.add_css_class("flat");
     {
-        // No request: a permalink is the server, the team and the post id,
-        // all of which are already here.
+        let commands = commands.clone();
         let store = Rc::clone(store);
-        let server = Rc::clone(server);
         let row = row.clone();
-        copier.connect_clicked(move |button| {
+        saver.connect_clicked(move |_| {
             let post = row.widget_name();
             if post.is_empty() {
                 return;
             }
-            let address = store
-                .borrow()
-                .permalink(&server.borrow(), &PostId::new(post.as_str()));
-            if let (Some(address), Some(display)) = (address, gdk::Display::default()) {
-                display.clipboard().set_text(&address);
-                button.set_tooltip_text(Some("Link copied"));
-            }
+            let post = PostId::new(post.as_str());
+            let already = store.borrow().is_saved(&post);
+            commands
+                .send(Command::Save {
+                    post,
+                    saved: !already,
+                })
+                .ok();
         });
     }
-    tools.append(&copier);
+    tools.append(&saver);
 
     // Everything else, behind the "…" the Electron client uses. Built as
     // a plain popover of buttons rather than a `GMenu`: the entries change
@@ -1013,7 +1014,6 @@ fn setup_post_row(
     item: &gtk::ListItem,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
-    server: &Rc<RefCell<String>>,
 ) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     row.set_margin_start(12);
@@ -1087,7 +1087,7 @@ fn setup_post_row(
     line.append(&face);
     line.append(&main);
 
-    let tools = build_message_tools(&row, commands, store, server);
+    let tools = build_message_tools(&row, commands, store);
 
     row.append(&day);
     // The reply button floats over the message rather than sitting beside
@@ -1395,6 +1395,7 @@ fn fill_message_menu(
     data: &PostRow,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) {
     let Some(actions) = popover.child().and_downcast::<gtk::Box>() else {
         return;
@@ -1416,11 +1417,24 @@ fn fill_message_menu(
         )
     };
 
-    let entry = |label: &str| {
+    // An icon, then a left-aligned label -- not a centred one. Mattermost
+    // lays its menu out this way and a column of centred text reads as a
+    // different application. The icon names are checked against the theme:
+    // one it does not have draws a broken-image placeholder and logs
+    // nothing.
+    let entry = |icon: &str, label: &str| {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        line.append(&gtk::Image::from_icon_name(icon));
+        line.append(
+            &gtk::Label::builder()
+                .label(label)
+                .xalign(0.0)
+                .hexpand(true)
+                .build(),
+        );
         gtk::Button::builder()
-            .label(label)
+            .child(&line)
             .css_classes(["flat"])
-            .halign(gtk::Align::Fill)
             .build()
     };
     let add = |button: &gtk::Button, command: Command| {
@@ -1432,26 +1446,48 @@ fn fill_message_menu(
         });
         actions.append(button);
     };
+    let copies = |button: &gtk::Button, text: String| {
+        let popover = popover.clone();
+        button.connect_clicked(move |_| {
+            if let Some(display) = gdk::Display::default() {
+                display.clipboard().set_text(&text);
+            }
+            popover.popdown();
+        });
+        actions.append(button);
+    };
 
-    add(&entry("Reply in thread"), Command::OpenThread(post.clone()));
-    add(&entry("Mark as unread"), Command::MarkUnread(post.clone()));
     add(
-        &entry(if saved {
-            "Remove from saved"
-        } else {
-            "Save message"
-        }),
+        &entry("mail-reply-sender-symbolic", "Reply in thread"),
+        Command::OpenThread(post.clone()),
+    );
+    add(
+        &entry("mail-unread-symbolic", "Mark as unread"),
+        Command::MarkUnread(post.clone()),
+    );
+    add(
+        &entry(
+            "bookmark-new-symbolic",
+            if saved {
+                "Remove from saved"
+            } else {
+                "Save message"
+            },
+        ),
         Command::Save {
             post: post.clone(),
             saved: !saved,
         },
     );
     add(
-        &entry(if pinned {
-            "Unpin from channel"
-        } else {
-            "Pin to channel"
-        }),
+        &entry(
+            "view-pin-symbolic",
+            if pinned {
+                "Unpin from channel"
+            } else {
+                "Pin to channel"
+            },
+        ),
         Command::Pin {
             post: post.clone(),
             pinned: !pinned,
@@ -1459,24 +1495,17 @@ fn fill_message_menu(
     );
 
     // Copying is local, so it goes straight to the clipboard rather than
-    // through the engine.
-    let copy_text = entry("Copy text");
-    {
-        let body = data.plain_body();
-        let popover = popover.clone();
-        copy_text.connect_clicked(move |_| {
-            if let Some(display) = gdk::Display::default() {
-                display.clipboard().set_text(&body);
-            }
-            popover.popdown();
-        });
+    // through the engine. Mattermost groups the two of them apart.
+    actions.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    if let Some(address) = store.borrow().permalink(&server.borrow(), &post) {
+        copies(&entry("insert-link-symbolic", "Copy link"), address);
     }
-    actions.append(&copy_text);
+    copies(&entry("edit-copy-symbolic", "Copy text"), data.plain_body());
 
     if mine {
         actions.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        let delete = entry("Delete message");
-        delete.add_css_class("destructive-action");
+        let delete = entry("user-trash-symbolic", "Delete message");
+        delete.add_css_class("mmrs-destructive");
         add(&delete, Command::Delete(post));
     }
 }
@@ -1488,6 +1517,7 @@ fn bind_message_tools(
     data: &PostRow,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) {
     if let Some(tools) = floating.last_child().and_downcast::<gtk::Box>() {
         tools.set_visible(false);
@@ -1500,7 +1530,7 @@ fn bind_message_tools(
         if let Some(more) = tools.last_child().and_downcast::<gtk::MenuButton>()
             && let Some(actions) = more.popover().and_downcast::<gtk::Popover>()
         {
-            fill_message_menu(&actions, data, commands, store);
+            fill_message_menu(&actions, data, commands, store, server);
         }
 
         let mut button = tools.first_child();
@@ -1524,6 +1554,7 @@ fn bind_post_row(
     item: &gtk::ListItem,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
     store: &Rc<RefCell<Store>>,
+    server: &Rc<RefCell<String>>,
 ) {
     let Some(data) = item.item().and_downcast::<PostRow>() else {
         return;
@@ -1615,7 +1646,7 @@ fn bind_post_row(
         body.remove_css_class("dim-label");
     }
 
-    bind_message_tools(&floating, &data, commands, store);
+    bind_message_tools(&floating, &data, commands, store, server);
 
     bind_cards(&cards, &data);
     bind_images(&images, &data);
@@ -1790,17 +1821,17 @@ fn build_post_list(
     let factory = gtk::SignalListItemFactory::new();
     let sender = commands.clone();
     let store_for_setup = Rc::clone(store);
-    let server_for_setup = Rc::clone(server);
     factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(item, &sender, &store_for_setup, &server_for_setup);
+            setup_post_row(item, &sender, &store_for_setup);
         }
     });
     let sender = commands.clone();
     let store_for_bind = Rc::clone(store);
+    let server_for_bind = Rc::clone(server);
     factory.connect_bind(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            bind_post_row(item, &sender, &store_for_bind);
+            bind_post_row(item, &sender, &store_for_bind, &server_for_bind);
         }
     });
     let post_view = gtk::ListView::builder()
