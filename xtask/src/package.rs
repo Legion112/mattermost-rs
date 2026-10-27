@@ -1,5 +1,5 @@
-//! `cargo xtask package --out <dir>` — strip the release binary, smoke-test
-//! it, and write checksums.
+//! `cargo xtask package --out <dir>` — copy the release binary out,
+//! strip it, smoke-test it, and write checksums.
 //!
 //! In Rust rather than a `run: |` block in the workflow so that the packaging
 //! steps are the same ones locally and in CI, and so the smoke test can assert
@@ -24,9 +24,19 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    // Strip before the smoke test, so what we check is what we ship.
+    std::fs::create_dir_all(&out)
+        .map_err(|e| format!("could not create {}: {e}", out.display()))?;
+    let shipped = out.join(BIN);
+    std::fs::copy(&built, &shipped)
+        .map_err(|e| format!("could not copy to {}: {e}", shipped.display()))?;
+
+    // Stripped where it will be shipped from, not where it was built.
+    // Stripping in place rewrites the file the developer may be running
+    // -- `strip` then fails with "Text file busy", which is a confusing
+    // way to be told the app is open. Everything below checks the copy,
+    // so what is asserted is still exactly what is shipped.
     let status = Command::new("strip")
-        .arg(&built)
+        .arg(&shipped)
         .status()
         .map_err(|e| format!("could not run strip: {e}"))?;
     if !status.success() {
@@ -34,7 +44,7 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
     }
 
     let want = env!("CARGO_PKG_VERSION");
-    let reported = Command::new(&built)
+    let reported = Command::new(&shipped)
         .arg("--version")
         .output()
         .map_err(|e| format!("could not run the built binary: {e}"))?;
@@ -53,19 +63,13 @@ pub(crate) fn run(args: &[String]) -> Result<(), String> {
         ));
     }
     println!("smoke test: {line}");
-    assert_no_homebrew_linkage(&built)?;
-
-    std::fs::create_dir_all(&out)
-        .map_err(|e| format!("could not create {}: {e}", out.display()))?;
-    let shipped = out.join(BIN);
-    std::fs::copy(&built, &shipped)
-        .map_err(|e| format!("could not copy to {}: {e}", shipped.display()))?;
+    assert_no_homebrew_linkage(&shipped)?;
 
     // Before the checksums, so the package is in them: a manifest that
     // omits an artefact is worse than no manifest, because it looks
     // complete.
     if args.iter().any(|a| a == "--deb") {
-        let deb = crate::deb::build(&out, &built, want)?;
+        let deb = crate::deb::build(&out, &shipped, want)?;
         println!("built {}", deb.display());
     }
 
