@@ -341,14 +341,15 @@ contains it, and unread first within each tier. Verified on a live account by \
 typing `env` and landing in Prod-environment."""
 
 [[feature]]
-id       = "search.messages"
+id       = "search.people_and_channels"
 area     = "search"
 upstream = "server-api"
 status   = "planned"
 notes = """
-No message search, and no searching for people or for channels the reader is \
-not already in. The largest remaining gap against the Electron client, and the \
-one most likely to send a reader back to it."""
+Message search is built -- see `posts.search`. What is left is searching for \
+**people** and for **channels the reader is not already in**: the quick \
+switcher only offers what is in the sidebar, so a channel you have not joined \
+cannot be found at all without going back to the Electron client."""
 
 [[feature]]
 id       = "posts.link_previews"

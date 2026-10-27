@@ -185,7 +185,7 @@ real server yet.
 | feature | status | verified | notes |
 |---|---|---|---|
 | `search.quick_switcher` | done | 12.0.1 | Ctrl+K, the way Mattermost binds it: type a few letters, press Return, be there. The one piece of searching that needs no endpoint -- every channel the reader is in is already in the store -- so it is ranked locally: a name that starts with what was typed, then one where a word does, then one that merely contains it, and unread first within each tier. Verified on a live account by typing `env` and landing in Prod-environment. |
-| `search.messages` | planned | — | No message search, and no searching for people or for channels the reader is not already in. The largest remaining gap against the Electron client, and the one most likely to send a reader back to it. |
+| `search.people_and_channels` | planned | — | Message search is built -- see `posts.search`. What is left is searching for **people** and for **channels the reader is not already in**: the quick switcher only offers what is in the sidebar, so a channel you have not joined cannot be found at all without going back to the Electron client. |
 
 ## sidebar
 
