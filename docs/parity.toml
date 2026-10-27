@@ -363,9 +363,23 @@ recently, and the alphabet only to break a tie. The roster is fetched once \
 when the channel opens rather than per keystroke the way the web app does it; \
 a channel never opened falls back to everyone known. Verified on a live \
 account: `@` in Клиенты offers aragorn first, who had just posted, where it \
-previously offered an alphabetical mix drawn from every channel visited. NOT \
-built: there is no `/users/autocomplete` call, so somebody this client has \
-never seen is typed out in full. `@all`, `@channel` and `@here` are offered \
+previously offered an alphabetical mix drawn from every channel visited. **The server is asked when the store is short of names.** Only then: on a \
+small server, or for somebody already seen, the local list is the whole \
+answer and a request would be waste -- so it goes out when fewer than three \
+names match, the half-typed name is at least two characters, and those \
+exact letters have not been asked about already, which matters because this \
+runs on every keystroke. The answer comes back as two lists, in the channel \
+and on the team, and the in-channel one is *added* to the roster rather than \
+becoming it: replacing a channel's members with whoever's name starts with \
+"al" would shrink the channel to those people. The popup is in nothing the \
+redraw walks, so it keeps a way to draw itself again when the answer lands; \
+an answer to letters already typed past still adds the names but does not \
+redraw. `in_team` is required whenever `in_channel` is given -- without it \
+the server answers **500**, not 400, with "Team id parameter is required to \
+autocomplete by channel", which reads like a server fault rather than a \
+missing parameter. Verified on a live account: typing `@gera` offered \
+`@geralt`, a person this client had never seen, with their face fetched \
+behind it. `@all`, `@channel` and `@here` are offered \
 under their own SPECIAL MENTIONS heading, from the same list the renderer \
 highlights them with -- two lists would be a name the composer offers and \
 the message does not mark."""
@@ -650,9 +664,15 @@ line is omitted when there is no zone or this build's timezone database \
 has never heard of it, because a missing clock beats a wrong one. \
 Verified on a live account: aragorn's card reads his full name, \
 @aragorn, Project Manager/Operations Assistant, and 18:20 at GMT+03:00. \
-NOT built: the "Message" button that opens or creates a DM, custom \
-statuses, and the card over a `@mention` in message text rather than over \
-the author's name."""
+A **Message** button at the foot opens the conversation with that person, \
+and the server makes one if there is not one yet. Not offered for the \
+reader themself -- Mattermost has a self-DM and this is not how anyone \
+reaches it -- nor for somebody who has left, who cannot be written to. \
+Verified on a live account: the card for a colleague opened the DM with \
+them.
+
+NOT built: custom statuses, and the card over a `@mention` in message text \
+rather than over the author's name."""
 
 [[feature]]
 id       = "sidebar.drag_between_categories"
