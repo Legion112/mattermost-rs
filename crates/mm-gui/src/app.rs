@@ -1639,9 +1639,16 @@ fn build_composer(placeholder: &str) -> Composer {
     attach.set_margin_bottom(4);
     attach.set_margin_end(4);
 
+    let emoji = gtk::Button::from_icon_name("face-smile-symbolic");
+    emoji.set_tooltip_text(Some("Insert an emoji"));
+    emoji.add_css_class("flat");
+    emoji.set_valign(gtk::Align::End);
+    emoji.set_margin_bottom(4);
+
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.add_css_class("card");
     row.append(&scroll);
+    row.append(&emoji);
     row.append(&attach);
 
     // What has been chosen but not yet sent, above the box it will be
@@ -1666,6 +1673,7 @@ fn build_composer(placeholder: &str) -> Composer {
         chosen: Rc::new(RefCell::new(Vec::new())),
     };
     composer.wire_attach(&attach);
+    composer.wire_emoji(&emoji);
     composer.wire_paste();
     composer.wire_drop();
     composer
@@ -1700,6 +1708,36 @@ struct Composer {
 }
 
 impl Composer {
+    /// The smiley beside the paperclip: put an emoji in the message.
+    ///
+    /// The same picker the hover toolbar uses, and it inserts the
+    /// **shortcode** rather than the character. That is what
+    /// Mattermost stores and what the server's own clients render, so
+    /// a message written here reads the same everywhere -- and it
+    /// stays editable as text.
+    fn wire_emoji(&self, button: &gtk::Button) {
+        let composer = self.clone();
+        // Nothing to keep alive between openings, so the picker owns
+        // no state here; `false` is a flag the hover toolbar needs and
+        // a composer does not.
+        let picking = Rc::new(std::cell::Cell::new(false));
+        button.connect_clicked(move |button| {
+            let into = composer.clone();
+            open_emoji_picker(
+                button.upcast_ref::<gtk::Widget>(),
+                &picking,
+                move |shortcode| into.insert_text(&format!(":{shortcode}: ")),
+            );
+        });
+    }
+
+    /// Put text in at the caret, and leave the caret after it.
+    fn insert_text(&self, text: &str) {
+        let buffer = self.view.buffer();
+        buffer.insert_at_cursor(text);
+        self.view.grab_focus();
+    }
+
     /// Ctrl+V with a picture on the clipboard attaches it instead of
     /// pasting its text.
     ///

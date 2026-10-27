@@ -512,8 +512,11 @@ has none of its own. The caret moves there when a channel is opened. Both \
 composers, and the mention popup's Return still completes rather than sends, \
 because its key handler is installed first and stops the event while the \
 popup is up. Verified on a live account: three lines typed with Shift+Return \
-stayed three lines, and Return cleared the box. NOT built: the formatting \
-toolbar, the markdown preview eye, attachments and the emoji button."""
+stayed three lines, and Return cleared the box. A smiley beside the paperclip opens the same picker the hover toolbar \
+uses and inserts the **shortcode**, not the character: that is what \
+Mattermost stores and what every other client renders from, so a message \
+written here reads the same everywhere and stays editable as text. NOT \
+built: the formatting toolbar and the markdown preview eye."""
 
 [[feature]]
 id       = "posts.spellcheck"
