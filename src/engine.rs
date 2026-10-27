@@ -932,6 +932,10 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::ReadAllThreads(team) => {
+            let user = UserId::new(&a.session.user_id);
+            best_effort(a, &rest::read_all_threads(&user, &team), events).await;
+        }
         Command::ReadThread { team, root, upto } => {
             let user = UserId::new(&a.session.user_id);
             // One past the last reply: the endpoint marks read *up to*

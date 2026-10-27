@@ -376,6 +376,28 @@ impl Store {
         vec![Change::Threads, Change::Sidebar]
     }
 
+    /// Record that every followed thread has been read.
+    pub fn read_all_threads_locally(&mut self) -> Vec<Change> {
+        let mut moved = false;
+        for thread in &mut self.threads {
+            if thread.is_unread() {
+                moved = true;
+                thread.unread_replies = 0;
+                thread.unread_mentions = 0;
+                thread.last_viewed_at = thread.last_reply_at;
+            }
+        }
+        // All of them, not just the page in hand: that is what the
+        // server was asked to do.
+        moved |= self.thread_totals.unread_threads != 0;
+        self.thread_totals = ThreadTotals::default();
+        if moved {
+            vec![Change::Threads, Change::Sidebar]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Mattermost sorts the view by last reply alone. Unread first is a
     /// deliberate difference and the same rule the sidebar already uses:
     /// the reason to open this view is to find what has moved.

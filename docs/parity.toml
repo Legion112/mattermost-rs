@@ -244,6 +244,7 @@ status   = "partial"
 endpoints = [
   "GET /api/v4/users/{user_id}/teams/{team_id}/threads",
   "PUT /api/v4/users/{user_id}/teams/{team_id}/threads/{thread_id}/read/{timestamp}",
+  "PUT /api/v4/users/{user_id}/teams/{team_id}/threads/read",
 ]
 verified_against = "12.0.1"
 notes = """
@@ -280,8 +281,17 @@ account, on a thread made unread for the purpose: the row left the Unreads \
 tab at once, the sidebar badge went with it, and the server's own thread \
 list then reported no unread threads.
 
-NOT built: the filter control beside the tabs, and marking every thread \
-read at once."""
+**Mark all read** sits at the far end of the tab row, which is where \
+Mattermost puts the one action that applies to the list rather than to a \
+row -- and with hundreds of followed threads it is the only way through a \
+morning's backlog. It clears the account-wide totals too, not only the \
+page in hand: that is what the server was asked to do, and a badge that \
+kept counting threads nobody can see would be a window arguing with \
+itself. Verified on a live account, against a thread made unread for the \
+purpose: the row stopped being unread, the sidebar badge went, and the \
+server's own thread list reported none.
+
+NOT built: the filter control beside the tabs."""
 
 [[feature]]
 id       = "drafts.view"

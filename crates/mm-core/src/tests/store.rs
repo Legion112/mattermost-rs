@@ -3067,3 +3067,42 @@ fn a_thread_marked_read_stops_being_unread_at_once() {
     assert!(store.read_thread_locally(&PostId::new("p1")).is_empty());
     assert!(store.read_thread_locally(&PostId::new("nope")).is_empty());
 }
+
+/// Marking every followed thread read clears the account-wide totals
+/// too, not just the page in hand -- that is what the server was
+/// asked to do, and a badge that kept counting threads nobody can
+/// see would be a window arguing with itself.
+#[test]
+fn marking_every_thread_read_clears_the_badge_as_well() {
+    let mut store = store();
+    assert!(store.read_all_threads_locally().is_empty());
+
+    store.apply_threads(&mm_types::ThreadList {
+        threads: vec![
+            mm_types::UserThread {
+                id: PostId::new("p1"),
+                unread_replies: 3,
+                last_reply_at: Timestamp(50),
+                post: Some(post("p1", "c1", 10)),
+                ..mm_types::UserThread::default()
+            },
+            mm_types::UserThread {
+                id: PostId::new("p2"),
+                post: Some(post("p2", "c1", 20)),
+                ..mm_types::UserThread::default()
+            },
+        ],
+        total_unread_threads: 40,
+        total_unread_mentions: 9,
+        ..mm_types::ThreadList::default()
+    });
+
+    assert_eq!(
+        store.read_all_threads_locally(),
+        [Change::Threads, Change::Sidebar]
+    );
+    assert!(store.followed_threads().iter().all(|t| !t.is_unread()));
+    assert_eq!(store.thread_totals, ThreadTotals::default());
+    // Again is not a change.
+    assert!(store.read_all_threads_locally().is_empty());
+}

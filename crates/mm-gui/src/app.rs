@@ -111,6 +111,9 @@ struct Ui {
     /// what they asked for.
     sidebar_unread_only: Rc<std::cell::Cell<bool>>,
     unreads_tab: gtk::ToggleButton,
+    /// Clears every followed thread at once, which is the only thing
+    /// to do with a morning's backlog of them.
+    read_all_threads: gtk::Button,
     drafts_list: gtk::ListBox,
     sidebar: gtk::ListBox,
     identity: gtk::Label,
@@ -988,6 +991,7 @@ fn build(
         threads_list,
         drafts_list,
         unreads_tab,
+        read_all_threads,
         search_entry,
         found_title,
         found_list,
@@ -1028,6 +1032,7 @@ fn build(
         unreads_only: Rc::new(std::cell::Cell::new(false)),
         sidebar_unread_only: Rc::new(std::cell::Cell::new(false)),
         unreads_tab: unreads_tab.clone(),
+        read_all_threads: read_all_threads.clone(),
         drafts_list: drafts_list.clone(),
         sidebar: sidebar.clone(),
         identity: identity.clone(),
@@ -1373,7 +1378,7 @@ fn empty_view(what: &str) -> gtk::ListBoxRow {
 /// conversation, the Threads view and the Drafts view.
 fn build_middle(scroller: &gtk::ScrolledWindow) -> Middle {
     let (threads_list, threads_scroll) = build_view_list();
-    let (unreads_tab, threads_page) = build_threads_page(&threads_scroll);
+    let (unreads_tab, read_all_threads, threads_page) = build_threads_page(&threads_scroll);
     let (drafts_list, drafts_page) = build_view_list();
     let (search_entry, found_title, found_list, found_page) = build_found_page();
     let stack = gtk::Stack::new();
@@ -1386,6 +1391,7 @@ fn build_middle(scroller: &gtk::ScrolledWindow) -> Middle {
         threads_list,
         drafts_list,
         unreads_tab,
+        read_all_threads,
         search_entry,
         found_title,
         found_list,
@@ -1399,6 +1405,7 @@ struct Middle {
     threads_list: gtk::ListBox,
     drafts_list: gtk::ListBox,
     unreads_tab: gtk::ToggleButton,
+    read_all_threads: gtk::Button,
     search_entry: gtk::SearchEntry,
     found_title: gtk::Label,
     found_list: gtk::ListBox,
@@ -1407,7 +1414,7 @@ struct Middle {
 
 /// The Threads view's two tabs over its list, the way Mattermost puts
 /// them: everything followed, or only what has new replies.
-fn build_threads_page(list: &gtk::ScrolledWindow) -> (gtk::ToggleButton, gtk::Box) {
+fn build_threads_page(list: &gtk::ScrolledWindow) -> (gtk::ToggleButton, gtk::Button, gtk::Box) {
     let followed = gtk::ToggleButton::builder()
         .label("Followed threads")
         .active(true)
@@ -1419,6 +1426,15 @@ fn build_threads_page(list: &gtk::ScrolledWindow) -> (gtk::ToggleButton, gtk::Bo
         .group(&followed)
         .build();
 
+    // At the far end, the way Mattermost puts it: the one action that
+    // applies to the whole list rather than to a row.
+    let read_all = gtk::Button::builder()
+        .label("Mark all read")
+        .css_classes(["flat"])
+        .halign(gtk::Align::End)
+        .hexpand(true)
+        .build();
+
     let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     tabs.set_margin_start(8);
     tabs.set_margin_end(8);
@@ -1426,14 +1442,15 @@ fn build_threads_page(list: &gtk::ScrolledWindow) -> (gtk::ToggleButton, gtk::Bo
     tabs.set_margin_bottom(2);
     tabs.append(&followed);
     tabs.append(&unreads);
+    tabs.append(&read_all);
 
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(&tabs);
     page.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     page.append(list);
-    // Only the Unreads button is returned: grouping the two makes them a
-    // radio pair, so "followed" is simply "unreads off".
-    (unreads, page)
+    // Only the Unreads button is returned of the two tabs: grouping
+    // them makes a radio pair, so "followed" is simply "unreads off".
+    (unreads, read_all, page)
 }
 
 /// A list for one of the two views: the Threads list and the Drafts
@@ -1695,6 +1712,23 @@ fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
 fn wire_views(ui: &Ui) {
     {
         let ui = ui.clone();
+        let ui_all = ui.clone();
+        ui.read_all_threads.clone().connect_clicked(move |_| {
+            let Some(team) = ui_all.store.borrow().teams.first().map(|t| t.id.clone()) else {
+                return;
+            };
+            if !ui_all
+                .store
+                .borrow_mut()
+                .read_all_threads_locally()
+                .is_empty()
+            {
+                ui_all.sidebar_stale.set(true);
+                ui_all.refresh_threads_view();
+                ui_all.sidebar_soon();
+            }
+            ui_all.commands.send(Command::ReadAllThreads(team)).ok();
+        });
         ui.unreads_tab.clone().connect_toggled(move |tab| {
             ui.unreads_only.set(tab.is_active());
             ui.refresh_threads_view();

@@ -142,6 +142,8 @@ pub enum Command {
     /// Write what is half-typed, so it survives a restart and follows
     /// the reader to their other clients. An empty one is a deletion.
     SaveDraft(mm_types::Draft),
+    /// Mark every followed thread read.
+    ReadAllThreads(mm_types::TeamId),
     /// Mark a followed thread read, up to its last reply.
     ReadThread {
         team: mm_types::TeamId,
