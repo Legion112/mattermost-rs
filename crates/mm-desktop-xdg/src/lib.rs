@@ -5,7 +5,7 @@
 //! `mm-desktop`, which is gated and fully tested; this crate only performs the
 //! call.
 
-use mm_desktop::Notification;
+use mm_desktop::{Badge, Notification};
 
 /// Show a desktop notification.
 ///
@@ -50,4 +50,44 @@ pub fn show(notification: &Notification) -> Result<(), String> {
 #[must_use]
 pub fn is_available() -> bool {
     notify_rust::get_capabilities().is_ok()
+}
+
+/// Put the unread count on the application's icon in the dock.
+///
+/// This is the `com.canonical.Unity.LauncherEntry` protocol -- a plain
+/// signal on the session bus, no service to own and nothing to
+/// register. Ubuntu's dock, Plank, Latte and the Dash-to-Dock
+/// extension all listen for it; a desktop that does not simply ignores
+/// it, which is why nothing here treats absence as an error.
+///
+/// **It only lands if the window can be matched to a launcher.** The
+/// URI names the `.desktop` file, and the desktop matches the window to
+/// it by `StartupWMClass`; with no entry installed, or with the app id
+/// and `StartupWMClass` out of step, the signal is emitted into
+/// nothing. `cargo xtask install-desktop` is what puts that entry
+/// there.
+///
+/// A connection per call rather than one kept open: this fires when a
+/// mention count changes, which is rarely, and a long-lived connection
+/// would be one more thing to reconnect after the bus restarts.
+pub fn set_badge(badge: Badge) -> Result<(), String> {
+    let uri = format!("application://{id}.desktop", id = mm_desktop::APP_ID);
+    let properties: std::collections::HashMap<&str, zbus::zvariant::Value<'_>> = [
+        ("count", zbus::zvariant::Value::I64(badge.count)),
+        ("count-visible", zbus::zvariant::Value::Bool(badge.visible)),
+    ]
+    .into_iter()
+    .collect();
+
+    let connection =
+        zbus::blocking::Connection::session().map_err(|e| format!("no session bus: {e}"))?;
+    connection
+        .emit_signal(
+            None::<&str>,
+            "/",
+            "com.canonical.Unity.LauncherEntry",
+            "Update",
+            &(uri.as_str(), properties),
+        )
+        .map_err(|e| format!("could not set the badge: {e}"))
 }

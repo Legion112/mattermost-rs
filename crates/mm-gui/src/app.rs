@@ -194,6 +194,10 @@ struct Ui {
     /// choice may be overridden when the channel being restored finally
     /// turns up; one the reader made never is.
     provisional: Rc<std::cell::Cell<bool>>,
+    /// The mention count the dock was last told about, so it is only
+    /// told when the number actually moves rather than on every redraw.
+    /// Starts at [`NO_BADGE_YET`].
+    badge: Rc<std::cell::Cell<i64>>,
     /// What the server last answered for a quick-switcher query, and a
     /// way to redraw the open switcher when a later answer lands.
     /// `None` when no switcher is open, which is also what stops a
@@ -632,6 +636,12 @@ fn build_window(
     )
 }
 
+// Most of this function is one struct literal naming every widget the
+// window holds, exactly once. Splitting it to satisfy a line count
+// would mean passing those same widgets through a second signature --
+// more lines, one more place for a field to go missing, and nothing
+// easier to read.
+#[allow(clippy::too_many_lines)]
 fn build(
     app: &adw::Application,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
@@ -641,18 +651,17 @@ fn build(
     install_styles();
     let (sidebar, identity, unread_only, sidebar_pane) = build_sidebar();
 
-    // Made here rather than in the `Ui` below, because the post list's
-    // widgets are built before it and the copy-link button needs both: a
-    // permalink is the server, the team and the post, and only the store
-    // knows the last two.
+    // The store and the server's URL are made here rather than in the
+    // `Ui` below, because the post list's widgets are built before it
+    // and the copy-link button needs both: a permalink is the server,
+    // the team and the post, and only the store knows the last two.
+    //
+    // `restored` is taken apart at the same time: the size goes to the
+    // window, the channel becomes the one to go back to.
     let store = Rc::new(RefCell::new(Store::new(UserId::default(), Threading::Flat)));
     let server = Rc::new(RefCell::new(String::new()));
-
-    // Taken apart first: the size goes to the window, the channel
-    // becomes the one to go back to, and neither outlives this.
     let mm_desktop::Restored { geometry, channel } = restored;
     let reopen = (!channel.is_empty()).then(|| ChannelId::new(channel.as_str()));
-
     let rows = RowContext::new(commands, &store, &server);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
 
@@ -719,6 +728,7 @@ fn build(
         restore_to: Rc::new(RefCell::new(None)),
         reopen: Rc::new(RefCell::new(reopen)),
         provisional: Rc::new(std::cell::Cell::new(false)),
+        badge: Rc::new(std::cell::Cell::new(NO_BADGE_YET)),
         elsewhere: Rc::new(RefCell::new(Elsewhere::default())),
         refill_switcher: Rc::new(RefCell::new(None)),
         window: window.clone(),
@@ -4256,6 +4266,10 @@ const SWITCHER_HEIGHT: i32 = 460;
 /// How much has to be typed before the server is asked. One letter
 /// matches most of a server, and the answer would be noise.
 const ELSEWHERE_MINIMUM: usize = 2;
+/// What the badge count starts at: not zero, so the first pass always
+/// says something. A client that starts with no mentions still has to
+/// clear a badge the last run left on the dock.
+const NO_BADGE_YET: i64 = -1;
 const SWITCHER_RESULTS: usize = 30;
 
 /// How big the image window opens. Large enough to be worth opening,
@@ -5203,6 +5217,18 @@ impl Ui {
         self.commands.send(Command::OpenThread(root)).ok();
     }
 
+    /// Tell the dock how many mentions are waiting, when it changes.
+    ///
+    /// Only on a change: the sidebar is redrawn on every event worth
+    /// redrawing for, and a D-Bus signal per keystroke in a busy
+    /// channel would be a lot of noise for a number that did not move.
+    fn refresh_badge(&self) {
+        let mentions = self.store.borrow().total_mentions();
+        if self.badge.replace(mentions) != mentions {
+            self.commands.send(Command::Badge(mentions)).ok();
+        }
+    }
+
     /// Put the reader back in the channel they left, once it is there
     /// to put them in.
     ///
@@ -5617,6 +5643,7 @@ impl Ui {
     }
 
     fn refresh_sidebar(&self) {
+        self.refresh_badge();
         let sections = self.store.borrow().sidebar_sections();
         // Nothing to redraw, and redrawing anyway would destroy the row
         // under the reader's cursor.

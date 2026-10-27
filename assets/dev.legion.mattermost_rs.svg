@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The application icon.
+
+  Deliberately **not** Mattermost's own mark: this is a third-party
+  client, that logo is somebody else's trademark, and shipping it would
+  claim an association that does not exist. A conversation is what the
+  application is for, so a conversation is what it draws.
+
+  Flat fills rather than gradients: the icon is rasterised at sixteen
+  pixels in some places, and a gradient at that size is a smudge.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#2b3642"/>
+
+  <!-- The message being read. -->
+  <path d="M28 28h56a12 12 0 0 1 12 12v24a12 12 0 0 1-12 12H52L36 90V76h-8a12 12 0 0 1-12-12V40a12 12 0 0 1 12-12z"
+        transform="translate(8 0)" fill="#eef2f6"/>
+  <g fill="#9aa7b4">
+    <rect x="36" y="42" width="52" height="7" rx="3.5"/>
+    <rect x="36" y="57" width="34" height="7" rx="3.5"/>
+  </g>
+
+  <!-- The reply, overlapping it, in the accent this client uses for links. -->
+  <path d="M68 64h32a10 10 0 0 1 10 10v20a10 10 0 0 1-10 10h-6v12l-16-12H68a10 10 0 0 1-10-10V74a10 10 0 0 1 10-10z"
+        fill="#5d89ea" stroke="#2b3642" stroke-width="6" stroke-linejoin="round"/>
+  <g fill="#e7eefc">
+    <rect x="70" y="76" width="30" height="6" rx="3"/>
+    <rect x="70" y="88" width="20" height="6" rx="3"/>
+  </g>
+</svg>

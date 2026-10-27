@@ -93,6 +93,8 @@ pub enum Command {
     /// Open the one-to-one conversation with somebody, creating it if
     /// there is not one yet.
     OpenDirect(UserId),
+    /// Put the unread mention count on the application's dock icon.
+    Badge(i64),
     /// Mute a channel, or let it speak again.
     SetMuted {
         channel: ChannelId,

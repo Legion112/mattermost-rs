@@ -359,6 +359,17 @@ async fn save_file(
     }
 }
 
+/// Put the mention count on the dock icon.
+///
+/// A desktop with nothing listening for the signal simply ignores it,
+/// so a failure here is not worth the reader's attention: it goes to
+/// the status line and nowhere else.
+async fn set_badge(mentions: i64, events: &async_channel::Sender<Event>) {
+    if let Err(e) = mm_desktop_xdg::set_badge(mm_desktop::Badge::for_mentions(mentions)) {
+        let _ = events.send(Event::Status(e)).await;
+    }
+}
+
 /// Look for channels and people the client does not already know.
 ///
 /// Both at once: they answer one question the reader asked, and two
@@ -702,6 +713,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::Elsewhere { team, term } => find_elsewhere(a, &team, &term, events).await,
         Command::JoinChannel(channel) => join_channel(a, &channel, events).await,
         Command::OpenDirect(user) => open_direct(a, &user, events).await,
+        Command::Badge(mentions) => set_badge(mentions, events).await,
         Command::SetMuted { channel, muted } => {
             let user = UserId::new(&a.session.user_id);
             let request = rest::set_channel_muted(&channel, &user, muted);

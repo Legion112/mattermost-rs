@@ -8,11 +8,13 @@
 
 pub mod deeplink;
 pub mod download;
+pub mod entry;
 pub mod geometry;
 pub mod notify;
 
 pub use deeplink::{DeepLink, DeepLinkError, parse as parse_deep_link};
 pub use download::{destination, safe_name};
+pub use entry::{APP_ID, Badge, render as render_desktop_entry};
 pub use geometry::{Geometry, Restored};
 pub use notify::{
     DesktopNotify, Notification, NotifySettings, Suppressed, notification_for, summarize,

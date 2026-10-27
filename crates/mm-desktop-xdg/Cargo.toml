@@ -14,6 +14,7 @@ mm-desktop = { path = "../mm-desktop" }
 # notify-rust goes through zbus, which is pure Rust: no libdbus, no C
 # dependency, and a shorter runtime dependency list on the .deb.
 notify-rust = { version = "4", default-features = false, features = ["z"] }
+zbus = { version = "5", default-features = false, features = ["blocking-api"] }
 
 [lints]
 workspace = true
