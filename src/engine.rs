@@ -261,6 +261,65 @@ async fn set_category(
     best_effort(a, &request, events).await;
 }
 
+/// Ask the server what matches.
+///
+/// Searching is per team in Mattermost -- there is no account-wide
+/// endpoint -- and which team is a thing the window knows and the
+/// engine deliberately does not.
+async fn search(
+    a: &Active,
+    team: &mm_types::TeamId,
+    terms: &str,
+    events: &async_channel::Sender<Event>,
+) {
+    let request = rest::search_posts(team, terms, SEARCH_PAGE);
+    match fetch(&a.client, &request, rest::parse_search).await {
+        Ok(page) => {
+            let _ = events
+                .send(Event::SearchResults {
+                    terms: terms.to_owned(),
+                    page,
+                })
+                .await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("search: {e}"))).await;
+        }
+    }
+}
+
+/// A channel's pinned posts.
+///
+/// A failure is reported rather than swallowed. An empty pane and a
+/// failed request look identical, and the drafts list already taught
+/// this lesson once: it silently vanished for a week because the server
+/// answered `null` and the parse error went nowhere.
+async fn send_pinned(a: &Active, channel: ChannelId, events: &async_channel::Sender<Event>) {
+    let request = rest::pinned_posts(&channel);
+    match fetch(&a.client, &request, rest::parse_pinned).await {
+        Ok(page) => {
+            let _ = events.send(Event::PinnedPosts { channel, page }).await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("pinned: {e}"))).await;
+        }
+    }
+}
+
+/// Everything this reader has saved, across every channel.
+async fn send_saved(a: &Active, events: &async_channel::Sender<Event>) {
+    let user = UserId::new(&a.session.user_id);
+    let request = rest::saved_posts(&user, SAVED_PAGE);
+    match fetch(&a.client, &request, rest::parse_saved).await {
+        Ok(page) => {
+            let _ = events.send(Event::SavedPosts(page)).await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("saved: {e}"))).await;
+        }
+    }
+}
+
 /// Write several categories back together.
 ///
 /// One request rather than two, because a channel moving between
@@ -460,6 +519,9 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
     match command {
         Command::Sync => spawn_sync(a, events),
         Command::OpenChannel(channel) => spawn_open_channel(a, channel, events),
+        Command::Search { team, terms } => search(a, &team, &terms, events).await,
+        Command::Pinned(channel) => send_pinned(a, channel, events).await,
+        Command::Saved => send_saved(a, events).await,
         Command::SetCategory(category) => set_category(a, &category, events).await,
         Command::SetCategories(categories) => set_categories(a, &categories, events).await,
         Command::Pin { .. }
@@ -806,6 +868,10 @@ async fn resolve_settings(
 /// Mattermost's own autocomplete pages at a hundred; two hundred covers
 /// every channel on this server with one request and is still one page.
 const CHANNEL_ROSTER: u32 = 200;
+/// How many hits one search asks for, and how many saved posts are
+/// fetched. Both are a screenful and then some; neither pages yet.
+const SEARCH_PAGE: u32 = 60;
+const SAVED_PAGE: u32 = 60;
 
 /// How much of the account to warm in the background, and how fast.
 ///

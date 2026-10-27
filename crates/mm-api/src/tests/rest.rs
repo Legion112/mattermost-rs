@@ -827,3 +827,49 @@ fn moving_a_channel_updates_both_categories_at_once() {
     assert_eq!(back[0].channel_ids, [ChannelId::new("c1")]);
     assert!(parse_updated_categories(&ok("not json")).is_err());
 }
+
+/// Search terms go to the server untouched. Its own query language --
+/// `from:`, `in:`, quoted phrases, `-excluded` -- is parsed there, and a
+/// client that tried to interpret it could only get it wrong.
+#[test]
+fn searching_sends_the_terms_as_typed() {
+    let request = search_posts(&TeamId::new("t1"), r#"from:legion "deploy report""#, 20);
+    assert_eq!(request.method, Method::Post);
+    assert_eq!(request.path, "/api/v4/teams/t1/posts/search");
+    let Body::Json(body) = &request.body else {
+        panic!("expected JSON")
+    };
+    assert!(body.contains(r#"from:legion \"deploy report\""#), "{body}");
+    // Every term must appear, which is what two typed words mean.
+    assert!(body.contains(r#""is_or_search":false"#), "{body}");
+
+    let found = parse_search(&ok(
+        r#"{"order":["p1"],"posts":{"p1":{"id":"p1","message":"deploy report"}}}"#,
+    ))
+    .unwrap();
+    assert_eq!(found.order, [PostId::new("p1")]);
+    assert!(parse_search(&ok("not json")).is_err());
+}
+
+/// Pinned posts are per channel; saved posts are per reader, and the
+/// server still calls them flagged on the wire.
+#[test]
+fn pinned_and_saved_posts_come_from_their_own_endpoints() {
+    assert_eq!(
+        pinned_posts(&ChannelId::new("c1")).path,
+        "/api/v4/channels/c1/pinned"
+    );
+    let request = saved_posts(&UserId::new("u1"), 60);
+    assert_eq!(request.path, "/api/v4/users/u1/posts/flagged");
+    assert!(
+        request
+            .query
+            .contains(&("per_page".to_owned(), "60".to_owned()))
+    );
+
+    let page = r#"{"order":["p1"],"posts":{"p1":{"id":"p1","message":"hi"}}}"#;
+    assert_eq!(parse_pinned(&ok(page)).unwrap().order.len(), 1);
+    assert_eq!(parse_saved(&ok(page)).unwrap().order.len(), 1);
+    assert!(parse_pinned(&ok("nope")).is_err());
+    assert!(parse_saved(&ok("nope")).is_err());
+}

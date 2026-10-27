@@ -286,8 +286,11 @@ when the channel opens rather than per keystroke the way the web app does it; \
 a channel never opened falls back to everyone known. Verified on a live \
 account: `@` in Клиенты offers aragorn first, who had just posted, where it \
 previously offered an alphabetical mix drawn from every channel visited. NOT \
-built: `@all`, `@channel` and `@here`, and there is no `/users/autocomplete` \
-call, so somebody this client has never seen is typed out in full."""
+built: there is no `/users/autocomplete` call, so somebody this client has \
+never seen is typed out in full. `@all`, `@channel` and `@here` are offered \
+under their own SPECIAL MENTIONS heading, from the same list the renderer \
+highlights them with -- two lists would be a name the composer offers and \
+the message does not mark."""
 
 [[feature]]
 id       = "posts.warm_channels"
@@ -526,3 +529,49 @@ hides the rest -- so a position on screen is not a position in \
 ALLERT heading moved, and dragging it back above quant restored the \
 sidebar exactly. NOT built: dragging a category heading to reorder the \
 categories themselves, and dragging a channel out of the sidebar."""
+
+[[feature]]
+id       = "posts.search"
+area     = "posts"
+upstream = "server-api"
+status   = "partial"
+endpoints = ["POST /api/v4/teams/{team_id}/posts/search"]
+verified_against = "12.0.1"
+notes = """
+Ctrl+Shift+F, or the magnifier in the header. The terms go to the server \
+untouched: its own query language -- `from:`, `in:`, `before:`, quoted \
+phrases, `-excluded` -- is parsed there, and a client that tried to \
+interpret it could only get it wrong. Searched on Return rather than per \
+keystroke, because every letter of a half-typed `from:legion` would \
+otherwise be its own query. Results draw as the rows the Threads and \
+Drafts views use -- who said it, where, when, the message -- since a hit \
+is a place to go; clicking one opens its channel. The hits join the one \
+post map but **not** a timeline: a result sits next to the result above \
+it for reasons that have nothing to do with time, and filing them as \
+history would be the client inventing adjacency the server never claimed. \
+Verified on a live account: "deploy" answered with 100 hits across \
+several channels. NOT built: paging past the first sixty, jumping to the \
+hit inside its channel rather than to the channel, and the match \
+highlighting the server returns alongside the posts."""
+
+[[feature]]
+id       = "posts.pinned_and_saved"
+area     = "posts"
+upstream = "server-api"
+status   = "partial"
+endpoints = [
+  "GET /api/v4/channels/{channel_id}/pinned",
+  "GET /api/v4/users/{user_id}/posts/flagged",
+]
+verified_against = "12.0.1"
+notes = """
+The pin and bookmark buttons in the header: what is pinned in the open \
+channel, and what this reader has saved anywhere. Both share the search \
+page, because from the store's side the three are one thing -- a set of \
+posts in an order the server chose, which is not the order of any \
+channel. A failed fetch is reported rather than swallowed: an empty pane \
+and a failed request look identical, and the drafts list already taught \
+that lesson once. Saved posts are still `flagged` on the wire; the web \
+app has said "Saved" since 5.x. Verified on a live account: three saved \
+messages came back across three channels, and a channel with no pins said \
+so. NOT built: unpinning or unsaving from these lists, and paging."""

@@ -260,6 +260,49 @@ pub fn parse_updated_categories(resp: &HttpResponse) -> Result<Vec<ChannelCatego
     parse_json(resp, "PUT /users/{user}/teams/{team}/channels/categories")
 }
 
+/// Search a team's messages.
+///
+/// `is_or_search` false is Mattermost's default and means every term
+/// must appear, which is what somebody typing two words expects. The
+/// terms go through untouched: the server's own query language --
+/// `from:`, `in:`, `before:`, quoted phrases, `-excluded` -- is parsed
+/// there, and a client that tried to interpret it would only be able to
+/// get it wrong.
+#[must_use]
+pub fn search_posts(team: &TeamId, terms: &str, per_page: u32) -> HttpRequest {
+    HttpRequest::post(format!("{API}/teams/{team}/posts/search")).json(&serde_json::json!({
+        "terms": terms,
+        "is_or_search": false,
+        "page": 0,
+        "per_page": per_page,
+    }))
+}
+
+pub fn parse_search(resp: &HttpResponse) -> Result<PostList, ApiError> {
+    parse_json(resp, "POST /teams/{team}/posts/search")
+}
+
+/// The posts pinned in a channel.
+#[must_use]
+pub fn pinned_posts(channel: &ChannelId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/channels/{channel}/pinned"))
+}
+
+pub fn parse_pinned(resp: &HttpResponse) -> Result<PostList, ApiError> {
+    parse_json(resp, "GET /channels/{channel}/pinned")
+}
+
+/// The posts this reader has saved. Mattermost still calls them
+/// flagged on the wire; the web app has said "Saved" since 5.x.
+#[must_use]
+pub fn saved_posts(user: &UserId, per_page: u32) -> HttpRequest {
+    HttpRequest::get(format!("{API}/users/{user}/posts/flagged")).q("per_page", per_page)
+}
+
+pub fn parse_saved(resp: &HttpResponse) -> Result<PostList, ApiError> {
+    parse_json(resp, "GET /users/{user}/posts/flagged")
+}
+
 /// The threads this reader follows, newest reply first.
 ///
 /// `extended=false`: participants come back as objects carrying only an

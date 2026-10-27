@@ -38,6 +38,20 @@ pub enum Change {
     Threads,
     /// The unsent-message list changed.
     Drafts,
+    /// An answer list -- search, pinned, saved -- changed.
+    Found,
+}
+
+/// Which answer list is being asked for.
+///
+/// One type for the three because they are the same thing from the
+/// store's side: a set of posts in an order the server chose, which is
+/// not the order of any channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    Search,
+    Saved,
+    Pinned(ChannelId),
 }
 
 /// Where a dragged channel lands in its new category.
@@ -75,6 +89,25 @@ fn participants(display_name: &str) -> Option<i64> {
         .filter(|part| !part.trim().is_empty())
         .count();
     (named > 0).then(|| i64::try_from(named).unwrap_or(i64::MAX))
+}
+
+/// The three names that mean a group rather than a person, and what
+/// each of them does.
+///
+/// Not users, so they are kept apart from `mention_candidates` rather
+/// than faked into the roster: they have no avatar, no presence and no
+/// id, and every one of those would have to be invented. Mattermost
+/// draws them under their own heading for the same reason.
+pub const SPECIAL_MENTIONS: &[(&str, &str)] = &[
+    ("all", "Notifies everyone in this channel"),
+    ("channel", "Notifies everyone in this channel"),
+    ("here", "Notifies everyone online in this channel"),
+];
+
+/// Whether a name after an `@` means a group rather than a person.
+#[must_use]
+pub fn is_special_mention(name: &str) -> bool {
+    SPECIAL_MENTIONS.iter().any(|(word, _)| *word == name)
 }
 
 /// One name the `@` popup is offering, and whether they are in the channel.
@@ -237,6 +270,15 @@ pub struct Store {
     /// stopped following has to be able to leave the list.
     pub threads: Vec<mm_types::UserThread>,
     pub thread_totals: ThreadTotals,
+    /// What the last search answered, in the server's order, and what
+    /// was asked. Kept apart from the timelines on purpose: these posts
+    /// are adjacent for reasons that have nothing to do with time.
+    pub search_results: Vec<PostId>,
+    pub search_terms: String,
+    /// What is pinned, per channel.
+    pub pinned: HashMap<ChannelId, Vec<PostId>>,
+    /// What this reader has saved, across every channel.
+    pub saved: Vec<PostId>,
     /// Unsent messages, from the server, so what was typed in another
     /// client is waiting here too. Replaced wholesale for the same reason.
     pub drafts: Vec<mm_types::Draft>,
@@ -533,6 +575,64 @@ impl Store {
             .collect()
     }
 
+    /// Take in a page of posts that answers a question rather than
+    /// being a stretch of a channel.
+    ///
+    /// The posts join the one post map like any others, so a search hit
+    /// and the same message read in its channel are one record and an
+    /// edit to it shows in both. **They do not join a timeline**: a
+    /// search result is next to the result above it for reasons that
+    /// have nothing to do with time, and filing them as history would
+    /// be the client inventing adjacency the server never claimed --
+    /// which is exactly the lie the segment model exists to prevent.
+    ///
+    /// The order comes back rather than being stored here, because
+    /// which list it belongs to is the caller's question.
+    fn take_found(&mut self, page: &PostList) -> Vec<PostId> {
+        for post in page.posts.values() {
+            self.store_post(post.clone());
+        }
+        page.order
+            .iter()
+            .filter(|id| self.posts.get(*id).is_some_and(|p| !p.is_deleted()))
+            .cloned()
+            .collect()
+    }
+
+    /// What a search answered, newest first as the server ordered it.
+    pub fn apply_search(&mut self, terms: &str, page: &PostList) -> Vec<Change> {
+        terms.clone_into(&mut self.search_terms);
+        self.search_results = self.take_found(page);
+        vec![Change::Found]
+    }
+
+    /// What is pinned in one channel.
+    pub fn apply_pinned(&mut self, channel: &ChannelId, page: &PostList) -> Vec<Change> {
+        let found = self.take_found(page);
+        self.pinned.insert(channel.clone(), found);
+        vec![Change::Found]
+    }
+
+    /// What this reader has saved, across every channel.
+    pub fn apply_saved(&mut self, page: &PostList) -> Vec<Change> {
+        self.saved = self.take_found(page);
+        vec![Change::Found]
+    }
+
+    /// One answer list, as the posts themselves.
+    #[must_use]
+    pub fn found(&self, which: &Found) -> Vec<&Post> {
+        let ids = match which {
+            Found::Search => &self.search_results,
+            Found::Saved => &self.saved,
+            Found::Pinned(channel) => match self.pinned.get(channel) {
+                Some(ids) => ids,
+                None => return Vec::new(),
+            },
+        };
+        ids.iter().filter_map(|id| self.posts.get(id)).collect()
+    }
+
     /// Fold a category shut, or open it again.
     ///
     /// The server owns this -- `collapsed` is a field on the category, and
@@ -640,7 +740,7 @@ impl Store {
     /// mentions; Mattermost highlights them the same way.
     #[must_use]
     pub fn mentioned(&self, name: &str) -> Option<mm_md::Mentioned> {
-        if matches!(name, "all" | "channel" | "here") {
+        if is_special_mention(name) {
             return Some(mm_md::Mentioned::Someone);
         }
         let user = self.users.values().find(|u| u.username == name)?;

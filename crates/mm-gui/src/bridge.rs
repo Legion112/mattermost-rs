@@ -43,21 +43,40 @@ pub enum Command {
     /// Load a thread so it can be read beside the channel.
     OpenThread(PostId),
     /// Pin a post to its channel, or take the pin off.
-    Pin { post: PostId, pinned: bool },
+    Pin {
+        post: PostId,
+        pinned: bool,
+    },
     /// Save a post, or take it out of the saved list.
-    Save { post: PostId, saved: bool },
+    Save {
+        post: PostId,
+        saved: bool,
+    },
     /// Mark a post, and everything after it, unread.
     MarkUnread(PostId),
     /// Delete a post. Only ever the reader's own.
     Delete(PostId),
     /// Change what a post says. Only ever the reader's own.
-    Edit { post: PostId, message: String },
+    Edit {
+        post: PostId,
+        message: String,
+    },
     /// Tell the server a channel has been read.
     MarkRead(ChannelId),
     /// Fold a sidebar category shut, or open it again.
     ///
     /// Carries the whole category because that is what the server takes:
     /// it replaces a category rather than patching one.
+    /// Search a team's messages for what was typed. The team comes from
+    /// the window, because the engine holds no domain facts.
+    Search {
+        team: mm_types::TeamId,
+        terms: String,
+    },
+    /// Fetch a channel's pinned posts.
+    Pinned(ChannelId),
+    /// Fetch this reader's saved posts.
+    Saved,
     SetCategory(mm_types::ChannelCategory),
     /// Replace several categories at once, which is what moving a
     /// channel between two of them needs: the one it left and the one it
@@ -65,10 +84,16 @@ pub enum Command {
     SetCategories(Vec<mm_types::ChannelCategory>),
     /// Fetch the page of history immediately before `before`, which is the
     /// oldest post currently held.
-    LoadOlder { channel: ChannelId, before: PostId },
+    LoadOlder {
+        channel: ChannelId,
+        before: PostId,
+    },
     /// Fetch an image attached to a message. `preview` asks for the
     /// server's downscaled copy, which is what a message row wants.
-    FetchFile { file: FileId, preview: bool },
+    FetchFile {
+        file: FileId,
+        preview: bool,
+    },
     /// Fetch the picture a link preview offered, from whatever host the
     /// link points at. Asked once per URL, and never with a credential.
     FetchLinkImage(String),
@@ -199,6 +224,19 @@ pub enum Event {
         channel: ChannelId,
         page: PostList,
     },
+    /// What a search answered, with the terms it answered, so a reply
+    /// to a query the reader has already moved on from can be ignored.
+    SearchResults {
+        terms: String,
+        page: PostList,
+    },
+    /// A channel's pinned posts.
+    PinnedPosts {
+        channel: ChannelId,
+        page: PostList,
+    },
+    /// This reader's saved posts.
+    SavedPosts(PostList),
     /// A live WebSocket event, already decoded.
     Ws(WsEvent),
     /// The WebSocket says a resync is needed: either it reconnected with a new

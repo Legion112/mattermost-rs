@@ -2368,3 +2368,92 @@ fn moving_a_channel_changes_the_category_it_left_and_the_one_it_joined() {
 fn ids(of: &[&str]) -> Vec<ChannelId> {
     of.iter().map(|c| ChannelId::new(*c)).collect()
 }
+
+/// `@all`, `@channel` and `@here` are mentions but not people, and the
+/// two lists are one list: a name that highlights in a message must be
+/// a name the composer offers, or the popup and the renderer disagree.
+#[test]
+fn the_special_mentions_are_the_same_list_the_renderer_uses() {
+    let store = store();
+    for (word, what) in crate::SPECIAL_MENTIONS {
+        assert!(is_special_mention(word), "{word}");
+        assert!(!what.is_empty(), "{word} needs a description");
+        assert_eq!(store.mentioned(word), Some(mm_md::Mentioned::Someone));
+    }
+    assert!(!is_special_mention("alice"));
+    assert!(!is_special_mention(""));
+    // Not a user, so it is not in the roster-backed list either.
+    assert!(
+        store
+            .mention_candidates(None, "all", 10)
+            .iter()
+            .all(|m| m.user.username != "all")
+    );
+}
+
+/// Search results, pinned posts and saved posts join the one post map
+/// but **not** a timeline.
+///
+/// Filing them as history would be the client inventing adjacency the
+/// server never claimed: a search hit sits next to the hit above it for
+/// reasons that have nothing to do with time, and a timeline that said
+/// otherwise would let the reader scroll past messages that were never
+/// missing.
+#[test]
+fn an_answer_list_joins_the_posts_but_not_the_timeline() {
+    let mut store = store();
+    let c1 = ChannelId::new("c1");
+    // Built by hand rather than with `page`, which sorts: the order
+    // under test is the server's, whatever it is.
+    let answer = |posts: Vec<Post>, order: &[&str]| PostList {
+        posts: posts.into_iter().map(|p| (p.id.clone(), p)).collect(),
+        order: order.iter().map(|id| PostId::new(*id)).collect(),
+        ..PostList::default()
+    };
+    let answer = answer(
+        vec![post("p9", "c1", 90), post("p1", "c1", 10)],
+        &["p9", "p1"],
+    );
+
+    assert_eq!(store.apply_search("deploy", &answer), [Change::Found]);
+    assert_eq!(store.search_terms, "deploy");
+    // The server's order, kept as given -- not re-sorted by time.
+    let found: Vec<&str> = store
+        .found(&Found::Search)
+        .iter()
+        .map(|p| p.id.as_str())
+        .collect();
+    assert_eq!(found, ["p9", "p1"]);
+    // The posts are readable...
+    assert!(store.posts.contains_key(&PostId::new("p9")));
+    // ...but the channel has no history, because none was claimed.
+    assert!(store.channel_posts(&c1).is_empty());
+
+    store.apply_pinned(&c1, &answer);
+    assert_eq!(store.found(&Found::Pinned(c1.clone())).len(), 2);
+    // A channel nothing was pinned in answers with nothing, not a panic.
+    assert!(store.found(&Found::Pinned(ChannelId::new("c2"))).is_empty());
+
+    store.apply_saved(&answer);
+    assert_eq!(store.found(&Found::Saved).len(), 2);
+
+    // A deleted post is held as a tombstone and must not be offered as
+    // a result: the server can answer with one it has since removed.
+    let mut gone = post("p1", "c1", 10);
+    gone.delete_at = Timestamp(99);
+    gone.update_at = Timestamp(99);
+    store.apply_search(
+        "deploy",
+        &PostList {
+            posts: [(gone.id.clone(), gone.clone())].into_iter().collect(),
+            order: vec![gone.id],
+            ..PostList::default()
+        },
+    );
+    assert!(store.found(&Found::Search).is_empty());
+
+    // Every derive is exercised.
+    assert_eq!(Found::Search, Found::Search.clone());
+    assert!(!format!("{:?}", Found::Pinned(c1)).is_empty());
+    assert!(!format!("{:?}", Change::Found).is_empty());
+}

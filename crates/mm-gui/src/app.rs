@@ -101,6 +101,10 @@ struct Ui {
     /// entry older than `TYPING_LIFETIME` is simply not shown.
     typing: Typing,
     typing_line: gtk::Label,
+    /// The page shared by search, pinned and saved.
+    search_entry: gtk::SearchEntry,
+    found_title: gtk::Label,
+    found_list: gtk::ListBox,
     /// Pictures fetched for link previews, shared with the post rows that
     /// draw them.
     link_images: LinkImages,
@@ -267,6 +271,26 @@ struct RowContext {
     avatars: Avatars,
 }
 
+impl RowContext {
+    /// Everything the rows share, made once. The caches start empty and
+    /// fill as faces, pictures and previews arrive.
+    fn new(
+        commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+        store: &Rc<RefCell<Store>>,
+        server: &Rc<RefCell<String>>,
+    ) -> Self {
+        Self {
+            commands: commands.clone(),
+            store: Rc::clone(store),
+            server: Rc::clone(server),
+            viewer: Rc::new(RefCell::new(None)),
+            shown: Rc::new(RefCell::new(None)),
+            links: Rc::new(RefCell::new(HashMap::new())),
+            avatars: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+}
+
 /// Who has typed in each channel lately, and when they last did.
 type Typing = Rc<RefCell<HashMap<ChannelId, Vec<(UserId, std::time::Instant)>>>>;
 
@@ -422,6 +446,7 @@ fn build_window(
 ) -> (
     adw::WindowTitle,
     gtk::Button,
+    [gtk::Button; 3],
     Rc<LoginPage>,
     gtk::Stack,
     adw::ApplicationWindow,
@@ -431,6 +456,15 @@ fn build_window(
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Reload channels"));
     header.pack_end(&refresh);
+    let saved = gtk::Button::from_icon_name("user-bookmarks-symbolic");
+    saved.set_tooltip_text(Some("Saved messages"));
+    header.pack_end(&saved);
+    let pinned = gtk::Button::from_icon_name("view-pin-symbolic");
+    pinned.set_tooltip_text(Some("Pinned in this channel"));
+    header.pack_end(&pinned);
+    let search = gtk::Button::from_icon_name("system-search-symbolic");
+    search.set_tooltip_text(Some("Search messages  (Ctrl+Shift+F)"));
+    header.pack_end(&search);
 
     let login = Rc::new(LoginPage::new());
     // No transition. A crossfade queued while the stack is still unmapped
@@ -466,7 +500,14 @@ fn build_window(
         .build();
     window.present();
 
-    (title, refresh, login, stack, window)
+    (
+        title,
+        refresh,
+        [search, pinned, saved],
+        login,
+        stack,
+        window,
+    )
 }
 
 fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<Command>) -> Ui {
@@ -480,19 +521,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     let store = Rc::new(RefCell::new(Store::new(UserId::default(), Threading::Flat)));
     let server = Rc::new(RefCell::new(String::new()));
 
-    let viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>> = Rc::new(RefCell::new(None));
-    let shown_tools: ShownTools = Rc::new(RefCell::new(None));
-    let link_images: LinkImages = Rc::new(RefCell::new(HashMap::new()));
-    let avatars: Avatars = Rc::new(RefCell::new(HashMap::new()));
-    let rows = RowContext {
-        commands: commands.clone(),
-        store: Rc::clone(&store),
-        server: Rc::clone(&server),
-        viewer: Rc::clone(&viewer),
-        shown: Rc::clone(&shown_tools),
-        links: Rc::clone(&link_images),
-        avatars: Rc::clone(&avatars),
-    };
+    let rows = RowContext::new(commands, &store, &server);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
 
     let (composer, composer_pane, status) = build_composer_row();
@@ -501,7 +530,16 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     // in the same space. The status line and the composer stay put under
     // all three -- the composer insensitive for the two that have nothing
     // to send to.
-    let (threads_list, drafts_list, unreads_tab, middle) = build_middle(&scroller);
+    let panes = build_middle(&scroller);
+    let Middle {
+        threads_list,
+        drafts_list,
+        unreads_tab,
+        search_entry,
+        found_title,
+        found_list,
+        stack: middle,
+    } = panes;
 
     let typing_line = build_typing_line();
 
@@ -516,7 +554,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
 
     let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
-    let (title, refresh, login, stack, window) = build_window(app, &split);
+    let (title, refresh, [search, pinned, saved], login, stack, window) = build_window(app, &split);
 
     let ui = Ui {
         store,
@@ -546,13 +584,16 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         restore_to: Rc::new(RefCell::new(None)),
-        avatars: Rc::clone(&avatars),
+        avatars: Rc::clone(&rows.avatars),
         typing: Rc::new(RefCell::new(HashMap::new())),
         typing_line,
-        link_images: Rc::clone(&link_images),
+        search_entry: search_entry.clone(),
+        found_title,
+        found_list: found_list.clone(),
+        link_images: Rc::clone(&rows.links),
         spelling: Rc::new(RefCell::new(None)),
         images: Rc::new(RefCell::new(HashMap::new())),
-        viewer: Rc::clone(&viewer),
+        viewer: Rc::clone(&rows.viewer),
         asked: Rc::new(RefCell::new(HashSet::new())),
         asked_files: Rc::new(RefCell::new(HashSet::new())),
         posts,
@@ -570,6 +611,7 @@ fn build(app: &adw::Application, commands: &tokio::sync::mpsc::UnboundedSender<C
     // Before `wire`: both install a capture-phase Return handler on the
     // composer, and the one that accepts a half-typed name has to see it
     // first or every completion would send the message instead.
+    wire_found(&ui, &search, &pinned, &saved);
     attach_both_composers(&ui, &composer, &thread_composer);
     wire(&ui, &refresh, &sidebar, &composer, commands);
     wire_views(&ui);
@@ -763,18 +805,38 @@ fn empty_view(what: &str) -> gtk::ListBoxRow {
 
 /// The three things that take turns in the middle of the window: the
 /// conversation, the Threads view and the Drafts view.
-fn build_middle(
-    scroller: &gtk::ScrolledWindow,
-) -> (gtk::ListBox, gtk::ListBox, gtk::ToggleButton, gtk::Stack) {
+fn build_middle(scroller: &gtk::ScrolledWindow) -> Middle {
     let (threads_list, threads_scroll) = build_view_list();
     let (unreads_tab, threads_page) = build_threads_page(&threads_scroll);
     let (drafts_list, drafts_page) = build_view_list();
-    let middle = gtk::Stack::new();
-    middle.add_named(scroller, Some("channel"));
-    middle.add_named(&threads_page, Some("threads"));
-    middle.add_named(&drafts_page, Some("drafts"));
-    middle.set_vexpand(true);
-    (threads_list, drafts_list, unreads_tab, middle)
+    let (search_entry, found_title, found_list, found_page) = build_found_page();
+    let stack = gtk::Stack::new();
+    stack.add_named(scroller, Some("channel"));
+    stack.add_named(&threads_page, Some("threads"));
+    stack.add_named(&drafts_page, Some("drafts"));
+    stack.add_named(&found_page, Some("found"));
+    stack.set_vexpand(true);
+    Middle {
+        threads_list,
+        drafts_list,
+        unreads_tab,
+        search_entry,
+        found_title,
+        found_list,
+        stack,
+    }
+}
+
+/// The pages that take turns in the middle of the window, and the
+/// widgets inside them the `Ui` has to reach.
+struct Middle {
+    threads_list: gtk::ListBox,
+    drafts_list: gtk::ListBox,
+    unreads_tab: gtk::ToggleButton,
+    search_entry: gtk::SearchEntry,
+    found_title: gtk::Label,
+    found_list: gtk::ListBox,
+    stack: gtk::Stack,
 }
 
 /// The Threads view's two tabs over its list, the way Mattermost puts
@@ -810,6 +872,108 @@ fn build_threads_page(list: &gtk::ScrolledWindow) -> (gtk::ToggleButton, gtk::Bo
 
 /// A list for one of the two views: the Threads list and the Drafts
 /// list are the same furniture with different rows in them.
+/// What the line above the results says.
+fn found_heading(store: &Store, which: &mm_core::Found, count: usize) -> String {
+    match which {
+        mm_core::Found::Search if store.search_terms.is_empty() => "Search".to_owned(),
+        mm_core::Found::Search => {
+            let plural = if count == 1 { "result" } else { "results" };
+            format!("{count} {plural} for {}", store.search_terms)
+        }
+        mm_core::Found::Saved => "Saved messages".to_owned(),
+        mm_core::Found::Pinned(channel) => {
+            let name = store
+                .channels
+                .get(channel)
+                .map_or_else(String::new, |c| store.channel_label(c));
+            format!("Pinned in {name}")
+        }
+    }
+}
+
+/// The page the three answer lists share: a box to type a query into,
+/// a line saying what is on show, and the results.
+///
+/// One page rather than three, because search, pinned and saved differ
+/// only in where the list came from and what the heading says. The
+/// query box is hidden for the two that are not asked a question.
+fn build_found_page() -> (gtk::SearchEntry, gtk::Label, gtk::ListBox, gtk::Box) {
+    let entry = gtk::SearchEntry::builder()
+        .placeholder_text("Search messages…")
+        .margin_start(8)
+        .margin_end(8)
+        .margin_top(8)
+        .build();
+    let title = gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_top(8)
+        .margin_bottom(2)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .css_classes(["dim-label", "caption-heading"])
+        .build();
+    let (list, scroll) = build_view_list();
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.append(&entry);
+    page.append(&title);
+    page.append(&scroll);
+    (entry, title, list, page)
+}
+
+/// Connect the three header buttons and the query box.
+fn wire_found(ui: &Ui, search: &gtk::Button, pinned: &gtk::Button, saved: &gtk::Button) {
+    {
+        let ui = ui.clone();
+        search.connect_clicked(move |_| ui.open_search());
+    }
+    {
+        let ui = ui.clone();
+        pinned.connect_clicked(move |_| {
+            let Some(channel) = ui.selected.borrow().clone() else {
+                ui.set_status("open a channel first");
+                return;
+            };
+            ui.commands.send(Command::Pinned(channel.clone())).ok();
+            ui.show_pane(&Pane::Found(mm_core::Found::Pinned(channel)));
+        });
+    }
+    {
+        let ui = ui.clone();
+        saved.connect_clicked(move |_| {
+            ui.commands.send(Command::Saved).ok();
+            ui.show_pane(&Pane::Found(mm_core::Found::Saved));
+        });
+    }
+    {
+        // The server parses the query, so the client waits for Return
+        // rather than searching per keystroke: every letter of a
+        // half-typed `from:legion` would otherwise be its own search.
+        let ui = ui.clone();
+        ui.search_entry.clone().connect_activate(move |entry| {
+            let terms = entry.text().to_string();
+            if terms.trim().is_empty() {
+                return;
+            }
+            let Some(team) = ui.store.borrow().teams.first().map(|t| t.id.clone()) else {
+                ui.set_status("no team to search yet");
+                return;
+            };
+            ui.set_status("searching…");
+            ui.commands.send(Command::Search { team, terms }).ok();
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.found_list.clone().connect_row_activated(move |_, row| {
+            let name = row.widget_name();
+            if name.is_empty() {
+                return;
+            }
+            ui.show_channel(&ChannelId::new(name.as_str()));
+        });
+    }
+}
+
 fn build_view_list() -> (gtk::ListBox, gtk::ScrolledWindow) {
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
@@ -847,6 +1011,11 @@ struct ViewRow<'a> {
     /// rather than an empty circle.
     face_names: Vec<String>,
     unread: bool,
+}
+
+/// A message as one run of text, for a list that previews it.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
@@ -887,8 +1056,12 @@ fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
 
     // Two lines of the message and no more: the view is a list of things
     // to go to, not a place to read them.
+    //
+    // The line breaks come out first. `lines(2)` clamps *wrapped*
+    // lines, not the ones the author typed, so a deploy report full of
+    // newlines filled the whole page with one result.
     let body = gtk::Label::builder()
-        .label(row.preview)
+        .label(one_line(row.preview))
         .xalign(0.0)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
@@ -1639,6 +1812,21 @@ fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str, channel: Option<&Ch
         list.remove(&old);
     }
     let store = ui.store.borrow();
+    // The three that mean a group rather than a person, under their own
+    // heading the way Mattermost draws them: they have no avatar, no
+    // presence and no id, so they are not faked into the roster.
+    let wanted = prefix.trim().to_lowercase();
+    let special: Vec<&(&str, &str)> = mm_core::SPECIAL_MENTIONS
+        .iter()
+        .filter(|(word, _)| word.starts_with(&wanted))
+        .collect();
+    if !special.is_empty() {
+        list.append(&mention_heading("SPECIAL MENTIONS"));
+        for (word, what) in special {
+            list.append(&special_mention_row(word, what));
+        }
+    }
+
     let mut heading_drawn = (false, false);
     for found in store.mention_candidates(channel, prefix, MENTIONS_OFFERED) {
         // Two sections, like Mattermost's: the people in this
@@ -1663,6 +1851,37 @@ fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str, channel: Option<&Ch
     if let Some(first) = first_selectable(list, 0, 1) {
         list.select_row(Some(&first));
     }
+}
+
+/// One of `@all`, `@channel`, `@here`, with what it does beside it.
+fn special_mention_row(word: &str, what: &str) -> gtk::ListBoxRow {
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.set_margin_start(12);
+    line.set_margin_end(12);
+    line.set_margin_top(2);
+    line.set_margin_bottom(2);
+    // An icon where a face would be, so the rows line up with the
+    // people below them.
+    let mark = gtk::Image::from_icon_name("system-users-symbolic");
+    mark.set_pixel_size(20);
+    mark.add_css_class("dim-label");
+    line.append(&mark);
+    line.append(
+        &gtk::Label::builder()
+            .label(format!("@{word}"))
+            .css_classes(["heading"])
+            .build(),
+    );
+    line.append(
+        &gtk::Label::builder()
+            .label(what)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["dim-label"])
+            .build(),
+    );
+    let row = gtk::ListBoxRow::builder().child(&line).build();
+    row.set_widget_name(word);
+    row
 }
 
 /// A section label, as a row that cannot be selected or activated so the
@@ -1759,6 +1978,15 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
             ui.open_switcher();
             return glib::Propagation::Stop;
         }
+        // Ctrl+Shift+F, the way Mattermost binds search. The shift is
+        // what keeps it off Ctrl+F, which GTK gives to find-in-widget.
+        if key == gdk::Key::F
+            && state.contains(gdk::ModifierType::CONTROL_MASK)
+            && state.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            ui.open_search();
+            return glib::Propagation::Stop;
+        }
         glib::Propagation::Proceed
     });
     // Capture, not bubble: a `GtkEntry` with the focus consumes key
@@ -1775,7 +2003,17 @@ fn wire_categories(ui: &Ui, sidebar: &gtk::ListBox) {
         // one -- so this has to say which kind it was handed.
         if row.has_css_class("mmrs-section") {
             folding.toggle_category(&row.widget_name());
+            return;
         }
+        if row.widget_name().starts_with("mmrs:") {
+            return;
+        }
+        // A click on a channel comes back to the conversation, even
+        // when that channel is already the selected one. Opening is the
+        // selection handler's job and only fires when the selection
+        // *changes*, so clicking the channel you are already on while
+        // reading saved messages did nothing at all.
+        folding.show_pane(&Pane::Channel);
     });
 
     // One drop target for the whole list rather than one per row: the
@@ -3624,6 +3862,9 @@ enum Pane {
     Channel,
     Threads,
     Drafts,
+    /// Search results, pinned messages or saved messages -- one page,
+    /// told apart by which list it is drawing.
+    Found(mm_core::Found),
 }
 
 /// What the sidebar rows for the two views are called, so a click can
@@ -4117,6 +4358,90 @@ impl Ui {
     /// One place decides what the middle of the window holds, so the
     /// composer, the stack page and the heading can never disagree about
     /// which view is up.
+    /// An answer list came back: search results, pinned or saved.
+    ///
+    /// Search takes the reader to its page, because they asked a
+    /// question and are waiting for it. The other two only redraw, and
+    /// only if that page is still the one on show -- the button that
+    /// asked already moved them there.
+    fn on_found(&self, event: Event) {
+        let which = match event {
+            Event::SearchResults { terms, page } => {
+                self.store.borrow_mut().apply_search(&terms, &page);
+                self.set_status("");
+                self.show_pane(&Pane::Found(mm_core::Found::Search));
+                return;
+            }
+            Event::PinnedPosts { channel, page } => {
+                self.store.borrow_mut().apply_pinned(&channel, &page);
+                mm_core::Found::Pinned(channel)
+            }
+            Event::SavedPosts(page) => {
+                self.store.borrow_mut().apply_saved(&page);
+                mm_core::Found::Saved
+            }
+            // Every other variant has its own arm in `on_data`.
+            _ => return,
+        };
+        if *self.pane.borrow() == Pane::Found(which.clone()) {
+            self.refresh_found(&which);
+        }
+    }
+
+    /// Open the search page and put the caret in the box.
+    fn open_search(&self) {
+        self.show_pane(&Pane::Found(mm_core::Found::Search));
+        self.search_entry.grab_focus();
+    }
+
+    /// Draw whichever answer list the page is showing.
+    ///
+    /// The rows are the same shape the Threads and Drafts views use --
+    /// who said it, where, when, and the message -- because a result is
+    /// a place to go, and that is what those rows are for.
+    fn refresh_found(&self, which: &mm_core::Found) {
+        while let Some(old) = self.found_list.first_child() {
+            self.found_list.remove(&old);
+        }
+        let store = self.store.borrow();
+        let posts = store.found(which);
+        self.found_title
+            .set_text(&found_heading(&store, which, posts.len()));
+        self.search_entry
+            .set_visible(*which == mm_core::Found::Search);
+
+        for post in &posts {
+            let (name, _) = store.post_author(post);
+            let where_said = store
+                .channels
+                .get(&post.channel_id)
+                .map_or_else(String::new, |c| store.channel_label(c));
+            let row = view_row(&ViewRow {
+                who: &name,
+                chip: &where_said,
+                ago: &describe_ago(post.create_at),
+                preview: &mm_md::parse(&post.message).to_plain(),
+                footer: "",
+                faces: Vec::new(),
+                face_names: Vec::new(),
+                unread: false,
+            });
+            // Clicking a result goes to its channel.
+            row.set_widget_name(post.channel_id.as_str());
+            self.found_list.append(&row);
+        }
+        if posts.is_empty() {
+            self.found_list.append(&empty_view(match which {
+                mm_core::Found::Search if store.search_terms.is_empty() => {
+                    "Type a search and press Return"
+                }
+                mm_core::Found::Search => "Nothing matched",
+                mm_core::Found::Saved => "Nothing saved",
+                mm_core::Found::Pinned(_) => "Nothing pinned in this channel",
+            }));
+        }
+    }
+
     fn show_pane(&self, pane: &Pane) {
         *self.pane.borrow_mut() = pane.clone();
         match pane {
@@ -4137,6 +4462,11 @@ impl Ui {
                 self.middle.set_visible_child_name("drafts");
                 self.composer_pane.set_visible(false);
                 self.refresh_drafts_view();
+            }
+            Pane::Found(which) => {
+                self.middle.set_visible_child_name("found");
+                self.composer_pane.set_visible(false);
+                self.refresh_found(which);
             }
         }
     }
@@ -4844,6 +5174,9 @@ impl Ui {
             Event::Preferences(prefs) => {
                 self.store.borrow_mut().apply_preferences(&prefs);
             }
+            Event::SearchResults { .. } | Event::PinnedPosts { .. } | Event::SavedPosts(_) => {
+                self.on_found(event);
+            }
             Event::Statuses(statuses) => {
                 if !self.store.borrow_mut().apply_statuses(&statuses).is_empty() {
                     self.redraw_soon();
@@ -5007,6 +5340,7 @@ impl Ui {
             }
             Pane::Threads => self.refresh_threads_view(),
             Pane::Drafts => self.refresh_drafts_view(),
+            Pane::Found(which) => self.refresh_found(which),
         }
         self.refresh_thread();
     }
