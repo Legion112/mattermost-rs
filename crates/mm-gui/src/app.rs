@@ -5860,7 +5860,14 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         reactions.append(&open);
     }
     for chip in chips {
-        reactions.append(&reaction_chip(&data.id(), &chip, &ctx.emoji));
+        // Timed per chip, so the report says both how many a real
+        // message carries and what one costs. Seven milliseconds of
+        // reactions is either a handful of very slow chips or a great
+        // many ordinary ones, and those want different answers.
+        let started_chip = std::time::Instant::now();
+        let built = reaction_chip(&data.id(), &chip, &ctx.emoji);
+        reactions.append(&built);
+        crate::perf::record("bind:one-chip", started_chip.elapsed());
     }
     crate::perf::record("bind:reactions", started_reactions.elapsed());
 }
