@@ -973,7 +973,11 @@ every one of a hundred hits.
 NOT built: jumping to the hit's exact place in its channel's scrollback -- \
 clicking a result opens the channel and that message's own thread beside \
 it, which puts the message on screen without the timeline having to grow a \
-segment around a post from a year ago."""
+segment around a post from a year ago.
+
+**Recent mentions** -- the webapp's "@", and Ctrl+Shift+M -- is a search \
+for the reader's own `@name`, on the same page with the same rows. \
+Lab-verified: the chord found the seeded reply addressed to the admin."""
 
 [[feature]]
 id       = "posts.pinned_and_saved"

@@ -47,6 +47,7 @@ pub const SCENARIOS: &[&str] = &[
     "edits-with-the-up-key",
     "reacts-with-the-keyboard",
     "searches-messages",
+    "shows-recent-mentions",
     "opens-a-card-from-a-mention",
     "pins-from-the-hover-toolbar",
     "saves-from-the-menu",
@@ -161,6 +162,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "edits-with-the-up-key" => edits_with_up(screen, admin).await,
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
+        "shows-recent-mentions" => recent_mentions(screen).await,
         "opens-a-card-from-a-mention" => card_from_mention(screen).await,
         "pins-from-the-hover-toolbar" => pins_from_toolbar(screen, admin).await,
         "saves-from-the-menu" => saves_from_menu(screen, admin).await,
@@ -1313,6 +1315,21 @@ async fn deletes_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
         })
         .await?;
     server_hears(admin, "engineering", &said, false).await
+}
+
+/// Ctrl+Shift+M searches for the reader's own name: the seeded thread
+/// has a reply addressed to the admin, so there is something to find.
+async fn recent_mentions(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x6d, &[key::CONTROL, key::SHIFT])?;
+    screen
+        .until("the mentions are found", |tree| {
+            tree.iter()
+                .any(|n| n.role == "label" && n.name.contains("for @legion"))
+        })
+        .await?;
+    screen.open_channel("Engineering").await
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

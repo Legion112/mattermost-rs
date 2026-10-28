@@ -1006,7 +1006,7 @@ fn build_window(
 ) -> (
     adw::WindowTitle,
     gtk::Button,
-    [gtk::Button; 4],
+    [gtk::Button; 5],
     Rc<LoginPage>,
     gtk::Stack,
     adw::ApplicationWindow,
@@ -1035,6 +1035,14 @@ fn build_window(
     let search = gtk::Button::from_icon_name("system-search-symbolic");
     search.set_tooltip_text(Some("Search messages  (Ctrl+Shift+F)"));
     header.pack_end(&search);
+    // The webapp's "@": every message naming the reader, newest first,
+    // which is where a morning starts.
+    let mentions = gtk::Button::builder()
+        .label("@")
+        .tooltip_text("Recent mentions  (Ctrl+Shift+M)")
+        .build();
+    name_widget(&mentions, "Recent mentions");
+    header.pack_end(&mentions);
 
     let login = Rc::new(LoginPage::new());
     // No transition. A crossfade queued while the stack is still unmapped
@@ -1074,7 +1082,7 @@ fn build_window(
     (
         title,
         refresh,
-        [search, pinned, saved, channel_menu],
+        [search, mentions, pinned, saved, channel_menu],
         login,
         stack,
         window,
@@ -1154,7 +1162,7 @@ fn build(
 
     let (conversation, split) = build_panes(&sidebar_pane, &content, &thread_pane);
 
-    let (title, refresh, [search, pinned, saved, channel_menu], login, stack, window) =
+    let (title, refresh, [search, mentions, pinned, saved, channel_menu], login, stack, window) =
         build_window(app, &split, geometry);
 
     let ui = Ui {
@@ -1241,7 +1249,7 @@ fn build(
     // Before `wire`: both install a capture-phase Return handler on the
     // composer, and the one that accepts a half-typed name has to see it
     // first or every completion would send the message instead.
-    wire_found(&ui, &search, &pinned, &saved);
+    wire_found(&ui, &search, &mentions, &pinned, &saved);
     {
         let ui = ui.clone();
         channel_menu.connect_clicked(move |button| {
@@ -2224,7 +2232,17 @@ fn build_found_page() -> (gtk::SearchEntry, gtk::Label, gtk::ListBox, gtk::Box) 
 }
 
 /// Connect the three header buttons and the query box.
-fn wire_found(ui: &Ui, search: &gtk::Button, pinned: &gtk::Button, saved: &gtk::Button) {
+fn wire_found(
+    ui: &Ui,
+    search: &gtk::Button,
+    mentions: &gtk::Button,
+    pinned: &gtk::Button,
+    saved: &gtk::Button,
+) {
+    {
+        let ui = ui.clone();
+        mentions.connect_clicked(move |_| ui.open_mentions());
+    }
     {
         let ui = ui.clone();
         search.connect_clicked(move |_| ui.open_search());
@@ -2252,27 +2270,9 @@ fn wire_found(ui: &Ui, search: &gtk::Button, pinned: &gtk::Button, saved: &gtk::
         // rather than searching per keystroke: every letter of a
         // half-typed `from:legion` would otherwise be its own search.
         let ui = ui.clone();
-        ui.search_entry.clone().connect_activate(move |entry| {
-            let terms = entry.text().to_string();
-            if terms.trim().is_empty() {
-                return;
-            }
-            let Some(team) = ui.store.borrow().teams.first().map(|t| t.id.clone()) else {
-                ui.set_status("no team to search yet");
-                return;
-            };
-            ui.set_status("searching…");
-            // A new query starts at the first page, whatever the last
-            // one had got to.
-            ui.search_page.set(0);
-            ui.commands
-                .send(Command::Search {
-                    team,
-                    terms,
-                    page: 0,
-                })
-                .ok();
-        });
+        ui.search_entry
+            .clone()
+            .connect_activate(move |entry| ui.search_for(&entry.text()));
     }
     {
         let ui = ui.clone();
@@ -4460,6 +4460,14 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
             ui.open_search();
             return glib::Propagation::Stop;
         }
+        // Ctrl+Shift+M: the reader's recent mentions, as the webapp binds it.
+        if key == gdk::Key::M
+            && state.contains(gdk::ModifierType::CONTROL_MASK)
+            && state.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            ui.open_mentions();
+            return glib::Propagation::Stop;
+        }
         // Alt+Up and Alt+Down walk the sidebar, and adding Shift walks
         // only what is unread -- the bindings Mattermost uses, and the
         // fastest way through a morning's backlog without reaching for
@@ -4511,6 +4519,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("<Control>k", "Jump to a channel or a person"),
             ("<Control><Shift>f", "Search this team's messages"),
+            ("<Control><Shift>m", "Your recent mentions"),
             ("<Alt>Up", "Previous channel"),
             ("<Alt>Down", "Next channel"),
             ("<Alt><Shift>Up", "Previous unread channel"),
@@ -9293,6 +9302,42 @@ impl Ui {
     fn open_search(&self) {
         self.show_pane(&Pane::Found(mm_core::Found::Search));
         self.search_entry.grab_focus();
+    }
+
+    /// Every message naming the reader: a search for their own `@name`,
+    /// which is what the webapp's "@" does.
+    fn open_mentions(&self) {
+        let me = self.store.borrow().my_username.clone();
+        if me.is_empty() {
+            self.set_status("not signed in yet");
+            return;
+        }
+        self.open_search();
+        let terms = format!("@{me}");
+        self.search_entry.set_text(&terms);
+        self.search_for(&terms);
+    }
+
+    /// Run a search on this team for what is typed, from its first page.
+    fn search_for(&self, terms: &str) {
+        if terms.trim().is_empty() {
+            return;
+        }
+        let Some(team) = self.store.borrow().teams.first().map(|t| t.id.clone()) else {
+            self.set_status("no team to search yet");
+            return;
+        };
+        self.set_status("searching…");
+        // A new query starts at the first page, whatever the last one
+        // had got to.
+        self.search_page.set(0);
+        self.commands
+            .send(Command::Search {
+                team,
+                terms: terms.to_owned(),
+                page: 0,
+            })
+            .ok();
     }
 
     /// Draw whichever answer list the page is showing.
