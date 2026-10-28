@@ -697,6 +697,11 @@ async fn long_channel(
          measured differently from one that does not and the difference is the \
          whole point of having a mix.",
         "```rust\nlet n = {n};\nassert!(n > 0);\n```",
+        // The shape that turned out to matter: a dump pasted into a
+        // message. A client that renders one as a single wrapped label
+        // of several thousand characters pays for it on every redraw,
+        // and a channel full of them took five seconds to open.
+        "{dump}",
         "- first of {n}\n- second\n- third",
         "**Bold {n}**, _italic_, `code`, and a [link](https://example.com/{n}).",
     ];
@@ -705,7 +710,9 @@ async fn long_channel(
     let me = id_of(&admin.call(&HttpRequest::get("/api/v4/users/me")).await?)?;
     for n in already..how_many {
         let who = &voices[n % voices.len()];
-        let text = shapes[n % shapes.len()].replace("{n}", &n.to_string());
+        let text = shapes[n % shapes.len()]
+            .replace("{n}", &n.to_string())
+            .replace("{dump}", &dump(n));
 
         // Every fifth message carries a picture, which is the shape that
         // makes a row expensive to draw.
@@ -804,5 +811,41 @@ fn face_png(seed: usize) -> Vec<u8> {
             let _ = writer.write_image_data(&pixels);
         }
     }
+    out
+}
+
+/// A pasted request/response dump, the way somebody debugging posts one.
+///
+/// Sixty lines of it, which is what a real one looks like and what a
+/// seeded three-line snippet does not measure at all.
+fn dump(n: usize) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("```\n");
+    let _ = writeln!(
+        out,
+        "---- REQUEST {n} ----\nPOST /login HTTP/1.1\nHOST : localhost\nHEADERS:"
+    );
+    for header in 0..18 {
+        let _ = writeln!(
+            out,
+            "        X-Some-Header-{header:02}: application/json; charset=utf-8; boundary=----Boundary{n}{header}"
+        );
+    }
+    out.push_str("BODY :\n{\n");
+    for field in 0..14 {
+        let _ = writeln!(
+            out,
+            "    \"field_{field:02}\": \"crm-admin2x933e3a-c7b5-49fd-a53f-043301602090@example.test\","
+        );
+    }
+    out.push_str("}\n---- RESPONSE ----\nSTATUS : 500 Internal Server Error\n");
+    for line in 0..12 {
+        let _ = writeln!(
+            out,
+            "    Trace-{line:02}: 6a61eca766951c246b0bbf34 at 2026-07-23T13:27:55.240406408+03:00"
+        );
+    }
+    out.push_str("```");
     out
 }

@@ -5014,12 +5014,31 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
             BlockKind::Rule => gtk::Separator::new(gtk::Orientation::Horizontal).upcast(),
             BlockKind::Code => {
                 let code = card_label(&block.text, false, &["monospace"]);
+                // Code does not wrap, and it does not grow without
+                // limit. Both of those cost real time: a dump pasted
+                // into a message is thousands of characters, and as one
+                // wrapped label it is a Pango layout that GTK measures
+                // every time the row is laid out. A channel of them took
+                // five seconds to open on a real account and produced a
+                // 1.1 second frame in the lab -- the first thing that
+                // ever reproduced it there.
+                //
+                // Scrolled instead, the way every other client draws
+                // one: the long lines go sideways, the tall ones are
+                // capped, and what GTK measures is a box of known size.
+                code.set_wrap(false);
+                code.set_hexpand(false);
                 code.set_margin_start(10);
                 code.set_margin_end(10);
                 code.set_margin_top(6);
                 code.set_margin_bottom(6);
-                let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-                panel.append(&code);
+                let panel = gtk::ScrolledWindow::builder()
+                    .child(&code)
+                    .hscrollbar_policy(gtk::PolicyType::Automatic)
+                    .vscrollbar_policy(gtk::PolicyType::Automatic)
+                    .propagate_natural_height(true)
+                    .max_content_height(CODE_MAX_HEIGHT)
+                    .build();
                 // "card" is libadwaita's panel styling: a background a shade
                 // off the window's, and rounded corners.
                 panel.add_css_class("card");
@@ -5933,6 +5952,15 @@ fn restate_members(list: &gtk::ListBox, heading: &gtk::Label) {
     let count = (0..).map_while(|i| list.row_at_index(i)).count();
     heading.set_label(&members_heading(count));
 }
+
+/// How tall a code block is allowed to be before it scrolls.
+///
+/// About twenty lines: enough to read a stack trace or a short
+/// snippet without scrolling, and short enough that a sixty-line dump
+/// does not push the rest of the conversation off the screen -- or
+/// cost what measuring sixty lines of monospace costs, which is the
+/// reason this exists at all.
+const CODE_MAX_HEIGHT: i32 = 340;
 
 /// How big a decoded avatar is kept.
 ///
