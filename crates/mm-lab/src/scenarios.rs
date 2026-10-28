@@ -42,9 +42,13 @@ pub const SCENARIOS: &[&str] = &[
     "reacts-with-the-keyboard",
     "searches-messages",
     "opens-a-card-from-a-mention",
+    "pins-from-the-hover-toolbar",
+    "replies-in-the-thread-box",
+    "jumps-with-the-switcher",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "leaves-a-channel",
+    "tidies-the-lab",
 ];
 
 /// The channel the seed makes for exactly this, so that joining and leaving
@@ -139,9 +143,13 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
         "opens-a-card-from-a-mention" => card_from_mention(screen).await,
+        "pins-from-the-hover-toolbar" => pins_from_toolbar(screen, admin).await,
+        "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
+        "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
+        "tidies-the-lab" => tidies(admin).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
     }
 }
@@ -625,6 +633,108 @@ async fn quiet_for_an_hour(screen: &Screen, admin: &Admin) -> Result<()> {
     )))
 }
 
+/// Wait for the server's word on whether a post is pinned.
+async fn pinned_says(admin: &Admin, post: &str, expected: bool) -> Result<()> {
+    for _ in 0..25 {
+        if admin.is_pinned(post).await? == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server does not hold the post pinned = {expected}"
+    )))
+}
+
+/// Resting the pointer on a message brings its toolbar up, and the
+/// overflow menu's Pin and Unpin reach the server.
+async fn pins_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    for (entry, expected) in [("Pin to channel", true), ("Unpin from channel", false)] {
+        let body = screen.text_holding(ROOT).await?;
+        screen.hover(&body).await?;
+        screen.click_button_near("More actions", &body).await?;
+        screen.press(entry).await?;
+        pinned_says(admin, &post, expected).await?;
+    }
+    Ok(())
+}
+
+/// A reply typed into the thread box and sent with Return lands under
+/// the root on the server.
+async fn replies_in_thread(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let before = admin.replies_to("engineering", ROOT).await?;
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
+    let said = format!("Replied from the lab at {}", crate::seed::stamp());
+    screen.type_into(&reply_box, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    let mut after = before;
+    for _ in 0..25 {
+        after = admin.replies_to("engineering", ROOT).await?;
+        if after == before + 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    screen.press_key(key::ESCAPE, &[])?;
+    if after != before + 1 {
+        return Err(Error(format!(
+            "the thread had {before} replies and has {after}, not one more"
+        )));
+    }
+    Ok(())
+}
+
+/// Ctrl+K, a few letters and Return open the channel named.
+async fn jumps_with_switcher(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x6b, &[key::CONTROL])?;
+    let finder = screen
+        .until("the switcher is up", |tree| {
+            tree.has("search box", "Find channel…")
+        })
+        .await?;
+    let entry = finder.find("search box", "Find channel…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "Design").await?;
+    // The list fills a moment after the text changes; Return before
+    // that acts on whatever was selected before.
+    screen
+        .until("the switcher offers Design", |tree| {
+            tree.iter()
+                .filter(|n| n.role == "label" && n.name == "Design")
+                .count()
+                >= 2
+        })
+        .await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("Design is open", |tree| tree.has("button", "Design, "))
+        .await
+        .map(|_| ())
+}
+
+/// Last of all, the lab's own traces go, so a kept lab is next run's
+/// seed and not a pile of every run so far. Not a test of the window.
+async fn tidies(admin: &Admin) -> Result<()> {
+    for channel in ["engineering", "design"] {
+        admin.sweep_traces(channel).await?;
+    }
+    Ok(())
+}
+
 /// The bug the lab found on its first day: the thread's reply count came
 /// from whichever of two requests answered second, and was dropped.
 async fn reply_count(screen: &Screen) -> Result<()> {
@@ -685,8 +795,8 @@ async fn add_and_remove(screen: &Screen, admin: &Admin) -> Result<()> {
         )));
     }
     screen.close_menu("Engineering").await?;
-    // Tidy up after ourselves: see `sweep_membership_notices`.
-    admin.sweep_membership_notices("engineering").await
+    // Tidy up after ourselves: see `sweep_traces`.
+    admin.sweep_traces("engineering").await
 }
 
 /// The default channel cannot be left, and the button has to say so rather

@@ -873,6 +873,42 @@ impl Admin {
         ))
     }
 
+    /// The id of the root post in a channel whose text starts a given way.
+    pub async fn post_id_of(&self, channel: &str, starts_with: &str) -> Result<String> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=200"
+            )))
+            .await?;
+        id_of(&find_root(&page, starts_with)?)
+    }
+
+    /// Whether the server holds a post pinned.
+    pub async fn is_pinned(&self, post_id: &str) -> Result<bool> {
+        let post = self
+            .api
+            .call(&HttpRequest::get(format!("/api/v4/posts/{post_id}")))
+            .await?;
+        Ok(post["is_pinned"].as_bool().unwrap_or(false))
+    }
+
+    /// How many replies the server holds under a root.
+    pub async fn replies_to(&self, channel: &str, starts_with: &str) -> Result<usize> {
+        let root = self.post_id_of(channel, starts_with).await?;
+        let thread = self
+            .api
+            .call(&HttpRequest::get(format!("/api/v4/posts/{root}/thread")))
+            .await?;
+        Ok(thread["posts"].as_object().map_or(0, |posts| {
+            posts
+                .values()
+                .filter(|p| p["root_id"].as_str() == Some(root.as_str()))
+                .count()
+        }))
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self
@@ -923,11 +959,12 @@ impl Admin {
         i64::try_from(before).map_err(|e| Error(e.to_string()))
     }
 
-    /// Delete the add/remove notices a test left in a channel, so a lab
-    /// kept across runs does not fill the channel with them: forty of
-    /// those push the seeded thread above the rows the window builds,
-    /// and the reply-count test then finds nothing to count.
-    pub async fn sweep_membership_notices(&self, channel: &str) -> Result<()> {
+    /// Delete what the scenarios leave in a channel -- the add/remove
+    /// notices, and every message the lab sent, edited or replied with
+    /// -- so a lab kept across runs stays the shape the seed made.
+    /// Forty leftovers push the seeded thread above the rows the window
+    /// builds, and every test that looks for it then finds nothing.
+    pub async fn sweep_traces(&self, channel: &str) -> Result<()> {
         let id = self.channel(channel).await?;
         let page = self
             .api
@@ -944,7 +981,9 @@ impl Admin {
                         matches!(
                             p["type"].as_str(),
                             Some("system_add_to_channel" | "system_remove_from_channel")
-                        )
+                        ) || LAB_TRACES
+                            .iter()
+                            .any(|t| p["message"].as_str().unwrap_or_default().starts_with(t))
                     })
                     .filter_map(|p| p["id"].as_str().map(str::to_owned))
                     .collect()
@@ -1235,6 +1274,15 @@ fn dump(n: usize) -> String {
     out.push_str("```");
     out
 }
+
+/// How every message the lab writes begins, so a sweep knows its own.
+pub const LAB_TRACES: &[&str] = &[
+    "Sent from the lab",
+    "Edited from the lab",
+    "Replied from the lab",
+    "@legion something new in Design.",
+    "A fresh message, ",
+];
 
 /// A moment, for a message that must differ from the last run's.
 #[must_use]

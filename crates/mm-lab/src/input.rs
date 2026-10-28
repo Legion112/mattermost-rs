@@ -135,7 +135,10 @@ pub fn move_to(x: i32, y: i32) -> Result<()> {
     )
     .map_err(|e| Error(format!("moving the pointer: {e}")))?;
     conn.flush()
-        .map_err(|e| Error(format!("flushing the display: {e}")))
+        .map_err(|e| Error(format!("flushing the display: {e}")))?;
+    // Let the server deliver before the connection goes away.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    Ok(())
 }
 
 /// Click the left button somewhere on the screen.

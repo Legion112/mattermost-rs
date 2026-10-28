@@ -1619,11 +1619,7 @@ fn open_custom_status_dialog(ui: &Ui, near: &gtk::Widget) {
         .hexpand(true)
         .activates_default(true)
         .build();
-    {
-        // A placeholder is not a name; see the add-somebody field.
-        use gtk::prelude::AccessibleExtManual as _;
-        text.update_property(&[gtk::accessible::Property::Label("What are you up to?")]);
-    }
+    name_widget(&text, "What are you up to?");
     if let Some(was) = &was {
         text.set_text(&was.text);
     }
@@ -2015,11 +2011,7 @@ fn build_found_page() -> (gtk::SearchEntry, gtk::Label, gtk::ListBox, gtk::Box) 
         .margin_end(8)
         .margin_top(8)
         .build();
-    {
-        // A placeholder is not a name; see the add-somebody field.
-        use gtk::prelude::AccessibleExtManual as _;
-        entry.update_property(&[gtk::accessible::Property::Label("Search messages…")]);
-    }
+    name_widget(&entry, "Search messages…");
     let title = gtk::Label::builder()
         .xalign(0.0)
         .margin_start(12)
@@ -2464,6 +2456,14 @@ fn face_with_dot(size: i32) -> (gtk::Overlay, adw::Avatar, gtk::Box) {
     (gutter, face, dot)
 }
 
+/// Give a widget an accessible name. A placeholder is not one: GTK does
+/// not expose it as such, so without this an entry announces itself as
+/// nothing at all -- and the lab cannot find it either.
+fn name_widget(widget: &impl IsA<gtk::Accessible>, name: &str) {
+    use gtk::prelude::AccessibleExtManual as _;
+    widget.update_property(&[gtk::accessible::Property::Label(name)]);
+}
+
 /// Colour the dot, or hide it for somebody who is not there.
 ///
 /// Offline is drawn as nothing rather than a grey dot: Mattermost does
@@ -2529,11 +2529,7 @@ fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
         // never to the text: nobody indents a chat message.
         .accepts_tab(false)
         .build();
-    {
-        // A placeholder is not a name; see the add-somebody field.
-        use gtk::prelude::AccessibleExtManual as _;
-        view.update_property(&[gtk::accessible::Property::Label(placeholder)]);
-    }
+    name_widget(&view, placeholder);
     let hint = gtk::Label::builder()
         .label(placeholder)
         .xalign(0.0)
@@ -3077,11 +3073,7 @@ fn open_emoji_picker(
         .margin_end(8)
         .margin_top(8)
         .build();
-    {
-        // A placeholder is not a name; see the add-somebody field.
-        use gtk::prelude::AccessibleExtManual as _;
-        search.update_property(&[gtk::accessible::Property::Label("Search emoji…")]);
-    }
+    name_widget(&search, "Search emoji…");
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .max_children_per_line(EMOJI_COLUMNS)
@@ -7878,6 +7870,7 @@ impl Ui {
             .margin_end(12)
             .margin_top(12)
             .build();
+        name_widget(&entry, "Find channel…");
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Browse)
             .css_classes(["navigation-sidebar"])

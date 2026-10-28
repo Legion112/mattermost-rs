@@ -522,10 +522,62 @@ impl Screen {
         crate::input::click_at(x + 14, y + 10)
     }
 
+    /// Click a button by its name with the pointer, for the ones that
+    /// offer no AT-SPI action -- a `MenuButton`, which opens a popover,
+    /// answers "No action with index 0".
+    pub async fn click_button(&self, name: &str) -> Result<()> {
+        let tree = self
+            .until(&format!("a button called {name:?} is on screen"), |tree| {
+                tree.has("button", name)
+            })
+            .await?;
+        let button = tree
+            .iter()
+            .find(|n| n.role == "button" && n.name == name)
+            .or_else(|| tree.find("button", name).ok())
+            .ok_or_else(|| Error(format!("no button called {name:?}")))?;
+        self.click_into(button).await
+    }
+
+    /// Click the button of this name nearest to another widget in layout
+    /// order -- the hover toolbar's "More actions" beside *this* message,
+    /// not the first such button on the page, which belongs to whichever
+    /// row the pointer crossed earlier. A widget no size is a hidden one
+    /// and is passed over.
+    pub async fn click_button_near(&self, name: &str, anchor: &Node) -> Result<()> {
+        let tree = self
+            .until(&format!("a button called {name:?} is on screen"), |tree| {
+                tree.has("button", name)
+            })
+            .await?;
+        let at = tree.iter().position(|n| n.path == anchor.path).unwrap_or(0);
+        let mut candidates: Vec<(usize, &Node)> = tree
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.role == "button" && n.name == name)
+            .map(|(i, n)| (i.abs_diff(at), n))
+            .collect();
+        candidates.sort_by_key(|(distance, _)| *distance);
+        for (_, button) in candidates {
+            let (_, _, w, h) = self.extents(button).await?;
+            if w > 0 && h > 0 {
+                return self.click_into(button).await;
+            }
+        }
+        Err(Error(format!("no visible button called {name:?}")))
+    }
+
     /// Rest the pointer on a widget, for what shows on hover.
     pub async fn hover(&self, node: &Node) -> Result<()> {
         let (x, y, w, h) = self.extents(node).await?;
-        crate::input::move_to(x + w / 2, y + h / 2)
+        // In two steps: GTK works out which widget the pointer entered
+        // from one motion to the next, and a single warp from nowhere
+        // onto the spot gave it nothing to compare.
+        crate::input::move_to(x + w / 2 - 8, y + h / 2 - 4)?;
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        crate::input::move_to(x + w / 2, y + h / 2)?;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        Ok(())
     }
 
     /// Click on a run of text inside a text widget -- an `@name`, say.
