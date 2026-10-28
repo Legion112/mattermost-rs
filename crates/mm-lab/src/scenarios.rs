@@ -160,6 +160,13 @@ async fn custom_status(screen: &Screen, admin: &Admin) -> Result<()> {
         .await?;
     screen.press("Set status").await?;
     server_holds(admin, Some("In the lab")).await?;
+    // And the reader's own shows beside their dot, as the default emoji
+    // the dialog started on, once the server has told everybody.
+    screen
+        .until("the reader's own status shows beside the dot", |tree| {
+            tree.has("label", "💬")
+        })
+        .await?;
 
     screen.press("Set your status").await?;
     screen

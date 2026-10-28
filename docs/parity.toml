@@ -624,7 +624,8 @@ puts it on, or takes it off, the rows on screen without rebuilding \
 them, the way presence and faces are handled; the once-a-minute \
 presence poll is what catches one that has run out. Verified in the \
 lab: a colleague's status set over the API appeared beside her name \
-in the open channel and went when it was cleared.
+in the open channel and went when it was cleared. The sidebar shows it after a \
+conversation's name too, and the reader's own sits beside their dot.
 
 NOT built: a do-not-disturb timer."""
 

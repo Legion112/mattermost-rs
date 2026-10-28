@@ -8833,6 +8833,11 @@ impl Ui {
             .any(|change| matches!(change, mm_core::Change::User(_)))
         {
             self.refresh_moods();
+            // The sidebar shows it after a conversation's name, and the
+            // reader's own sits beside their dot; neither is part of what
+            // the sidebar compares against, so say so.
+            self.sidebar_stale.set(true);
+            self.refresh_presence();
         }
         // The Threads badge is not part of what the sidebar compares
         // against, so a thread moving has to say so, the way the threads
@@ -9618,6 +9623,28 @@ impl Ui {
             name.add_css_class("dim-label");
         }
         line.append(&name);
+        // A conversation's other half may have said what they are up
+        // to, and this list is where the reader decides whom to ask.
+        if let Some(status) = row.avatar_user.as_ref().and_then(|user| {
+            self.store
+                .borrow()
+                .users
+                .get(user)
+                .and_then(|them| them.custom_status(utc_now()))
+        }) {
+            let face = emoji_face(&self.emoji, &status.emoji);
+            if !status.text.is_empty() {
+                // A handler rather than `set_tooltip_text`, which costs
+                // milliseconds a call on GNOME and the sidebar is rebuilt
+                // often: see the row tooltips.
+                face.set_has_tooltip(true);
+                face.connect_query_tooltip(move |_, _, _, _, tip| {
+                    tip.set_text(Some(&status.text));
+                    true
+                });
+            }
+            line.append(&face);
+        }
 
         if row.unread.mentions > 0 {
             let badge = gtk::Label::builder()
@@ -9669,8 +9696,22 @@ impl Ui {
 
     /// Redraw the dot beside the account name.
     fn refresh_presence(&self) {
-        self.presence
-            .set_child(Some(&presence_dot(self.my_presence())));
+        // The reader's own custom status sits beside the dot: the menu
+        // that sets it hangs off this button, and Mattermost shows it
+        // in the same corner, under the avatar.
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        line.append(&presence_dot(self.my_presence()));
+        let mine = {
+            let store = self.store.borrow();
+            store
+                .users
+                .get(&store.me)
+                .and_then(|me| me.custom_status(utc_now()))
+        };
+        if let Some(status) = mine {
+            line.append(&emoji_face(&self.emoji, &status.emoji));
+        }
+        self.presence.set_child(Some(&line));
     }
 
     fn refresh_sidebar(&self) {
