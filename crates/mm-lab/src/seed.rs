@@ -278,6 +278,7 @@ pub async fn seed_with(bulk: usize, long: usize) -> Result<()> {
     println!("{} colleagues on team {TEAM}", PEOPLE.len());
 
     let emoji = add_custom_emoji(&admin, &admin_id).await?;
+    give_faces(&admin, &ids).await?;
 
     let mut channels = std::collections::BTreeMap::new();
     for (name, display, private, members) in CHANNELS {
@@ -749,4 +750,59 @@ async fn long_channel(
     }
     println!("{LONG} now has {how_many} messages");
     Ok(())
+}
+
+/// How big a seeded profile picture is.
+///
+/// What a real server serves, and the whole point: an avatar arrives
+/// much larger than it is drawn, and whether the client scales it once
+/// or on every row is the difference between a row costing 0.3ms and
+/// several. A lab of users with no picture at all measured neither.
+const FACE_PIXELS: usize = 256;
+
+/// Give everybody a profile picture.
+async fn give_faces(admin: &Api, ids: &std::collections::BTreeMap<&str, String>) -> Result<()> {
+    for (n, (_, id)) in ids.iter().enumerate() {
+        let req = HttpRequest::new(Method::Post, format!("/api/v4/users/{id}/image")).multipart(
+            Vec::new(),
+            "image",
+            "face.png",
+            face_png(n),
+        );
+        admin.create(&req).await?;
+    }
+    println!("{} profile pictures", ids.len());
+    Ok(())
+}
+
+/// A plain square in a colour of its own, encoded as a PNG.
+///
+/// Generated rather than committed: the bytes do not matter, only that
+/// there are enough of them and that each person's differ.
+fn face_png(seed: usize) -> Vec<u8> {
+    let (r, g, b) = (
+        u8::try_from((seed * 71) % 256).unwrap_or(0),
+        u8::try_from((seed * 149) % 256).unwrap_or(0),
+        u8::try_from((seed * 223) % 256).unwrap_or(0),
+    );
+    let mut pixels = Vec::with_capacity(FACE_PIXELS * FACE_PIXELS * 3);
+    for y in 0..FACE_PIXELS {
+        for x in 0..FACE_PIXELS {
+            // A gradient, so the encoder cannot collapse it to nothing
+            // and the decoder has real work to do.
+            let shade = u8::try_from((x + y) % 256).unwrap_or(0);
+            pixels.extend_from_slice(&[r ^ shade, g ^ shade, b ^ shade]);
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let size = u32::try_from(FACE_PIXELS).unwrap_or(1);
+        let mut encoder = png::Encoder::new(&mut out, size, size);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        if let Ok(mut writer) = encoder.write_header() {
+            let _ = writer.write_image_data(&pixels);
+        }
+    }
+    out
 }

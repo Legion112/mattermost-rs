@@ -5743,6 +5743,26 @@ impl RowWidgets {
     }
 }
 
+/// The author's face, assigned only when it is a different one.
+///
+/// Handing a picture to an `AdwAvatar` makes it build a rounded copy,
+/// and a recycled row often carries the same author as the row it
+/// replaced -- so most of those copies were of a picture already shown.
+fn bind_face(face: &adw::Avatar, data: &PostRow) {
+    face.set_text(Some(&data.author()));
+    let wanted = data.avatar();
+    let same = match (face.custom_image(), wanted.as_ref()) {
+        (Some(shown), Some(want)) => {
+            shown.as_ptr() == want.clone().upcast::<gdk::Paintable>().as_ptr()
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if !same {
+        face.set_custom_image(wanted.as_ref());
+    }
+}
+
 fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     let (commands, viewer, links) = (&ctx.commands, &ctx.viewer, &ctx.links);
     let Some(data) = item.item().and_downcast::<PostRow>() else {
@@ -5791,8 +5811,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     face.set_visible(!grouped);
     set_presence(&dot, data.presence(), !grouped);
     main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
-    face.set_text(Some(&data.author()));
-    face.set_custom_image(data.avatar().as_ref());
+    bind_face(&face, &data);
 
     let system = data.is_system();
     // Still the same person talking: the author line would just repeat
@@ -5914,6 +5933,13 @@ fn restate_members(list: &gtk::ListBox, heading: &gtk::Label) {
     let count = (0..).map_while(|i| list.row_at_index(i)).count();
     heading.set_label(&members_heading(count));
 }
+
+/// How big a decoded avatar is kept.
+///
+/// The largest one drawn is the profile card's 96; a message row uses
+/// 24 and the sidebar 24. Twice the largest, so a `HiDPI` display still
+/// has pixels to work with and nothing is scaled *up*.
+const AVATAR_PIXELS: i32 = 192;
 
 /// How many channels keep their built rows for next time.
 ///
@@ -9392,8 +9418,35 @@ impl Ui {
 
     fn on_avatar_inner(&self, user: UserId, image: Vec<u8>) {
         let bytes = glib::Bytes::from_owned(image);
-        let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
-            return;
+        // Scaled on the way in, the same as a custom emoji and for a
+        // sharper reason. Mattermost serves a profile picture at 128
+        // pixels or more; the biggest one drawn here is 96 and the rows
+        // use 24. An `AdwAvatar` handed an oversized texture rescales it
+        // to a rounded copy -- and a row is bound every time a widget is
+        // recycled, so that happened hundreds of times a scroll.
+        //
+        // Worth doing on its own -- a 256px texture kept for a 24px
+        // drawing is memory nobody uses -- but **measured not to be the
+        // row cost**. Giving the lab's users real pictures and running
+        // it both ways was 0.37ms a bind against 0.36ms. The lab still
+        // draws a row fifteen times faster than a real account does,
+        // and what accounts for that is still unfound.
+        let stream = gio::MemoryInputStream::from_bytes(&bytes);
+        let scaled = gtk::gdk_pixbuf::Pixbuf::from_stream_at_scale(
+            &stream,
+            AVATAR_PIXELS,
+            AVATAR_PIXELS,
+            true,
+            gio::Cancellable::NONE,
+        );
+        let texture = match scaled {
+            Ok(pixbuf) => gdk::Texture::for_pixbuf(&pixbuf),
+            // A format gdk-pixbuf will not scale is still worth drawing
+            // if GDK can decode it at all.
+            Err(_) => match gdk::Texture::from_bytes(&bytes) {
+                Ok(texture) => texture,
+                Err(_) => return,
+            },
         };
         self.avatars.borrow_mut().insert(user, texture);
         // A face is drawn in the sidebar for a DM, and the rows it is
