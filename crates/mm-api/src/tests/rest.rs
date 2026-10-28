@@ -1323,3 +1323,38 @@ fn a_timed_quiet_carries_its_end_in_seconds() {
     let back = parse_status(&ok(r#"{"user_id":"u1","status":"online","manual":false}"#)).unwrap();
     assert_eq!(back.dnd_end_time, 0);
 }
+
+/// A big file goes up as a session: opened with its size, fed in pieces,
+/// and named by the server only when the last piece is in.
+#[test]
+fn an_upload_session_is_opened_fed_and_finished() {
+    let c = ChannelId::new("c1");
+    let open = create_upload(&c, "cast.webm", 5_000_000);
+    assert_eq!(open.method, Method::Post);
+    assert_eq!(open.path, "/api/v4/uploads");
+    let Body::Json(body) = &open.body else {
+        panic!("expected a JSON body, got {:?}", open.body);
+    };
+    assert!(body.contains(r#""file_size":5000000"#), "{body}");
+    assert!(body.contains(r#""filename":"cast.webm""#), "{body}");
+    let session = parse_upload_session(&ok(
+        r#"{"id":"up1","type":"attachment","file_size":5000000,"file_offset":0}"#,
+    ))
+    .unwrap();
+    assert_eq!(session.id, "up1");
+    assert_eq!(session.file_size, 5_000_000);
+
+    let piece = upload_chunk("up1", vec![1, 2, 3]);
+    assert_eq!(piece.path, "/api/v4/uploads/up1");
+    assert!(matches!(&piece.body, Body::Bytes { content_type, content }
+        if content_type == "application/octet-stream" && content == &[1, 2, 3]));
+
+    // Short of the size: nothing yet, either way the server says it.
+    assert_eq!(parse_chunk(&HttpResponse::new(204, "")).unwrap(), None);
+    assert_eq!(parse_chunk(&HttpResponse::new(200, "")).unwrap(), None);
+    // The last piece: the file.
+    let done = parse_chunk(&ok(r#"{"id":"f1","name":"cast.webm","size":5000000}"#)).unwrap();
+    assert_eq!(done.map(|f| f.id.to_string()), Some("f1".to_owned()));
+    let err = HttpResponse::new(413, r#"{"id":"api.too_large","message":"too large"}"#);
+    assert!(parse_chunk(&err).is_err());
+}

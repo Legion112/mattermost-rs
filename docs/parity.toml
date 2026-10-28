@@ -550,8 +550,9 @@ most of a server, and an answer to a query the reader has already typed past \
 is dropped rather than drawn. A failed search is silent: the local results \
 are already on screen and a shorter list needs no error line. Verified on a \
 live account: "test" offered a public channel outside the sidebar, "ale" \
-offered four people, and choosing one opened the conversation. NOT verified: \
-**joining**, which posts a "user joined the channel" notice that everybody \
+offered four people, and choosing one opened the conversation. Joining is lab-verified: after leaving a channel, Ctrl+K found it among \
+the ones not joined and Return put the reader back in it, on the server \
+too. **Joining** posts a "user joined the channel" notice that everybody \
 in it sees, so it was built but not tried. NOT built: archived channels, and \
 searching across teams."""
 
@@ -1135,8 +1136,14 @@ cache per paste and something, somewhere, remembering to delete it, which is \
 a leak with extra steps. Verified on a live account: a picture on the \
 clipboard became an attachment chip, sent, and rendered inline in the \
 conversation with nothing written to disk -- and ordinary text still pastes \
-as text. NOT built: progress for a large file, and previewing a non-image \
-attachment in the client."""
+as text.
+
+**A big file goes up in pieces** -- an upload session opened with the \
+size, a megabyte a request, the server naming the file when the last \
+byte is in -- and the status line says how far it has got, because a \
+screencast is tens of megabytes and silence reads as a hang. NOT \
+verified in the lab, which has no way to hand the window a file. NOT \
+built: previewing a non-image attachment in the client."""
 
 [[feature]]
 id       = "desktop.window_geometry"

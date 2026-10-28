@@ -7607,6 +7607,14 @@ impl Ui {
                 self.window.close();
             }
             Event::Status(text) => self.set_status(&text),
+            Event::Uploading { name, sent, total } => {
+                let percent = if total == 0 {
+                    100
+                } else {
+                    sent.saturating_mul(100) / total
+                };
+                self.set_status(&format!("uploading {name} · {percent}%"));
+            }
             Event::Failed(text) => self.set_status(&format!("error: {text}")),
             // Reference data arriving, which only ever means "store it and
             // redraw what it touches".

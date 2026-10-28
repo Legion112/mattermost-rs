@@ -58,6 +58,11 @@ pub enum Body {
         filename: String,
         content: Vec<u8>,
     },
+    /// Raw bytes with their media type: one piece of an upload session.
+    Bytes {
+        content_type: String,
+        content: Vec<u8>,
+    },
 }
 
 /// Everything needed to perform one API call, and nothing more.
@@ -166,6 +171,17 @@ impl HttpRequest {
             fields,
             file_field: file_field.into(),
             filename: filename.into(),
+            content,
+        };
+        self
+    }
+
+    /// Raw bytes as the body, with their media type: a piece of an upload
+    /// session, which takes the file's bytes as they are.
+    #[must_use]
+    pub fn bytes(mut self, content_type: impl Into<String>, content: Vec<u8>) -> Self {
+        self.body = Body::Bytes {
+            content_type: content_type.into(),
             content,
         };
         self

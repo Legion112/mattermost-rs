@@ -48,6 +48,7 @@ pub const SCENARIOS: &[&str] = &[
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "leaves-a-channel",
+    "joins-from-the-switcher",
     "tidies-the-lab",
 ];
 
@@ -149,6 +150,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
+        "joins-from-the-switcher" => joins_from_switcher(screen, admin).await,
         "tidies-the-lab" => tidies(admin).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
     }
@@ -733,6 +735,46 @@ async fn tidies(admin: &Admin) -> Result<()> {
         admin.sweep_traces(channel).await?;
     }
     Ok(())
+}
+
+/// After leaving, the switcher still finds the channel among the ones
+/// the reader is not in, and Return joins it: the server agrees.
+async fn joins_from_switcher(screen: &Screen, admin: &Admin) -> Result<()> {
+    if admin.am_in(PRACTICE).await? {
+        return Err(Error(format!(
+            "still in {PRACTICE}, so joining it proves nothing"
+        )));
+    }
+    focused_composer(screen).await?;
+    screen.press_key(0x6b, &[key::CONTROL])?;
+    let finder = screen
+        .until("the switcher is up", |tree| {
+            tree.has("search box", "Find channel…")
+        })
+        .await?;
+    let entry = finder.find("search box", "Find channel…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "Leaving").await?;
+    screen
+        .until("the switcher offers the channel left", |tree| {
+            tree.has("label", PRACTICE_LABEL)
+        })
+        .await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the channel is open again", |tree| {
+            tree.has("button", &format!("{PRACTICE_LABEL}, "))
+        })
+        .await?;
+    for _ in 0..25 {
+        if admin.am_in(PRACTICE).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server does not have us back in {PRACTICE}"
+    )))
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

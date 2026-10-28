@@ -161,3 +161,18 @@ fn every_derive_is_exercised() {
         assert!(!s.is_empty());
     }
 }
+
+#[test]
+fn a_bytes_body_carries_its_media_type() {
+    let req = HttpRequest::post("/api/v4/uploads/u1").bytes("application/octet-stream", vec![9, 8]);
+    match &req.body {
+        Body::Bytes {
+            content_type,
+            content,
+        } => {
+            assert_eq!(content_type, "application/octet-stream");
+            assert_eq!(content, &[9, 8]);
+        }
+        other => panic!("expected bytes, got {other:?}"),
+    }
+}

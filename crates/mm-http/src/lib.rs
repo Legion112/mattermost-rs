@@ -171,6 +171,12 @@ impl Client {
                     reqwest::multipart::Part::bytes(content.clone()).file_name(filename.clone());
                 builder.multipart(form.part(file_field.clone(), part))
             }
+            Body::Bytes {
+                content_type,
+                content,
+            } => builder
+                .header("Content-Type", content_type)
+                .body(content.clone()),
         };
 
         let resp = builder

@@ -206,3 +206,36 @@ pub fn toplevel_origin() -> Result<(i32, i32)> {
     best.map(|(_, x, y)| (x, y))
         .ok_or_else(|| Error("no window on the display".to_owned()))
 }
+
+/// Where a window of exactly this size sits on the screen.
+///
+/// A widget's extents are relative to *its* toplevel, and a dialog or
+/// the quick switcher is a toplevel of its own, smaller than the main
+/// window and somewhere else: adding the main window's place to a
+/// widget in the switcher put the first clicks into the sidebar
+/// behind it. The toplevel's size is what AT-SPI does say, so the X
+/// window with that size is the one.
+pub fn origin_of_window_sized(width: i32, height: i32) -> Result<(i32, i32)> {
+    let (conn, root) = connect()?;
+    let children = conn
+        .query_tree(root)
+        .map_err(|e| Error(format!("asking for the windows: {e}")))?
+        .reply()
+        .map_err(|e| Error(format!("reading the windows: {e}")))?
+        .children;
+    // The last match: a window mapped later sits above an older one of
+    // the same size, and is the one the pointer would reach.
+    let mut found = None;
+    for child in children {
+        let Ok(geometry) = conn.get_geometry(child).and_then(|c| {
+            c.reply()
+                .map_err(|_| x11rb::errors::ConnectionError::UnknownError)
+        }) else {
+            continue;
+        };
+        if i32::from(geometry.width) == width && i32::from(geometry.height) == height {
+            found = Some((i32::from(geometry.x), i32::from(geometry.y)));
+        }
+    }
+    found.map_or_else(toplevel_origin, Ok)
+}

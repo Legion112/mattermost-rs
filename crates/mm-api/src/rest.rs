@@ -472,6 +472,49 @@ pub fn parse_upload(resp: &HttpResponse) -> Result<Uploaded, ApiError> {
     parse_json(resp, "POST /files")
 }
 
+// ------------------------------------------------------ upload sessions
+
+/// Open an upload session for one file: the way a big file goes up in
+/// pieces, so the reader can be told how far it has got. The server
+/// wants the size up front and names the file when the last byte is in.
+#[must_use]
+pub fn create_upload(channel: &ChannelId, filename: &str, size: u64) -> HttpRequest {
+    HttpRequest::post(format!("{API}/uploads")).json(&serde_json::json!({
+        "channel_id": channel.to_string(),
+        "filename": filename,
+        "file_size": size,
+    }))
+}
+
+/// An upload session as the server holds it: how far it has got.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct UploadSession {
+    pub id: String,
+    pub file_offset: u64,
+    pub file_size: u64,
+}
+
+pub fn parse_upload_session(resp: &HttpResponse) -> Result<UploadSession, ApiError> {
+    parse_json(resp, "POST /uploads")
+}
+
+/// The next piece of a session's file, appended where the last one
+/// ended. Raw bytes, not a form: the session already knows the name.
+#[must_use]
+pub fn upload_chunk(upload: &str, chunk: Vec<u8>) -> HttpRequest {
+    HttpRequest::post(format!("{API}/uploads/{upload}")).bytes("application/octet-stream", chunk)
+}
+
+/// What a piece came back with: nothing while the file is still short
+/// of its size (`204`), and the file once the last byte is in.
+pub fn parse_chunk(resp: &HttpResponse) -> Result<Option<FileRef>, ApiError> {
+    if resp.status == 204 || resp.body.is_empty() {
+        return Ok(None);
+    }
+    parse_json(resp, "POST /uploads/{upload}").map(Some)
+}
+
 /// Search a team's messages.
 ///
 /// `is_or_search` false is Mattermost's default and means every term

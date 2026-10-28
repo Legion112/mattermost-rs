@@ -323,7 +323,7 @@ async fn send_post(
 ) {
     let mut files = Vec::new();
     for attachment in attach {
-        match upload_one(a, channel, attachment).await {
+        match upload_one(a, channel, attachment, events).await {
             Ok(id) => files.push(id),
             Err(e) => {
                 let _ = events.send(Event::Failed(e)).await;
@@ -339,6 +339,9 @@ async fn send_post(
     // the optimistic-post race out of this code entirely.
     if let Err(e) = fetch(&a.client, &request, rest::parse_post).await {
         let _ = events.send(Event::Failed(e)).await;
+    } else if !files.is_empty() {
+        // The progress line, if any, has said its last word.
+        let _ = events.send(Event::Status("ready".into())).await;
     }
 }
 
@@ -351,6 +354,7 @@ async fn upload_one(
     a: &Active,
     channel: &ChannelId,
     attachment: &mm_gui::bridge::Attachment,
+    events: &async_channel::Sender<Event>,
 ) -> Result<mm_types::FileId, String> {
     let name = attachment.name();
     let content = match attachment {
@@ -359,6 +363,9 @@ async fn upload_one(
         }
         mm_gui::bridge::Attachment::Pasted { data, .. } => data.clone(),
     };
+    if content.len() > UPLOAD_PIECE {
+        return upload_in_pieces(a, channel, &name, content, events).await;
+    }
     let request = rest::upload_file(channel, &name, content);
     let answer = fetch(&a.client, &request, rest::parse_upload).await?;
     answer
@@ -368,6 +375,56 @@ async fn upload_one(
         .map(|info| info.id)
         .ok_or_else(|| format!("{name}: the server accepted it but named no file"))
 }
+
+/// A file bigger than one piece goes up as an upload session, a piece
+/// at a time, with a word to the window after each: a screencast is
+/// tens of megabytes and a bar that does not move reads as a hang.
+/// The server names the file when the last byte is in and nothing
+/// before; a session it never finishes naming is an error, not a
+/// file with no id.
+async fn upload_in_pieces(
+    a: &Active,
+    channel: &ChannelId,
+    name: &str,
+    content: Vec<u8>,
+    events: &async_channel::Sender<Event>,
+) -> Result<mm_types::FileId, String> {
+    let total = u64::try_from(content.len()).unwrap_or(u64::MAX);
+    let session = fetch(
+        &a.client,
+        &rest::create_upload(channel, name, total),
+        rest::parse_upload_session,
+    )
+    .await?;
+    let mut sent = 0_u64;
+    for piece in content.chunks(UPLOAD_PIECE) {
+        let done = fetch(
+            &a.client,
+            &rest::upload_chunk(&session.id, piece.to_vec()),
+            rest::parse_chunk,
+        )
+        .await?;
+        sent += u64::try_from(piece.len()).unwrap_or(0);
+        let _ = events
+            .send(Event::Uploading {
+                name: name.to_owned(),
+                sent,
+                total,
+            })
+            .await;
+        if let Some(file) = done {
+            return Ok(file.id);
+        }
+    }
+    Err(format!(
+        "{name}: the server took every byte and named no file"
+    ))
+}
+
+/// How much of a file goes up in one request. A megabyte is a few
+/// seconds on a poor link, which is as long as a progress line should
+/// stand still.
+const UPLOAD_PIECE: usize = 1 << 20;
 
 /// Put an attachment in the reader's download folder.
 ///

@@ -484,14 +484,35 @@ impl Screen {
     /// (0, 0) for every widget, which put the first clicks on the title
     /// bar.
     pub async fn extents(&self, node: &Node) -> Result<(i32, i32, i32, i32)> {
+        let (x, y, w, h) = self.extents_in_window(node).await?;
+        let (wx, wy) = self.window_origin_of(node).await?;
+        Ok((wx + x, wy + y, w, h))
+    }
+
+    /// A widget's place inside its own toplevel.
+    async fn extents_in_window(&self, node: &Node) -> Result<(i32, i32, i32, i32)> {
         let ((x, y, w, h),) = self
             .proxy(node, COMPONENT)
             .await?
             .call::<_, _, ((i32, i32, i32, i32),)>("GetExtents", &(1_u32))
             .await
             .map_err(|e| Error(format!("placing {:?}: {e}", node.name)))?;
-        let (wx, wy) = crate::input::toplevel_origin()?;
-        Ok((wx + x, wy + y, w, h))
+        Ok((x, y, w, h))
+    }
+
+    /// Where a widget's own toplevel is on the screen: the dialog or
+    /// switcher it is in, not the main window behind that. The toplevel
+    /// is the last node at depth one before this one in the tree, and
+    /// its size picks the X window out; see `origin_of_window_sized`.
+    async fn window_origin_of(&self, node: &Node) -> Result<(i32, i32)> {
+        let tree = self.tree().await?;
+        let at = tree.iter().position(|n| n.path == node.path);
+        let toplevel = at.and_then(|at| tree[..=at].iter().rev().find(|n| n.depth == 1));
+        let Some(toplevel) = toplevel else {
+            return crate::input::toplevel_origin();
+        };
+        let (_, _, w, h) = self.extents_in_window(toplevel).await?;
+        crate::input::origin_of_window_sized(w, h)
     }
 
     /// What a text widget holds, start to end.
@@ -594,7 +615,7 @@ impl Screen {
             .call::<_, _, ((i32, i32, i32, i32),)>("GetRangeExtents", &(start, end, 1_u32))
             .await
             .map_err(|e| Error(format!("placing {needle:?}: {e}")))?;
-        let (wx, wy) = crate::input::toplevel_origin()?;
+        let (wx, wy) = self.window_origin_of(node).await?;
         eprintln!("  click on {needle:?} at ({x}, {y}) {w}x{h} in the window at ({wx}, {wy})");
         crate::input::click_at(wx + x + w / 2, wy + y + h / 2)
     }

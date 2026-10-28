@@ -457,6 +457,13 @@ pub enum Event {
     Quit,
     /// Something to show in the status line.
     Status(String),
+    /// How far a big attachment has got on its way up, for the status
+    /// line: a screencast takes a while, and silence reads as a hang.
+    Uploading {
+        name: String,
+        sent: u64,
+        total: u64,
+    },
     /// Something went wrong, in words meant for a person.
     Failed(String),
 }
