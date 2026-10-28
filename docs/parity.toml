@@ -1414,7 +1414,7 @@ that described half of them accurately would be worse than one plainly \
 maintained by hand. Verified on a live account: Ctrl+/ drew both groups \
 with the right keys on them.
 
-**Ctrl+Shift+\ reacts to the last message**, Mattermost's own binding: \
+**Ctrl+Shift+\\ reacts to the last message**, Mattermost's own binding: \
 it opens the emoji picker on the newest message in the channel, whoever \
 wrote it, and picking one toggles the reaction the way the quick \
 buttons do. NOT verified in the lab, whose driver cannot press chords \
