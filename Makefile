@@ -182,6 +182,46 @@ cover-missing: ## List the uncovered lines in the gated crates
 	$(CARGO) llvm-cov --locked --all-features $(GATED) \
 		--ignore-filename-regex $(COV_IGNORE) --show-missing-lines
 
+# ---------------------------------------------------------------- lab
+
+# The lab is a Mattermost of our own, in Docker, seeded with colleagues who
+# are not real. It exists because several features cannot honestly be tested
+# on a server other people are on: leaving a channel posts a system message,
+# adding somebody notifies them, deleting a channel is forever.
+#
+# Not an xtask subcommand, unlike everything else here: xtask is deliberately
+# offline and dependency-light so `make check` works on a train, and the lab
+# needs tokio, an HTTP client and a Docker daemon.
+MMLAB := $(CARGO) run -q -p mm-lab --bin mmlab --
+
+.PHONY: lab-up
+lab-up: ## Start the Docker lab and wait until the server answers
+	$(MMLAB) up
+
+.PHONY: lab-seed
+lab-seed: ## Fill a running lab with a team, colleagues and a conversation
+	$(MMLAB) seed
+
+.PHONY: lab-reset
+lab-reset: ## Throw the lab away and build a fresh seeded one
+	$(MMLAB) reset
+
+.PHONY: lab-run
+lab-run: ## Run the client against the lab, with a stored session of its own
+	$(MMLAB) run --release
+
+.PHONY: lab-status
+lab-status: ## What the lab is doing, and its URL
+	$(MMLAB) status
+
+.PHONY: lab-logs
+lab-logs: ## The lab server's log, where a failed boot says why
+	$(MMLAB) logs
+
+.PHONY: lab-down
+lab-down: ## Stop and delete the lab, data included
+	$(MMLAB) down
+
 # ---------------------------------------------------------------- environment
 
 .PHONY: apt-deps

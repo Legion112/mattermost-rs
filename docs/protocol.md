@@ -330,6 +330,44 @@ Deterministic seeding: `mmctl --local sampledata --seed 42 --bulk out.jsonl`
 than re-running the generator** — seed stability across server versions is
 unconfirmed, and a committed fixture is byte-stable by construction.
 
+## The same post, told twice, with different amounts of truth
+
+**`GET /users/{id}/teams/{id}/threads` embeds each thread's root post with
+`reply_count: 0`**, while the thread object beside it carries the real count.
+The channel page sends the same post with the true count and a **byte-identical
+`update_at`** -- so neither copy is newer, and a store that resolves ties by
+"first one wins" or "last one wins" is deciding by race.
+
+Verified against 12.0.1 in the lab on 2026-10-28:
+
+```
+threads : thread.reply_count=2 | post.id=x4iscg | post.reply_count=0 | update_at=1793163973674
+channel : post.id=x4iscg | post.reply_count=2   | update_at=1793163973674
+```
+
+This client showed "2 replies" on a busy server and nothing on a quiet one for
+exactly that reason. The rule that fixes it is **known beats unknown, field by
+field**, not newest-wins on the whole object: an endpoint that omits a field is
+saying "I did not send this", never "this is zero". The same applies to
+`metadata`, which several endpoints leave off a post that has attachments.
+
+## Running a server for the lab, in practice
+
+`make lab-up` is 16 seconds on a warm image, and the server it brings up
+reports **12.0.1 — the same version as the production server this client is
+used against**, so a fact measured in the lab is a fact about the real one.
+
+Measured while building it:
+
+- **A fresh channel is not empty.** Adding somebody posts a
+  `system_add_to_channel` notice, so "has this been seeded?" has to count posts
+  whose `type` is empty, not posts.
+- `POST /api/v4/users` unauthenticated works for the first non-bot account and
+  promotes it to system admin, as documented below. The lab relies on it: it
+  needs no `mmctl`, and therefore no shell inside a distroless container.
+- `POST /api/v4/emoji` takes the emoji as a **JSON string in a multipart field
+  named `emoji`**, beside the image, rather than as a JSON body.
+
 ## Sidebar categories
 
 `GET /users/{user_id}/teams/{team_id}/channels/categories` returns
