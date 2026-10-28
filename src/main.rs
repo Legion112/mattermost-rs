@@ -694,6 +694,15 @@ fn describe(event: &mm_api::WsEvent) -> String {
             channel_id,
             user_id,
         } => format!("{user_id} left {channel_id}"),
+        E::ThreadUpdated(t) => format!(
+            "thread {} now has {} replies, {} unread",
+            t.id, t.reply_count, t.unread_replies
+        ),
+        E::ThreadReadChanged {
+            thread_id,
+            unread_replies,
+            ..
+        } => format!("thread {thread_id} read, {unread_replies} unread left"),
         E::Unknown { event } => format!("(unhandled event {event})"),
     }
 }

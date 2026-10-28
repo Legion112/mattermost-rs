@@ -6839,6 +6839,12 @@ impl Ui {
                 if changes.is_empty() {
                     return;
                 }
+                // The Threads badge is not part of what the sidebar
+                // compares against, so a thread moving has to say so, the
+                // way the threads list arriving does.
+                if changes.contains(&mm_core::Change::Threads) {
+                    self.sidebar_stale.set(true);
+                }
                 // Coalesced, because events arrive in bursts -- a reconnect
                 // replays a queue of them -- and each one would otherwise
                 // redraw the open channel, the sidebar and the thread pane.
@@ -8694,6 +8700,13 @@ impl Ui {
         // network, rebuilt the post list and wrote a mark-read. Only a
         // real change of channel is a user action.
         if self.selected.borrow().as_ref() == Some(id) {
+            // Unless the reader is looking at Threads or Drafts, where
+            // the channel is still the selected row and clicking it is
+            // how they come back to it. Found by a scenario that opened
+            // Threads and then could not open the channel it had left.
+            if *self.pane.borrow() != Pane::Channel {
+                self.show_pane(&Pane::Channel);
+            }
             return;
         }
 

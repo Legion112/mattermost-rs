@@ -603,3 +603,74 @@ fn membership_events_read_each_field_from_whichever_side_carries_it() {
         })]
     );
 }
+
+/// `thread_updated` carries the thread the way the threads endpoint
+/// does, as a JSON document inside a string, root post and all.
+#[test]
+fn thread_updated_is_decoded_with_its_root() {
+    let thread = r#"{"id":"root1","reply_count":3,"last_reply_at":1730000000000,
+        "last_viewed_at":1729000000000,"unread_replies":1,"unread_mentions":0,
+        "participants":[{"id":"u2"}],
+        "post":{"id":"root1","channel_id":"c1","message":"the root","user_id":"u1"}}"#;
+    let encoded = serde_json::to_string(thread).unwrap();
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(&format!(
+        r#"{{"event":"thread_updated","data":{{"thread":{encoded}}},"seq":1}}"#
+    ));
+    match &out[0] {
+        WsOutcome::Event(WsEvent::ThreadUpdated(thread)) => {
+            assert_eq!(thread.id.as_str(), "root1");
+            assert_eq!(thread.reply_count, 3);
+            assert_eq!(thread.unread_replies, 1);
+            assert_eq!(thread.participants.len(), 1);
+            assert_eq!(
+                thread.post.as_ref().map(|p| p.message.as_str()),
+                Some("the root")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// `thread_read_changed` is plain fields, numbers as numbers.
+#[test]
+fn thread_read_changed_is_decoded_from_plain_fields() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(
+        r#"{"event":"thread_read_changed","data":{"thread_id":"root1",
+            "timestamp":1730000000000,"unread_replies":0,"unread_mentions":0,
+            "channel_id":"c1"},"seq":1}"#,
+    );
+    match &out[0] {
+        WsOutcome::Event(WsEvent::ThreadReadChanged {
+            thread_id,
+            timestamp,
+            unread_replies,
+            unread_mentions,
+        }) => {
+            assert_eq!(thread_id.as_str(), "root1");
+            assert_eq!(timestamp.0, 1_730_000_000_000);
+            assert_eq!(*unread_replies, 0);
+            assert_eq!(*unread_mentions, 0);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A frame without the numbers is still a frame; they read as zero.
+#[test]
+fn thread_read_changed_without_counts_reads_zero() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(r#"{"event":"thread_read_changed","data":{"thread_id":"r"},"seq":1}"#);
+    match &out[0] {
+        WsOutcome::Event(WsEvent::ThreadReadChanged {
+            timestamp,
+            unread_replies,
+            ..
+        }) => {
+            assert_eq!(timestamp.0, 0);
+            assert_eq!(*unread_replies, 0);
+        }
+        other => panic!("{other:?}"),
+    }
+}

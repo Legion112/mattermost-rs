@@ -3392,3 +3392,219 @@ fn offering_people_to_add_leaves_out_everybody_already_in_the_channel() {
     assert!(names(s.not_in_channel(&c1, "h", 6)).is_empty());
     assert!(names(s.not_in_channel(&c1, "me", 6)).is_empty());
 }
+
+fn followed(root: &str, replies: i64, last_reply: i64) -> mm_types::UserThread {
+    mm_types::UserThread {
+        id: PostId::new(root),
+        reply_count: replies,
+        last_reply_at: Timestamp(last_reply),
+        post: Some(post(root, "c1", 10)),
+        ..mm_types::UserThread::default()
+    }
+}
+
+fn reply_to(root: &str, id: &str, by: &str, created: i64) -> Post {
+    Post {
+        root_id: PostId::new(root),
+        user_id: UserId::new(by),
+        ..post(id, "c1", created)
+    }
+}
+
+/// A reply arriving over the socket moves the thread it belongs to:
+/// one more reply, newer, unread, and the account's total of unread
+/// threads up by one when this one was not unread before. The Threads
+/// view that waited for the next sync showed a reply in the channel
+/// and not in the thread beside it.
+#[test]
+fn a_reply_over_the_socket_moves_the_followed_thread() {
+    let mut store = store();
+    store.threads = vec![followed("p1", 2, 50)];
+    let changes = store.apply_ws(&WsEvent::Posted {
+        post: reply_to("p1", "r3", "u2", 60),
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    });
+    assert!(changes.contains(&Change::Threads));
+    let thread = &store.threads[0];
+    assert_eq!(thread.reply_count, 3);
+    assert_eq!(thread.last_reply_at, Timestamp(60));
+    assert_eq!(thread.unread_replies, 1);
+    assert!(thread.participants.iter().any(|u| u.id.as_str() == "u2"));
+    assert_eq!(store.thread_totals.unread_threads, 1);
+
+    // A second reply from the same person is one more reply and no
+    // second participant, and the thread was unread already.
+    store.apply_ws(&WsEvent::Posted {
+        post: reply_to("p1", "r4", "u2", 70),
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    });
+    let thread = &store.threads[0];
+    assert_eq!(thread.reply_count, 4);
+    assert_eq!(thread.unread_replies, 2);
+    assert_eq!(thread.participants.len(), 1);
+    assert_eq!(store.thread_totals.unread_threads, 1);
+}
+
+/// The reader's own reply moves the thread but is not unread to them.
+#[test]
+fn ones_own_reply_moves_the_thread_without_making_it_unread() {
+    let mut store = store();
+    store.me = UserId::new("me");
+    store.threads = vec![followed("p1", 2, 50)];
+    store.apply_ws(&WsEvent::Posted {
+        post: reply_to("p1", "r3", "me", 60),
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    });
+    let thread = &store.threads[0];
+    assert_eq!(thread.reply_count, 3);
+    assert_eq!(thread.unread_replies, 0);
+    assert_eq!(store.thread_totals.unread_threads, 0);
+}
+
+/// A reply to a thread the reader does not follow, a reply no newer
+/// than what the thread already says, and a root post: none of them
+/// move anything.
+#[test]
+fn replies_that_say_nothing_new_move_no_thread() {
+    let mut store = store();
+    store.threads = vec![followed("p1", 2, 50)];
+    let ws = |post: Post| WsEvent::Posted {
+        post,
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: Vec::new(),
+    };
+    let unfollowed = store.apply_ws(&ws(reply_to("p9", "r1", "u2", 60)));
+    assert!(!unfollowed.contains(&Change::Threads));
+    let replayed = store.apply_ws(&ws(reply_to("p1", "r0", "u2", 40)));
+    assert!(!replayed.contains(&Change::Threads));
+    let root = store.apply_ws(&ws(post("p5", "c1", 70)));
+    assert!(!root.contains(&Change::Threads));
+    assert_eq!(store.threads[0].reply_count, 2);
+}
+
+/// `thread_updated` is the server's own account and replaces ours --
+/// counts, participants, all of it -- keeping our root when the frame
+/// carries none, and moving the account's unread total by what this
+/// one thread did.
+#[test]
+fn thread_updated_replaces_what_is_held_and_moves_the_total() {
+    let mut store = store();
+    store.threads = vec![followed("p1", 2, 50)];
+    let fresh = mm_types::UserThread {
+        reply_count: 5,
+        unread_replies: 2,
+        last_reply_at: Timestamp(90),
+        post: None,
+        ..followed("p1", 5, 90)
+    };
+    let changes = store.apply_ws(&WsEvent::ThreadUpdated(fresh));
+    assert!(changes.contains(&Change::Threads));
+    let thread = &store.threads[0];
+    assert_eq!(thread.reply_count, 5);
+    assert_eq!(thread.unread_replies, 2);
+    assert!(thread.post.is_some(), "the root we held is kept");
+    assert_eq!(store.thread_totals.unread_threads, 1);
+
+    // Read elsewhere: the server says so, and the total comes back down.
+    store.apply_ws(&WsEvent::ThreadUpdated(mm_types::UserThread {
+        unread_replies: 0,
+        ..followed("p1", 5, 90)
+    }));
+    assert_eq!(store.thread_totals.unread_threads, 0);
+    assert_eq!(store.threads.len(), 1);
+
+    // A thread not held yet is added, root and all.
+    store.apply_ws(&WsEvent::ThreadUpdated(mm_types::UserThread {
+        unread_replies: 1,
+        ..followed("p2", 1, 95)
+    }));
+    assert_eq!(store.threads.len(), 2);
+    assert!(store.posts.contains_key(&PostId::new("p2")));
+    assert_eq!(store.thread_totals.unread_threads, 1);
+}
+
+/// `thread_read_changed` from another client catches the row up here,
+/// and one for a thread not held is nothing.
+#[test]
+fn thread_read_changed_catches_the_row_up() {
+    let mut store = store();
+    store.threads = vec![mm_types::UserThread {
+        unread_replies: 3,
+        unread_mentions: 1,
+        ..followed("p1", 3, 50)
+    }];
+    store.thread_totals.unread_threads = 1;
+    let changes = store.apply_ws(&WsEvent::ThreadReadChanged {
+        thread_id: PostId::new("p1"),
+        timestamp: Timestamp(50),
+        unread_replies: 0,
+        unread_mentions: 0,
+    });
+    assert!(changes.contains(&Change::Threads));
+    assert!(!store.threads[0].is_unread());
+    assert_eq!(store.threads[0].last_viewed_at, Timestamp(50));
+    assert_eq!(store.thread_totals.unread_threads, 0);
+
+    let nothing = store.apply_ws(&WsEvent::ThreadReadChanged {
+        thread_id: PostId::new("p9"),
+        timestamp: Timestamp(50),
+        unread_replies: 0,
+        unread_mentions: 0,
+    });
+    assert!(nothing.is_empty());
+}
+
+/// An update that leaves the thread as unread as it was moves the
+/// account's total not at all, in either state.
+#[test]
+fn thread_updated_leaves_the_total_alone_when_unread_did_not_change() {
+    let mut store = store();
+    store.threads = vec![mm_types::UserThread {
+        unread_replies: 1,
+        ..followed("p1", 2, 50)
+    }];
+    store.thread_totals.unread_threads = 1;
+    store.apply_ws(&WsEvent::ThreadUpdated(mm_types::UserThread {
+        unread_replies: 2,
+        ..followed("p1", 3, 60)
+    }));
+    assert_eq!(store.thread_totals.unread_threads, 1);
+
+    store.apply_ws(&WsEvent::ThreadUpdated(followed("p1", 3, 60)));
+    assert_eq!(store.thread_totals.unread_threads, 0);
+    store.apply_ws(&WsEvent::ThreadUpdated(followed("p1", 4, 70)));
+    assert_eq!(store.thread_totals.unread_threads, 0);
+    assert_eq!(store.threads[0].reply_count, 4);
+}
+
+/// Read up to somewhere short of the end: still unread, and the total
+/// stays where it was.
+#[test]
+fn thread_read_changed_part_way_keeps_the_row_unread() {
+    let mut store = store();
+    store.threads = vec![mm_types::UserThread {
+        unread_replies: 3,
+        ..followed("p1", 3, 50)
+    }];
+    store.thread_totals.unread_threads = 1;
+    store.apply_ws(&WsEvent::ThreadReadChanged {
+        thread_id: PostId::new("p1"),
+        timestamp: Timestamp(30),
+        unread_replies: 1,
+        unread_mentions: 0,
+    });
+    assert!(store.threads[0].is_unread());
+    assert_eq!(store.threads[0].unread_replies, 1);
+    assert_eq!(store.thread_totals.unread_threads, 1);
+}

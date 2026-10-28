@@ -18,7 +18,7 @@
 //!   resync over REST.
 
 use crate::error::AppError;
-use mm_types::{ChannelId, ChannelMember, Post, Reaction, User, UserId};
+use mm_types::{ChannelId, ChannelMember, Post, PostId, Reaction, User, UserId};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -117,6 +117,24 @@ pub enum WsEvent {
     /// like `post` and `channel`.
     ReactionAdded(Reaction),
     ReactionRemoved(Reaction),
+    /// A followed thread changed: a reply landed in it, usually. Nested
+    /// like `post`, and the same shape the threads endpoint returns --
+    /// root post, participants, counts -- so it can stand in for one
+    /// entry of that list.
+    ///
+    /// Without it the Threads view is a photograph of the last sync: a
+    /// reply to a thread the reader follows was not shown there until
+    /// the next one, while the channel it was in updated at once.
+    ThreadUpdated(mm_types::UserThread),
+    /// The reader caught up on a thread, here or in another client.
+    /// Plain fields, not nested.
+    ThreadReadChanged {
+        thread_id: PostId,
+        /// The moment read up to.
+        timestamp: mm_types::Timestamp,
+        unread_replies: i64,
+        unread_mentions: i64,
+    },
     /// Somebody uploaded a custom emoji. Nested like `reaction`.
     ///
     /// Worth decoding for one reason: without it a newly uploaded emoji
@@ -369,6 +387,13 @@ fn decode_event(
         "post_edited" => Ok(WsEvent::PostEdited(nested_json(data, "post")?)),
         "reaction_added" => Ok(WsEvent::ReactionAdded(nested_json(data, "reaction")?)),
         "reaction_removed" => Ok(WsEvent::ReactionRemoved(nested_json(data, "reaction")?)),
+        "thread_updated" => Ok(WsEvent::ThreadUpdated(nested_json(data, "thread")?)),
+        "thread_read_changed" => Ok(WsEvent::ThreadReadChanged {
+            thread_id: PostId::new(str_field(data, "thread_id")),
+            timestamp: mm_types::Timestamp(int_field(data, "timestamp")),
+            unread_replies: int_field(data, "unread_replies"),
+            unread_mentions: int_field(data, "unread_mentions"),
+        }),
         "emoji_added" => Ok(WsEvent::EmojiAdded(nested_json(data, "emoji")?)),
         "post_deleted" => Ok(WsEvent::PostDeleted(nested_json(data, "post")?)),
         "multiple_channels_viewed" => Ok(WsEvent::MultipleChannelsViewed {
@@ -434,6 +459,15 @@ fn nested_json<T: for<'de> Deserialize<'de>>(
             )
         })?;
     serde_json::from_str(raw).map_err(|e| format!("field `{field}` contained invalid JSON: {e}"))
+}
+
+/// A number the server sends as a number. Missing or not a number is
+/// zero, the same way a missing string is empty: the frame is still a
+/// frame, and the field says nothing.
+fn int_field(data: &serde_json::Value, field: &str) -> i64 {
+    data.get(field)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or_default()
 }
 
 fn str_field(data: &serde_json::Value, field: &str) -> String {

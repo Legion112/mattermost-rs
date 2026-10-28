@@ -594,6 +594,54 @@ impl Admin {
             .is_some_and(|list| list.iter().any(|c| c["name"] == *channel)))
     }
 
+    /// Reply, as somebody else, to the thread in `channel` whose root
+    /// starts with `root_starts_with`. Says how many replies the root
+    /// had before this one.
+    ///
+    /// For a scenario about a thread moving while the window is open:
+    /// the reply has to come from another account, over the socket,
+    /// while the client is looking the other way.
+    pub async fn reply_as(
+        &self,
+        username: &str,
+        channel: &str,
+        root_starts_with: &str,
+        text: &str,
+    ) -> Result<i64> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=200"
+            )))
+            .await?;
+        let root = page["posts"]
+            .as_object()
+            .and_then(|posts| {
+                posts.values().find(|p| {
+                    p["root_id"].as_str().unwrap_or_default().is_empty()
+                        && p["message"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .starts_with(root_starts_with)
+                })
+            })
+            .cloned()
+            .ok_or_else(|| Error(format!("no root starting with {root_starts_with:?}")))?;
+        // Counted, not read: the page carries `reply_count` only when
+        // asked for with collapsed threads, and this is not.
+        let root_id = id_of(&root)?;
+        let before = page["posts"].as_object().map_or(0, |posts| {
+            posts
+                .values()
+                .filter(|p| p["root_id"].as_str() == Some(root_id.as_str()))
+                .count()
+        });
+        let them = Api::as_token(&token_for(username).await?)?;
+        them.call(&post(&id, text, Some(&root_id))).await?;
+        i64::try_from(before).map_err(|e| Error(e.to_string()))
+    }
+
     /// Put the account back into a channel it was taken out of, so a test
     /// that leaves one can be run twice.
     pub async fn rejoin(&self, channel: &str) -> Result<()> {

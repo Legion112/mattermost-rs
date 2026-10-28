@@ -1525,6 +1525,13 @@ impl Store {
                 }
             }
             WsEvent::PostDeleted(post) => self.on_deleted(post),
+            WsEvent::ThreadUpdated(thread) => self.on_thread_updated(thread),
+            WsEvent::ThreadReadChanged {
+                thread_id,
+                timestamp,
+                unread_replies,
+                unread_mentions,
+            } => self.on_thread_read(thread_id, *timestamp, *unread_replies, *unread_mentions),
             WsEvent::EmojiAdded(emoji) => self.apply_custom_emoji(std::slice::from_ref(emoji)),
             WsEvent::UserAddedToChannel {
                 channel_id,
@@ -1623,7 +1630,105 @@ impl Store {
             channel.last_post_at = channel.last_post_at.max(post.create_at);
             changes.push(Change::Unread(post.channel_id.clone()));
         }
+        changes.extend(self.bump_thread_for(post));
         changes
+    }
+
+    /// A reply landed in a thread the reader follows: move the thread.
+    ///
+    /// The server says the same thing a moment later as a
+    /// `thread_updated`, with the counts as it holds them, and that
+    /// replaces this. But the reply itself arrives first, and the
+    /// Threads view that waited for the other one was a photograph of
+    /// the last sync while the channel beside it moved.
+    fn bump_thread_for(&mut self, post: &Post) -> Vec<Change> {
+        if !post.is_reply() {
+            return Vec::new();
+        }
+        let mine = post.user_id == self.me;
+        let Some(thread) = self
+            .threads
+            .iter_mut()
+            .find(|held| held.id.as_str() == post.root_id.as_str())
+        else {
+            return Vec::new();
+        };
+        // Not past what the server already told us: a reply replayed
+        // after a reconnect, or one the `thread_updated` for has already
+        // been applied, moves nothing.
+        if post.create_at <= thread.last_reply_at {
+            return Vec::new();
+        }
+        let was_unread = thread.is_unread();
+        thread.reply_count += 1;
+        thread.last_reply_at = post.create_at;
+        if !thread.participants.iter().any(|u| u.id == post.user_id) {
+            thread.participants.push(mm_types::User {
+                id: post.user_id.clone(),
+                ..Default::default()
+            });
+        }
+        if !mine {
+            thread.unread_replies += 1;
+            if !was_unread {
+                self.thread_totals.unread_threads += 1;
+            }
+        }
+        vec![Change::Threads, Change::Sidebar]
+    }
+
+    /// The server's own account of a followed thread, replacing ours.
+    fn on_thread_updated(&mut self, thread: &mm_types::UserThread) -> Vec<Change> {
+        if let Some(post) = &thread.post {
+            self.store_post(post.clone());
+        }
+        let was_unread = self
+            .threads
+            .iter()
+            .find(|held| held.id == thread.id)
+            .is_some_and(mm_types::UserThread::is_unread);
+        match self.threads.iter_mut().find(|held| held.id == thread.id) {
+            Some(held) => {
+                // A frame without the root keeps the one we have: the
+                // view cannot draw a thread without one.
+                let post = thread.post.clone().or_else(|| held.post.clone());
+                *held = thread.clone();
+                held.post = post;
+            }
+            None => self.threads.push(thread.clone()),
+        }
+        // The totals are the account's and arrive only with the list, so
+        // they are moved by what this one thread did.
+        match (was_unread, thread.is_unread()) {
+            (false, true) => self.thread_totals.unread_threads += 1,
+            (true, false) => {
+                self.thread_totals.unread_threads =
+                    self.thread_totals.unread_threads.saturating_sub(1);
+            }
+            _ => {}
+        }
+        vec![Change::Threads, Change::Sidebar]
+    }
+
+    /// The reader caught up on a thread, here or elsewhere.
+    fn on_thread_read(
+        &mut self,
+        root: &PostId,
+        upto: Timestamp,
+        unread_replies: i64,
+        unread_mentions: i64,
+    ) -> Vec<Change> {
+        let Some(thread) = self.threads.iter_mut().find(|held| held.id == *root) else {
+            return Vec::new();
+        };
+        let was_unread = thread.is_unread();
+        thread.last_viewed_at = upto;
+        thread.unread_replies = unread_replies;
+        thread.unread_mentions = unread_mentions;
+        if was_unread && !thread.is_unread() {
+            self.thread_totals.unread_threads = self.thread_totals.unread_threads.saturating_sub(1);
+        }
+        vec![Change::Threads, Change::Sidebar]
     }
 
     fn on_deleted(&mut self, post: &Post) -> Vec<Change> {
