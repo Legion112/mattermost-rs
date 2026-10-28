@@ -326,11 +326,40 @@ pub fn run(wiring: Wiring) -> glib::ExitCode {
         });
     }
 
+    say_if_already_running(&app);
+
     // The real arguments, so a URL on the command line reaches `open`
     // -- minus `--hidden`, which is this binary's own and which GTK
     // would reject as an unknown option before anything else ran.
     let argv: Vec<String> = std::env::args().filter(|a| a != HIDDEN_FLAG).collect();
     app.run_with_args(&argv)
+}
+
+/// Say so when this launch is going to hand over to a copy already
+/// running, rather than exiting without a word.
+///
+/// `gio::Application` is single-instance: a second launch routes its
+/// arguments to the first over D-Bus, raises that window and exits
+/// zero. That is the behaviour we want, and it is **silent**, which
+/// twice cost an afternoon -- a terminal that prints nothing and
+/// returns looks exactly like a crash, and the window that comes to the
+/// front is the old build still running the old code.
+///
+/// Registering here rather than letting `run` do it is what makes the
+/// answer available before the process ends. A failure to register is
+/// not ours to report: `run` will produce its own error.
+fn say_if_already_running(app: &adw::Application) {
+    if app.register(None::<&gio::Cancellable>).is_err() {
+        return;
+    }
+    if !app.is_remote() {
+        return;
+    }
+    eprintln!(
+        "mattermost-rs is already running; bringing its window to the front.\n\
+         That instance keeps the code it started with -- quit it first if you \
+         have just rebuilt."
+    );
 }
 
 /// Honour `--hidden`, with a way back if there turns out to be no tray.
