@@ -237,4 +237,10 @@ fn mentions_carry_their_own_colour() {
     // Their own mention gets a background, not just a colour.
     assert!(markup.contains("background="), "{markup}");
     assert!(markup.contains("@legion"), "{markup}");
+    // Each is a link naming the person, which is how a label reports a
+    // click on it, and not underlined like one.
+    assert!(markup.contains(r#"<a href="mention:alukard">"#), "{markup}");
+    assert!(markup.contains(r#"<a href="mention:legion">"#), "{markup}");
+    assert!(markup.contains(r#"underline="none""#), "{markup}");
+    assert_eq!(markup.matches("</a>").count(), 2, "{markup}");
 }

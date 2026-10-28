@@ -21,7 +21,7 @@ mm-types = { path = "../mm-types" }
 # runner.
 png    = "0.17"
 serde_json = "1"
-x11rb  = "0.13"
+x11rb  = { version = "0.13", features = ["xtest"] }
 # The same zbus the tray and the notifications already use. Here it talks
 # to the accessibility bus, which is how the UI tests press real buttons
 # rather than screen coordinates.

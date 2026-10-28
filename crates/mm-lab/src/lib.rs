@@ -33,6 +33,7 @@
 //! each other.
 
 mod docker;
+pub mod input;
 pub mod scenarios;
 pub mod seed;
 pub mod shot;

@@ -10,7 +10,7 @@
 //! function is a total function of its arguments, and the pre-epoch and
 //! across-midnight cases are therefore testable without a fake.
 
-use mm_types::{Post, PostId, Timestamp};
+use mm_types::{Post, PostId, Timestamp, UserId};
 
 /// Two posts by the same author closer together than this are drawn as one
 /// block. Matches the webapp's `POST_COLLAPSE_TIMEOUT`.
@@ -51,7 +51,12 @@ pub enum Row {
 /// opened the channel*: opening marks it read, so taking it live would make
 /// the line vanish in the instant it became useful.
 #[must_use]
-pub fn project(posts: &[&Post], utc_offset_secs: i32, unread_after: Option<Timestamp>) -> Vec<Row> {
+pub fn project(
+    posts: &[&Post],
+    utc_offset_secs: i32,
+    unread_after: Option<Timestamp>,
+    me: &UserId,
+) -> Vec<Row> {
     let mut rows = Vec::with_capacity(posts.len() + 2);
     let mut previous: Option<(&Post, CivilDate)> = None;
     let mut marked = false;
@@ -70,8 +75,13 @@ pub fn project(posts: &[&Post], utc_offset_secs: i32, unread_after: Option<Times
         // A reader who has never read the channel at all has no line:
         // nothing was ever seen, so there is nothing to separate the new
         // from.
-        let starts_unread =
-            !marked && unread_after.is_some_and(|at| !at.is_zero() && post.create_at > at);
+        //
+        // And never above the reader's own message: they were there when
+        // they wrote it, whatever the server's view time says, and a line
+        // saying "new" over their own words is the webapp's rule broken.
+        let starts_unread = !marked
+            && post.user_id != *me
+            && unread_after.is_some_and(|at| !at.is_zero() && post.create_at > at);
 
         let date = civil_date(post.create_at, utc_offset_secs);
         let same_day = previous.is_some_and(|(_, d)| d == date);

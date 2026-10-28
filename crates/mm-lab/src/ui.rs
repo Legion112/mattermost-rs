@@ -28,6 +28,7 @@ const ACTION: &str = "org.a11y.atspi.Action";
 const EDITABLE: &str = "org.a11y.atspi.EditableText";
 const SELECTION: &str = "org.a11y.atspi.Selection";
 const COMPONENT: &str = "org.a11y.atspi.Component";
+const TEXT: &str = "org.a11y.atspi.Text";
 
 /// How far outside the window to photograph, so a popover that hangs over
 /// the edge is in the picture.
@@ -476,6 +477,130 @@ impl Screen {
         }
     }
 
+    /// Where a widget is on the screen: x, y, width, height.
+    ///
+    /// Asked for *in its window* (coordinate type 1) and moved by where
+    /// the window is: GTK answers the screen question (type 0) with
+    /// (0, 0) for every widget, which put the first clicks on the title
+    /// bar.
+    pub async fn extents(&self, node: &Node) -> Result<(i32, i32, i32, i32)> {
+        let ((x, y, w, h),) = self
+            .proxy(node, COMPONENT)
+            .await?
+            .call::<_, _, ((i32, i32, i32, i32),)>("GetExtents", &(1_u32))
+            .await
+            .map_err(|e| Error(format!("placing {:?}: {e}", node.name)))?;
+        let (wx, wy) = crate::input::toplevel_origin()?;
+        Ok((wx + x, wy + y, w, h))
+    }
+
+    /// What a text widget holds, start to end.
+    pub async fn text_of(&self, node: &Node) -> Result<String> {
+        self.proxy(node, TEXT)
+            .await?
+            .call("GetText", &(0_i32, -1_i32))
+            .await
+            .map_err(|e| Error(format!("reading {:?}: {e}", node.name)))
+    }
+
+    /// A real click, in the middle of a widget: what AT-SPI's one action
+    /// cannot do for a text view, which has none.
+    pub async fn click_into(&self, node: &Node) -> Result<()> {
+        let (x, y, w, h) = self.extents(node).await?;
+        // In the log, because a click that lands somewhere else is the
+        // kind of failure the tree afterwards does not explain.
+        eprintln!("  click into {:?} at ({x}, {y}) {w}x{h}", node.name);
+        crate::input::click_at(x + w / 2, y + h / 2)
+    }
+
+    /// Click just inside a widget's top-left corner: the first word of a
+    /// label, which a label cannot place any more finely -- GTK answers
+    /// `GetRangeExtents` on one with `NotSupported`.
+    pub async fn click_start_of(&self, node: &Node) -> Result<()> {
+        let (x, y, _, _) = self.extents(node).await?;
+        eprintln!("  click at the start of {:?} at ({x}, {y})", node.name);
+        crate::input::click_at(x + 14, y + 10)
+    }
+
+    /// Rest the pointer on a widget, for what shows on hover.
+    pub async fn hover(&self, node: &Node) -> Result<()> {
+        let (x, y, w, h) = self.extents(node).await?;
+        crate::input::move_to(x + w / 2, y + h / 2)
+    }
+
+    /// Click on a run of text inside a text widget -- an `@name`, say.
+    pub async fn click_text(&self, node: &Node, needle: &str) -> Result<()> {
+        let text = self.text_of(node).await?;
+        let at = text
+            .find(needle)
+            .ok_or_else(|| Error(format!("{needle:?} is not in {text:?}")))?;
+        let start = i32::try_from(text[..at].chars().count()).unwrap_or(0);
+        let end = start + i32::try_from(needle.chars().count()).unwrap_or(0);
+        let ((x, y, w, h),) = self
+            .proxy(node, TEXT)
+            .await?
+            .call::<_, _, ((i32, i32, i32, i32),)>("GetRangeExtents", &(start, end, 1_u32))
+            .await
+            .map_err(|e| Error(format!("placing {needle:?}: {e}")))?;
+        let (wx, wy) = crate::input::toplevel_origin()?;
+        eprintln!("  click on {needle:?} at ({x}, {y}) {w}x{h} in the window at ({wx}, {wy})");
+        crate::input::click_at(wx + x + w / 2, wy + y + h / 2)
+    }
+
+    /// The first text widget holding this text.
+    pub async fn text_holding(&self, needle: &str) -> Result<Node> {
+        let tree = self
+            .until(
+                &format!("a text view holding {needle:?} is on screen"),
+                |tree| {
+                    tree.iter()
+                        .any(|n| n.role == "text box" || n.role == "text")
+                },
+            )
+            .await?;
+        // Every widget with text in its role, and what each said, so a
+        // miss names what was there rather than nothing.
+        let deadline = std::time::Instant::now() + PATIENCE;
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let tree = self.tree().await?;
+            seen.clear();
+            // And every role there is, since a text view that is not
+            // a "text box" is the first thing to rule out.
+            let mut roles: Vec<&str> = tree.iter().map(|n| n.role.as_str()).collect();
+            roles.sort_unstable();
+            roles.dedup();
+            seen.push(format!("roles on screen: {roles:?}"));
+            for label in tree
+                .iter()
+                .filter(|n| n.role == "label" && n.name.contains(needle))
+            {
+                seen.push(format!("a plain label says {:?}", label.name));
+            }
+            for node in tree
+                .iter()
+                .filter(|n| n.role.contains("text") || n.role == "label")
+            {
+                match self.text_of(node).await {
+                    Ok(text) if text.contains(needle) => return Ok(node.clone()),
+                    Ok(text) => seen.push(format!("{} {text:?}", node.role)),
+                    Err(e) => seen.push(format!("{} (unreadable: {e})", node.role)),
+                }
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        let _ = tree;
+        Err(Error(format!(
+            "no text view holds {needle:?}. Text widgets seen: {seen:#?}"
+        )))
+    }
+
+    /// Press a key on the display, with modifiers held: Return in a box,
+    /// a chord, Escape on a popover.
+    pub fn press_key(&self, keysym: u32, modifiers: &[u32]) -> Result<()> {
+        crate::input::press(keysym, modifiers)
+    }
+
     /// Where the window is on screen, so a failure photographs it rather
     /// than whatever else the developer had open.
     pub async fn window_area(&self) -> Option<crate::shot::Area> {
@@ -560,9 +685,11 @@ On screen: {named:#?}",
                 PRESSABLE.iter().any(|role| tree.has(role, name))
             })
             .await?;
-        let button = PRESSABLE
+        // The exact name first: "Save" must not find "Saved messages".
+        let button = tree
             .iter()
-            .find_map(|role| tree.find(role, name).ok())
+            .find(|n| PRESSABLE.contains(&n.role.as_str()) && n.name == name)
+            .or_else(|| PRESSABLE.iter().find_map(|role| tree.find(role, name).ok()))
             .ok_or_else(|| Error(format!("no button called {name:?}")))?;
         self.click(button).await
     }

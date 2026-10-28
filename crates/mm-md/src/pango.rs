@@ -73,16 +73,26 @@ fn render(inlines: &[Inline], out: &mut String) {
                 // mention reads the same here as in every other client the
                 // reader has open. The highlight on their own mention is the
                 // one piece of colour a chat window must not get wrong.
+                // And a link, so the label can say when it is clicked and the
+                // window can open the person's card: `activate-link` is the
+                // one click a label reports. Underlined off and coloured by
+                // the inner span, so it still reads as a mention and not as
+                // a URL.
+                out.push_str("<a href=\"mention:");
+                out.push_str(&escape(name));
+                out.push_str("\">");
                 if *is_me {
                     out.push_str(
-                        "<span background=\"#ffd470\" foreground=\"#1a1a1a\" weight=\"bold\">",
+                        "<span underline=\"none\" background=\"#ffd470\" foreground=\"#1a1a1a\" weight=\"bold\">",
                     );
                 } else {
-                    out.push_str("<span foreground=\"#5d89ea\" weight=\"bold\">");
+                    out.push_str(
+                        "<span underline=\"none\" foreground=\"#5d89ea\" weight=\"bold\">",
+                    );
                 }
                 out.push('@');
                 out.push_str(&escape(name));
-                out.push_str("</span>");
+                out.push_str("</span></a>");
             }
             Inline::SoftBreak => out.push('\n'),
         }

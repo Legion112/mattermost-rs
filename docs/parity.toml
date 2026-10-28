@@ -833,10 +833,12 @@ a live account: a colleague whose status has no expiry shows their emoji \
 and their words, and the two dozen expired ones show nothing.
 
 The card opens over an `@mention` in message text too, pointing at the \
-name, for anybody the store knows; the click is told from a drag the \
-way a link's is. NOT verified in the lab, which cannot deliver a click \
-into a `TextView` -- the handler is the link handler's twin and the card \
-is the author-name one. NOT built: setting your own."""
+name, for anybody the store knows. A mention is a Pango link in the \
+label (`mention:name`) so the label itself reports the click, and the \
+same card opens from a `TextView` body through its link handler. \
+Verified in the lab: a faked click on the first word of "@legion \
+something new in Design." opened a card saying Legion Admin and \
+@legion, and Escape closed it. NOT built: setting your own."""
 
 [[feature]]
 id       = "sidebar.drag_between_categories"
@@ -1440,5 +1442,7 @@ with the right keys on them.
 **Ctrl+Shift+\\ reacts to the last message**, Mattermost's own binding: \
 it opens the emoji picker on the newest message in the channel, whoever \
 wrote it, and picking one toggles the reaction the way the quick \
-buttons do. NOT verified in the lab, whose driver cannot press chords \
-into a text view. NOT built: Alt+Shift+Up/Down across teams."""
+buttons do. Verified in the lab, by keys faked on its display: the chord \
+opened the picker over the box, "tada" typed into its search narrowed \
+it, and the server's copy of the newest message carried the reaction. \
+NOT built: Alt+Shift+Up/Down across teams."""

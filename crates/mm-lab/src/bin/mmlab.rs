@@ -76,6 +76,7 @@ async fn main() -> ExitCode {
                 std::path::Path::new(&shots),
                 rest.iter().any(|a| a == "--keep-data"),
                 perf.as_deref(),
+                flag(rest, "--only").as_deref(),
             )
             .await
         }

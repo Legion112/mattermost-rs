@@ -3739,3 +3739,16 @@ fn a_live_mention_raises_the_badge_until_the_channel_is_viewed() {
     s.apply_ws(&elsewhere);
     assert!(!s.my_member.contains_key(&ChannelId::new("c-unknown")));
 }
+
+/// A mention of the reader is theirs even when the roster does not
+/// hold them -- it is built from DM partners and channel authors, and a
+/// reader who has not spoken is in neither. The lab found "@legion"
+/// drawn as plain text for exactly that reason.
+#[test]
+fn a_mention_of_the_reader_is_known_without_the_roster() {
+    let mut store = store();
+    assert_eq!(store.mentioned("legion"), None);
+    store.my_username = "legion".to_owned();
+    assert_eq!(store.mentioned("legion"), Some(mm_md::Mentioned::Me));
+    assert_eq!(store.mentioned("legionnaire"), None);
+}

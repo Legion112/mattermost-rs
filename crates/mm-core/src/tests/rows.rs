@@ -26,6 +26,16 @@ fn system(id: &str, author: &str, created: i64) -> Post {
     }
 }
 
+/// The reader, who wrote none of the posts these tests make unless a
+/// test says so.
+const ME: &str = "me";
+
+/// `super::project` as the reader `ME`, which is what nearly every test
+/// here wants and what keeps them to the facts they are about.
+fn project(posts: &[&Post], utc_offset_secs: i32, unread_after: Option<Timestamp>) -> Vec<Row> {
+    super::project(posts, utc_offset_secs, unread_after, &UserId::new(ME))
+}
+
 fn ids(rows: &[Row]) -> Vec<String> {
     rows.iter()
         .map(|row| match row {
@@ -360,4 +370,23 @@ fn replies_to_different_roots_do_not_group() {
         ids(&project(&[&second, &third], 0, None)),
         ["--- 2021-01-01", "p2", "p3 (grouped)"]
     );
+}
+
+/// The line never sits above the reader's own message: they were there
+/// when they wrote it, whatever the server's view time says. It goes
+/// above the next message from somebody else, if there is one.
+#[test]
+fn no_line_above_the_readers_own_message() {
+    let seen = post("p1", "alice", NEW_YEAR_2021);
+    let mine = post("p2", ME, NEW_YEAR_2021 + MINUTE);
+    let theirs = post("p3", "bob", NEW_YEAR_2021 + 2 * MINUTE);
+    let rows = project(&[&seen, &mine, &theirs], 0, Some(Timestamp(NEW_YEAR_2021)));
+    assert_eq!(
+        ids(&rows),
+        ["--- 2021-01-01", "p1", "p2", "--- new messages", "p3"],
+        "{rows:?}"
+    );
+    // With nothing of anybody else's after it, no line at all.
+    let rows = project(&[&seen, &mine], 0, Some(Timestamp(NEW_YEAR_2021)));
+    assert!(!rows.contains(&Row::NewMessages), "{rows:?}");
 }

@@ -894,3 +894,20 @@ fn an_unknown_shortcode_becomes_an_inline_of_its_own() {
     };
     assert!(matches!(&inlines[0], Inline::Link { .. }), "{inlines:?}");
 }
+
+/// The first word of a message is as good a place for a name as any,
+/// and the lab drew "@legion something new in Design." as plain text.
+#[test]
+fn a_mention_opening_the_message_is_marked() {
+    let roster = |name: &str| (name == "legion").then_some(Mentioned::Me);
+    let mut doc = parse("@legion something new in Design.");
+    mark_mentions(&mut doc, &roster);
+    assert!(doc.plain_text().is_none(), "{doc:?}");
+    let Block::Paragraph(inlines) = &doc.blocks[0] else {
+        panic!("not a paragraph: {doc:?}");
+    };
+    assert!(
+        matches!(&inlines[0], Inline::Mention { name, is_me: true } if name == "legion"),
+        "{inlines:?}"
+    );
+}

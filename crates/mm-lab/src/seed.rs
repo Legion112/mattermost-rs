@@ -809,6 +809,54 @@ impl Admin {
             .unwrap_or_default())
     }
 
+    /// Whether a channel holds a message saying exactly this, as the
+    /// server has it.
+    pub async fn channel_says(&self, channel: &str, text: &str) -> Result<bool> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=60"
+            )))
+            .await?;
+        Ok(page["posts"]
+            .as_object()
+            .is_some_and(|posts| posts.values().any(|p| p["message"].as_str() == Some(text))))
+    }
+
+    /// The newest message in a channel, and the names of the reactions
+    /// on it, as the server has them.
+    pub async fn newest_with_reactions(&self, channel: &str) -> Result<(String, Vec<String>)> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=1"
+            )))
+            .await?;
+        let newest = page["order"][0]
+            .as_str()
+            .ok_or_else(|| Error(format!("{channel} has no messages")))?
+            .to_owned();
+        let post = &page["posts"][&newest];
+        let text = post["message"].as_str().unwrap_or_default().to_owned();
+        let reactions = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/posts/{newest}/reactions"
+            )))
+            .await?;
+        let names = reactions
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|r| r["emoji_name"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((text, names))
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self
@@ -1170,6 +1218,15 @@ fn dump(n: usize) -> String {
     }
     out.push_str("```");
     out
+}
+
+/// A moment, for a message that must differ from the last run's.
+#[must_use]
+pub fn stamp() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default()
 }
 
 /// The root post in a channel page whose text starts a given way.

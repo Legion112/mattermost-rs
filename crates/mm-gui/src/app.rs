@@ -1921,6 +1921,11 @@ fn build_found_page() -> (gtk::SearchEntry, gtk::Label, gtk::ListBox, gtk::Box) 
         .margin_end(8)
         .margin_top(8)
         .build();
+    {
+        // A placeholder is not a name; see the add-somebody field.
+        use gtk::prelude::AccessibleExtManual as _;
+        entry.update_property(&[gtk::accessible::Property::Label("Search messages…")]);
+    }
     let title = gtk::Label::builder()
         .xalign(0.0)
         .margin_start(12)
@@ -2978,6 +2983,11 @@ fn open_emoji_picker(
         .margin_end(8)
         .margin_top(8)
         .build();
+    {
+        // A placeholder is not a name; see the add-somebody field.
+        use gtk::prelude::AccessibleExtManual as _;
+        search.update_property(&[gtk::accessible::Property::Label("Search emoji…")]);
+    }
     let grid = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .max_children_per_line(EMOJI_COLUMNS)
@@ -5440,7 +5450,7 @@ fn iter_under(view: &gtk::TextView, x: f64, y: f64) -> Option<gtk::TextIter> {
 }
 
 /// See `ON_MENTION`: the view the name is in, where in it, and the name.
-type MentionHandler = Rc<dyn Fn(&gtk::TextView, gdk::Rectangle, &str)>;
+type MentionHandler = Rc<dyn Fn(&gtk::Widget, Option<gdk::Rectangle>, &str)>;
 
 thread_local! {
     /// What a click on an `@name` in a message does, installed once the
@@ -5487,7 +5497,7 @@ fn card_for_mention(text: &gtk::TextView, at: &gtk::TextIter, tag: &gtk::TextTag
     let rect = gdk::Rectangle::new(x, y, spot.width().max(1), spot.height().max(1));
     ON_MENTION.with(|handler| {
         if let Some(handler) = &*handler.borrow() {
-            handler(text, rect, &name);
+            handler(text.upcast_ref(), Some(rect), &name);
         }
     });
 }
@@ -5742,6 +5752,21 @@ fn card_label(text: &str, markup: bool, classes: &[&str]) -> gtk::Label {
     } else {
         label.set_text(text);
     }
+    // An `@name` in the markup is a `mention:` link (see mm-md's pango
+    // renderer), and this is where a label says one was clicked. Any
+    // other link is GTK's to open. Once per label built, and labels are
+    // reused across binds, so this is not a bind cost.
+    label.connect_activate_link(|label, href| {
+        let Some(name) = href.strip_prefix("mention:") else {
+            return glib::Propagation::Proceed;
+        };
+        ON_MENTION.with(|handler| {
+            if let Some(handler) = &*handler.borrow() {
+                handler(label.upcast_ref(), None, name);
+            }
+        });
+        glib::Propagation::Stop
+    });
     label
 }
 
@@ -6218,6 +6243,11 @@ fn open_editor(
         .right_margin(8)
         .build();
     view.buffer().set_text(was);
+    {
+        // No placeholder here, so nothing else would name it.
+        use gtk::prelude::AccessibleExtManual as _;
+        view.update_property(&[gtk::accessible::Property::Label("Edit message")]);
+    }
     let scroll = gtk::ScrolledWindow::builder()
         .child(&view)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -6371,7 +6401,7 @@ fn install_mention_cards(store: &Rc<RefCell<Store>>, avatars: &Avatars, emoji: &
     let store = Rc::clone(store);
     let avatars = Rc::clone(avatars);
     let emoji = emoji.clone();
-    let handler: MentionHandler = Rc::new(move |view, rect, name| {
+    let handler: MentionHandler = Rc::new(move |at, rect, name| {
         let who = store
             .borrow()
             .users
@@ -6382,8 +6412,10 @@ fn install_mention_cards(store: &Rc<RefCell<Store>>, avatars: &Avatars, emoji: &
             return;
         };
         let card = profile_card(&store, &avatars, &user, &emoji);
-        card.set_parent(view);
-        card.set_pointing_to(Some(&rect));
+        card.set_parent(at);
+        if let Some(rect) = rect {
+            card.set_pointing_to(Some(&rect));
+        }
         card.connect_closed(gtk::Popover::unparent);
         card.popup();
     });
@@ -7414,6 +7446,9 @@ impl Ui {
                 self.login.set_busy(false);
                 let threading = self.store.borrow().threading;
                 *self.store.borrow_mut() = Store::new(me, threading);
+                // So "@me" is a mention of the reader whether or not the
+                // roster ever comes to hold them: see `Store::mentioned`.
+                self.store.borrow_mut().my_username.clone_from(&username);
                 // A read-only window must say so on its face. The whole
                 // point is that it is pointed at somebody's real server.
                 let mode = if std::env::var_os("MMRS_READ_ONLY").is_some() {
@@ -10855,7 +10890,7 @@ impl Ui {
         let quick = store.favourite_emoji(QUICK_REACTIONS);
         let mut rows: Vec<PostRow> = Vec::with_capacity(visible.len());
         let projected = crate::perf::marked("project_rows", || {
-            mm_core::rows::project(visible, offset, unread_from)
+            mm_core::rows::project(visible, offset, unread_from, &store.me)
         });
         let started_rows = std::time::Instant::now();
         for row in projected {

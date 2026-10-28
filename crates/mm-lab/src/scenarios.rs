@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
+use crate::input::key;
 use crate::seed::Admin;
 use crate::ui::{Find, Node, Screen};
 use crate::{Error, Result};
@@ -35,6 +36,11 @@ pub const SCENARIOS: &[&str] = &[
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
     "keeps-a-draft-on-the-server",
+    "sends-a-message",
+    "edits-with-the-up-key",
+    "reacts-with-the-keyboard",
+    "searches-messages",
+    "opens-a-card-from-a-mention",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "leaves-a-channel",
@@ -81,7 +87,8 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool)
     for name in SCENARIOS {
         // Signing in is setup, not an optional scenario: `--only` on any
         // other one still has to get past the login screen.
-        if only.is_some_and(|wanted| wanted != *name) && *name != "signs-in" {
+        if only.is_some_and(|wanted| !wanted.split(',').any(|w| w == *name)) && *name != "signs-in"
+        {
             continue;
         }
         let started = std::time::Instant::now();
@@ -125,6 +132,11 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "mutes-and-unmutes" => mutes(screen, admin).await,
         "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
         "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
+        "sends-a-message" => sends_a_message(screen, admin).await,
+        "edits-with-the-up-key" => edits_with_up(screen, admin).await,
+        "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
+        "searches-messages" => searches(screen).await,
+        "opens-a-card-from-a-mention" => card_from_mention(screen).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
@@ -431,6 +443,151 @@ async fn draft_on_server(screen: &Screen, admin: &Admin) -> Result<()> {
     drafts_hold(admin, half, true).await?;
     screen.type_into(composer, "").await?;
     drafts_hold(admin, half, false).await
+}
+
+/// Wait for the server to agree a channel says something, or not.
+async fn server_hears(admin: &Admin, channel: &str, text: &str, expected: bool) -> Result<()> {
+    for _ in 0..25 {
+        if admin.channel_says(channel, text).await? == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server {} {text:?} in {channel}",
+        if expected { "never heard" } else { "still has" }
+    )))
+}
+
+/// The composer, clicked into so it has the keyboard.
+async fn focused_composer(screen: &Screen) -> Result<Node> {
+    let tree = screen
+        .until("the composer is on screen", |tree| {
+            tree.has("text box", "Write a message…")
+        })
+        .await?;
+    let composer = tree.find("text box", "Write a message…")?.clone();
+    screen.click_into(&composer).await?;
+    Ok(composer)
+}
+
+/// What the whole thing is for: a message typed and sent with Return,
+/// and the server holding it.
+async fn sends_a_message(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!("Sent from the lab at {}", crate::seed::stamp());
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    server_hears(admin, "engineering", &said, true).await
+}
+
+/// Up in an empty box opens the editor on the reader's last message;
+/// saving changes it on the server.
+async fn edits_with_up(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "").await?;
+    screen.press_key(key::UP, &[])?;
+    let editor = screen
+        .until("the editor is up", |tree| {
+            tree.has("text box", "Edit message")
+        })
+        .await?;
+    let edited = format!("Edited from the lab at {}", crate::seed::stamp());
+    screen
+        .type_into(editor.find("text box", "Edit message")?, &edited)
+        .await?;
+    screen.press("Save").await?;
+    screen
+        .until("the edit is drawn", |tree| tree.has("label", &edited))
+        .await?;
+    server_hears(admin, "engineering", &edited, true).await
+}
+
+/// Ctrl+Shift+\ opens the picker on the last message; picking one
+/// puts the reaction on the server.
+async fn reacts_by_key(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(key::BACKSLASH, &[key::CONTROL, key::SHIFT])?;
+    // The table is long; the search box at its top narrows it to one.
+    let picker = screen
+        .until("the picker is open", |tree| {
+            tree.has("search box", "Search emoji…")
+        })
+        .await?;
+    let search = picker.find("search box", "Search emoji…")?.clone();
+    screen.type_into(&search, "tada").await?;
+    // The grid fills a moment after the search changes; pressing before
+    // it has found an older message's "🎉 1" chip instead.
+    screen
+        .until("the picker offers tada", |tree| {
+            tree.iter().any(|n| n.role == "button" && n.name == "🎉")
+        })
+        .await?;
+    screen.press("🎉").await?;
+    let mut names = Vec::new();
+    for _ in 0..25 {
+        let (_, found) = admin.newest_with_reactions("engineering").await?;
+        if found.iter().any(|n| n == "tada") {
+            return Ok(());
+        }
+        names = found;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the newest message carries reactions {names:?}, not the tada the picker sent"
+    )))
+}
+
+/// A search typed into the box and sent with Return finds the seeded
+/// thread root.
+async fn searches(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("Search messages").await?;
+    let page = screen
+        .until("the search box is up", |tree| {
+            tree.has("search box", "Search messages…")
+        })
+        .await?;
+    let entry = page.find("search box", "Search messages…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "nightly").await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the thread root is among the results", |tree| {
+            tree.has("label", "Morning. The nightly run")
+        })
+        .await?;
+    // Back to a channel, so the next scenario starts where it expects.
+    screen.open_channel("Engineering").await
+}
+
+/// Clicking an @name inside a message opens that person's card.
+async fn card_from_mention(screen: &Screen) -> Result<()> {
+    // Design holds "@legion something new in Design." from the unread
+    // scenario, as a message rather than a thread reply.
+    screen.open_channel("Design").await?;
+    // The message is a label, which cannot place a word for a click;
+    // the name is its first word, so the click goes to its start.
+    let body = screen.text_holding("@legion something new").await?;
+    screen.click_start_of(&body).await?;
+    screen
+        .until("the card names the admin", |tree| {
+            tree.has("label", "Legion Admin") && tree.has("label", "@legion")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the card is gone", |tree| {
+            !tree.has("label", "Legion Admin")
+        })
+        .await
+        .map(|_| ())
 }
 
 /// The bug the lab found on its first day: the thread's reply count came
@@ -819,7 +976,12 @@ fn make_private(at: &Path) -> Result<()> {
 /// the server's own `SiteURL` still matches what the client connects to.
 /// Joining the network by name instead would make the WebSocket's origin
 /// disagree with `SiteURL`, and the socket would be refused.
-pub async fn contained(shots: &Path, keep_data: bool, perf: Option<&str>) -> Result<()> {
+pub async fn contained(
+    shots: &Path,
+    keep_data: bool,
+    perf: Option<&str>,
+    only: Option<&str>,
+) -> Result<()> {
     // The server first, from out here, because there is no Docker inside.
     if !keep_data {
         crate::stack::down(false)?;
@@ -870,6 +1032,12 @@ pub async fn contained(shots: &Path, keep_data: bool, perf: Option<&str>) -> Res
         docker.args(["perf", "--headless", "--guest", "--channel", channel]);
     } else {
         println!("running the scenarios inside {IMAGE}");
+        // The image's own command, restated so one scenario can be asked
+        // for: a run is minutes, and a scenario being worked on is seconds.
+        docker.args(["ui", "--headless", "--guest", "--shots", "/out"]);
+        if let Some(only) = only {
+            docker.args(["--only", only]);
+        }
     }
     let status = docker
         .status()

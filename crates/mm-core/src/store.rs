@@ -227,6 +227,10 @@ impl SidebarRow {
 #[derive(Debug, Clone, Default)]
 pub struct Store {
     pub me: UserId,
+    /// The reader's own username, for telling a mention of them from
+    /// one of anybody else. Held apart from `users`, which is a roster
+    /// of the people on screen and need not hold the reader at all.
+    pub my_username: String,
     /// Whether collapsed reply threads are in effect. Must be set from the
     /// server config plus the user preference, never assumed.
     pub threading: Threading,
@@ -1014,6 +1018,12 @@ impl Store {
     pub fn mentioned(&self, name: &str) -> Option<mm_md::Mentioned> {
         if is_special_mention(name) {
             return Some(mm_md::Mentioned::Someone);
+        }
+        // The reader first, by name: they are on nobody's DM list but
+        // their own, and in a channel they have not spoken in they are
+        // not in the roster either -- which left "@me" plain text.
+        if !self.my_username.is_empty() && name == self.my_username {
+            return Some(mm_md::Mentioned::Me);
         }
         let user = self.users.values().find(|u| u.username == name)?;
         Some(if user.id == self.me {
