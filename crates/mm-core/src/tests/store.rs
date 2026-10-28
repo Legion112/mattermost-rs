@@ -3608,3 +3608,30 @@ fn thread_read_changed_part_way_keeps_the_row_unread() {
     assert_eq!(store.threads[0].unread_replies, 1);
     assert_eq!(store.thread_totals.unread_threads, 1);
 }
+
+/// Editing is for the reader's own posts, and only while the server's
+/// edit limit allows; with none set, forever.
+#[test]
+fn an_own_post_may_be_edited_within_the_servers_limit() {
+    let mut store = store();
+    let mut page = PostList::default();
+    let mine = Post {
+        user_id: UserId::new(ME),
+        ..post("p-mine", "c1", 10_000)
+    };
+    let theirs = post("p-theirs", "c1", 20_000);
+    for p in [mine, theirs] {
+        page.order.push(p.id.clone());
+        page.posts.insert(p.id.clone(), p);
+    }
+    store.apply_post_list(&ChannelId::new("c1"), &page, PageAnchor::Newest);
+
+    let much_later = Timestamp(10_000 + 86_400_000);
+    assert!(store.may_edit(&PostId::new("p-mine"), much_later));
+    assert!(!store.may_edit(&PostId::new("p-theirs"), much_later));
+    assert!(!store.may_edit(&PostId::new("p-unknown"), much_later));
+
+    store.edit_limit = Some(std::time::Duration::from_secs(60));
+    assert!(store.may_edit(&PostId::new("p-mine"), Timestamp(10_000 + 60_000)));
+    assert!(!store.may_edit(&PostId::new("p-mine"), much_later));
+}

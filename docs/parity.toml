@@ -469,9 +469,12 @@ wrote in a window of its own rather than turning the row into a text box: \
 a recycled `ListView` row is taken out from under the caret the moment \
 anything else arrives. Verified on a live account, in the reader's own DM: \
 the editor opened with the message's own text, saving changed it, and the \
-server's copy came back with the new text and a non-zero `edit_at`. `PostEditTimeLimit` is not \
-read either, so a message too old to edit is refused by the server rather \
-than by the menu."""
+server's copy came back with the new text and a non-zero `edit_at`. `PostEditTimeLimit` is read \
+from the client config too, so a message too old to edit is not offered \
+for editing -- not in the menu and not to the Up key -- rather than \
+refused by the server after the editor has been typed into. The server \
+still has the last word, and anything unreadable in the setting is \
+treated as no limit for that reason."""
 
 [[feature]]
 id       = "search.quick_switcher"
@@ -1401,5 +1404,5 @@ that described half of them accurately would be worse than one plainly \
 maintained by hand. Verified on a live account: Ctrl+/ drew both groups \
 with the right keys on them.
 
-NOT built: Alt+Shift+Up/Down across teams, and the remaining \
-message-level bindings (reply to the last message, react to it)."""
+NOT built: Alt+Shift+Up/Down across teams, and reacting to the last \
+message from the keyboard."""

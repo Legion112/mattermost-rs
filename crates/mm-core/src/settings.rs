@@ -54,6 +54,39 @@ pub fn threading(config: Option<&str>, preference: Option<&str>) -> Threading {
     }
 }
 
+/// How long after posting a message may still be edited, from the
+/// server's `PostEditTimeLimit`.
+///
+/// Seconds on the wire, as a string like everything in the client
+/// config; `-1` is the default and means no limit, and so does anything
+/// unreadable, because refusing to offer an edit the server would have
+/// taken is the worse mistake -- the server still has the last word.
+#[must_use]
+pub fn edit_limit(config: Option<&str>) -> Option<std::time::Duration> {
+    let seconds: i64 = config?.trim().parse().ok()?;
+    u64::try_from(seconds)
+        .ok()
+        .map(std::time::Duration::from_secs)
+}
+
+/// Whether a message posted at `created` may still be edited at `now`,
+/// under a limit from [`edit_limit`]. The server compares the same two
+/// moments; this only spares the reader a refused request.
+#[must_use]
+pub fn editable(
+    limit: Option<std::time::Duration>,
+    created: mm_types::Timestamp,
+    now: mm_types::Timestamp,
+) -> bool {
+    let Some(limit) = limit else {
+        return true;
+    };
+    // A clock behind the server's makes a message from the future, which
+    // is as young as a message gets.
+    let age = u64::try_from(now.millis().saturating_sub(created.millis())).unwrap_or(0);
+    u128::from(age) <= limit.as_millis()
+}
+
 #[cfg(test)]
 #[path = "tests/settings.rs"]
 mod tests;

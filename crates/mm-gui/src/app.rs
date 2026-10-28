@@ -3132,6 +3132,11 @@ fn emoji_face(emoji: &Emoji, name: &str) -> gtk::Widget {
     }
 }
 
+/// Now, as the server stamps a post.
+fn now_stamp() -> mm_types::Timestamp {
+    mm_types::Timestamp(chrono::Utc::now().timestamp_millis())
+}
+
 /// Now, as the comparison a custom status's expiry wants.
 fn utc_now() -> mm_types::UtcMoment {
     mm_types::UtcMoment::parse(&chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())
@@ -3510,6 +3515,10 @@ fn attach_edit_last(
             // in an empty box is as likely to be a stray key press.
             return glib::Propagation::Proceed;
         };
+        // Too old under the server's edit limit is the same as nothing.
+        if !ui.store.borrow().may_edit(&post, now_stamp()) {
+            return glib::Propagation::Proceed;
+        }
         open_editor(&box_, &post, &was, &ui.commands);
         glib::Propagation::Stop
     });
@@ -5939,12 +5948,13 @@ fn fill_message_menu(
     if post.as_str().is_empty() {
         return;
     }
-    let (pinned, saved, mine) = {
+    let (pinned, saved, mine, editable) = {
         let store = store.borrow();
         (
             store.posts.get(&post).is_some_and(|p| p.is_pinned),
             store.is_saved(&post),
             store.is_mine(&post),
+            store.may_edit(&post, now_stamp()),
         )
     };
 
@@ -6030,11 +6040,14 @@ fn fill_message_menu(
     if mine {
         actions.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-        let edit = entry("document-edit-symbolic", "Edit message");
-        // What the author typed, not what is drawn: an edit starts from
-        // the markdown they wrote.
-        wire_edit(&edit, popover, &post, &data.plain_body(), commands);
-        actions.append(&edit);
+        // Offered only while the server would take it: see `Store::may_edit`.
+        if editable {
+            let edit = entry("document-edit-symbolic", "Edit message");
+            // What the author typed, not what is drawn: an edit starts
+            // from the markdown they wrote.
+            wire_edit(&edit, popover, &post, &data.plain_body(), commands);
+            actions.append(&edit);
+        }
 
         let delete = entry("user-trash-symbolic", "Delete message");
         delete.add_css_class("mmrs-destructive");
@@ -7273,6 +7286,9 @@ impl Ui {
             }
             Event::Threading(threading) => {
                 self.store.borrow_mut().threading = threading;
+            }
+            Event::EditLimit(limit) => {
+                self.store.borrow_mut().edit_limit = limit;
             }
             Event::Posts { channel, page } => {
                 crate::perf::marked("apply_posts", || {

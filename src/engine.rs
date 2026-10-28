@@ -1598,10 +1598,11 @@ const WARM_CEILING: usize = 500;
 const THREAD_PAGE: u32 = 50;
 
 /// The client-config keys `apply_settings` reads.
-const SETTING_KEYS: [&str; 3] = [
+const SETTING_KEYS: [&str; 4] = [
     "CollapsedThreads",
     "TeammateNameDisplay",
     "LockTeammateNameDisplay",
+    "PostEditTimeLimit",
 ];
 
 /// Work out how messages are to be read and tell the window, from config
@@ -1641,6 +1642,9 @@ async fn apply_settings(
         preference("name_format"),
     );
     let _ = events.send(Event::NameFormat(names)).await;
+
+    let limit = mm_core::settings::edit_limit(config.get("PostEditTimeLimit").map(String::as_str));
+    let _ = events.send(Event::EditLimit(limit)).await;
 }
 
 async fn sync(

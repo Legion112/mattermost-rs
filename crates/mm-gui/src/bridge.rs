@@ -312,6 +312,10 @@ pub enum Event {
     /// Whether collapsed reply threads apply, from the server config and the
     /// user preference. Never assumed.
     Threading(Threading),
+    /// How long after posting a message may still be edited; `None` is
+    /// no limit. From the server config, so the menu stops offering an
+    /// edit the server would refuse.
+    EditLimit(Option<std::time::Duration>),
     /// Which name to show for a person, resolved from the server's setting
     /// and the user's preference.
     NameFormat(NameFormat),

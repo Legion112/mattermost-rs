@@ -110,3 +110,29 @@ fn both_spellings_of_the_thread_preference_are_understood() {
 fn an_unknown_server_setting_leaves_threads_flat() {
     assert_eq!(threading(None, None), Threading::Flat);
 }
+
+/// `PostEditTimeLimit` is seconds as a string, `-1` for none -- and
+/// anything unreadable is treated as none, because the server has the
+/// last word and refusing an edit it would take is the worse mistake.
+#[test]
+fn the_edit_limit_is_seconds_or_nothing() {
+    use std::time::Duration;
+    assert_eq!(edit_limit(None), None);
+    assert_eq!(edit_limit(Some("-1")), None);
+    assert_eq!(edit_limit(Some("garbage")), None);
+    assert_eq!(edit_limit(Some("300")), Some(Duration::from_secs(300)));
+    assert_eq!(edit_limit(Some(" 0 ")), Some(Duration::from_secs(0)));
+}
+
+#[test]
+fn a_message_is_editable_within_the_limit() {
+    use mm_types::Timestamp;
+    use std::time::Duration;
+    let posted = Timestamp(1_000_000);
+    assert!(editable(None, posted, Timestamp(i64::MAX)));
+    let limit = Some(Duration::from_secs(300));
+    assert!(editable(limit, posted, Timestamp(1_000_000 + 300_000)));
+    assert!(!editable(limit, posted, Timestamp(1_000_000 + 300_001)));
+    // A clock behind the server's is not a message from the future.
+    assert!(editable(limit, posted, Timestamp(999_000)));
+}

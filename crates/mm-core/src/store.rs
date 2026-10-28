@@ -230,6 +230,9 @@ pub struct Store {
     /// Whether collapsed reply threads are in effect. Must be set from the
     /// server config plus the user preference, never assumed.
     pub threading: Threading,
+    /// How long after posting a message may still be edited; `None` is
+    /// no limit. From the server config, through `settings::edit_limit`.
+    pub edit_limit: Option<std::time::Duration>,
     pub users: HashMap<UserId, User>,
     pub teams: Vec<Team>,
     pub channels: HashMap<ChannelId, Channel>,
@@ -1189,6 +1192,18 @@ impl Store {
     #[must_use]
     pub fn is_mine(&self, post: &PostId) -> bool {
         self.posts.get(post).is_some_and(|p| p.user_id == self.me)
+    }
+
+    /// Whether this reader may still edit a post: theirs, and not older
+    /// than the server's edit limit allows. The server has the last
+    /// word; this spares the reader an editor that cannot save.
+    #[must_use]
+    pub fn may_edit(&self, post: &PostId, now: Timestamp) -> bool {
+        self.is_mine(post)
+            && self
+                .posts
+                .get(post)
+                .is_some_and(|p| crate::settings::editable(self.edit_limit, p.create_at, now))
     }
 
     /// The emoji this reader reaches for most, commonest first.
