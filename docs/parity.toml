@@ -969,10 +969,12 @@ message, with the link as its text. The channel is picked in the switcher's \
 own window under another title, which is why the two share one picker; a \
 find that is not a channel the reader is in -- one to join, somebody with \
 no conversation yet, an archived one -- is turned down with a word rather \
-than joined or opened on the way. NOT built: the comment the webapp lets \
-you add above the forwarded message. Lab-verified by `forwards-from-the-menu`: \
-Forward on the seeded root, "Design" typed into the picker and Return, and \
-the server holding the permalink in Design."""
+than joined or opened on the way. A comment box under the search box takes \
+the remark the webapp lets you add, posted above the link as one message \
+with the link on its own line, so the server's preview of it still comes. \
+Lab-verified by `forwards-from-the-menu`: Forward on the seeded root, \
+"Design" typed into the picker with a comment, Return, and the server \
+holding the comment and the permalink in Design."""
 
 [[feature]]
 id       = "posts.search"

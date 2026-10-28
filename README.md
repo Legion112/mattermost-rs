@@ -189,11 +189,12 @@ desktop to protect.
 Either way, it is the real widgets. GTK publishes its whole widget tree on
 the accessibility bus, the same one a screen reader uses, so a test says
 "press the button called Leave channel" and means the button. What that bus
-cannot do -- Return in a box, a chord, a click into a paragraph, resting the
-pointer on a message, turning the wheel -- the driver puts on the display
-itself over XTEST, the way a keyboard and a mouse would; a widget's place
-comes from its own toplevel's X window, because the bus answers (0, 0) for
-every screen position. Each scenario then asks the *server* whether it
+cannot do -- Return in a box, a chord, a click or a right-click into a
+paragraph, resting the pointer on a message, turning the wheel -- the driver
+puts on the display itself over XTEST, the way a keyboard and a mouse would;
+a widget's place comes from its own toplevel's X window, because the bus
+answers (0, 0) for every screen position; and what Copy put on the clipboard
+is read back the way a paste would read it, by asking the selection's owner. Each scenario then asks the *server* whether it
 actually happened, because a window agreeing with itself is not the same as
 a window being right. `--only a,b` runs the named ones, in the container
 too, and the last scenario sweeps every trace the others left so a lab kept

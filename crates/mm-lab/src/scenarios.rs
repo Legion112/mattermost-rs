@@ -1307,6 +1307,15 @@ async fn forwards_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
     let entry = picker.find("search box", "Forward to…")?.clone();
     screen.click_into(&entry).await?;
     screen.type_into(&entry, "Design").await?;
+    // A comment goes above the link, as one message.
+    let comment = format!("Forwarded from the lab at {}", crate::seed::stamp());
+    screen
+        .type_into(
+            picker.find("text box", "Add a comment (optional)")?,
+            &comment,
+        )
+        .await?;
+    let link = format!("{comment}\n{link}");
     // The sidebar has a Design of its own: the picker's row is the
     // second one, and Return before it is there acts on whatever the
     // picker selected first.

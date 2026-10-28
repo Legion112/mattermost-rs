@@ -6124,7 +6124,7 @@ fn wire_forward_entry(
 }
 
 /// What a picker does with the row chosen: see `Ui::open_picker`.
-type Chooser = Rc<dyn Fn(&Ui, &str)>;
+type Chooser = Rc<dyn Fn(&Ui, &str, &str)>;
 
 /// See `ON_FORWARD`: the message being forwarded, and its permalink.
 type ForwardHandler = Rc<dyn Fn(&PostId, &str)>;
@@ -8621,7 +8621,12 @@ impl Ui {
     }
 
     fn open_switcher(&self) {
-        self.open_picker("Find channel", "Find channel…", Rc::new(Ui::switcher_chose));
+        self.open_picker(
+            "Find channel",
+            "Find channel…",
+            None,
+            Rc::new(|ui, name, _| ui.switcher_chose(name)),
+        );
     }
 
     /// Forward a message: the same picker as the switcher, and the
@@ -8634,7 +8639,8 @@ impl Ui {
         self.open_picker(
             "Forward to",
             "Forward to…",
-            Rc::new(move |ui, name| {
+            Some("Add a comment (optional)"),
+            Rc::new(move |ui, name, comment| {
                 if name.is_empty() {
                     return;
                 }
@@ -8642,10 +8648,18 @@ impl Ui {
                     ui.set_status("forward to a channel you are in");
                     return;
                 }
+                // The comment above the link, the way the webapp posts it:
+                // one message, the link on its own line so the server's
+                // preview of it still comes.
+                let text = if comment.trim().is_empty() {
+                    address.clone()
+                } else {
+                    format!("{}\n{address}", comment.trim())
+                };
                 ui.commands
                     .send(Command::Send {
                         channel: ChannelId::new(name),
-                        text: address.clone(),
+                        text,
                         root: None,
                         attach: Vec::new(),
                     })
@@ -8655,11 +8669,45 @@ impl Ui {
         );
     }
 
+    /// The picker's rows for a query: the channels the sidebar knows that
+    /// match, and then the switcher's finds from elsewhere.
+    fn fill_picker(&self, list: &gtk::ListBox, query: &str) {
+        while let Some(old) = list.first_child() {
+            list.remove(&old);
+        }
+        for found in self.store.borrow().find_channels(query, SWITCHER_RESULTS) {
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            line.append(&self.channel_mark(&found));
+            line.append(
+                &gtk::Label::builder()
+                    .label(&found.display_name)
+                    .xalign(0.0)
+                    .hexpand(true)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .css_classes(if found.is_unread() {
+                        ["heading"]
+                    } else {
+                        ["dim-label"]
+                    })
+                    .build(),
+            );
+            let row = gtk::ListBoxRow::builder().child(&line).build();
+            row.set_widget_name(found.channel.as_str());
+            list.append(&row);
+        }
+        self.append_elsewhere(list, query);
+        // So Return goes somewhere without arrowing down first.
+        if let Some(first) = first_selectable(list, 0, 1) {
+            list.select_row(Some(&first));
+        }
+    }
+
     /// The channel list with a search box over it that the switcher and
-    /// the forward picker share. `chose` gets the row's name: a channel
-    /// id, or one of the switcher's prefixed finds -- `join:`, `dm:`,
-    /// `archived:` -- for a thing not in the sidebar.
-    fn open_picker(&self, title: &str, placeholder: &str, chose: Chooser) {
+    /// the forward picker share. `chose` gets the row's name -- a channel
+    /// id, or one of the switcher's prefixed finds, `join:`, `dm:`,
+    /// `archived:`, for a thing not in the sidebar -- and what was typed
+    /// into the comment box, when `comment` asked for one.
+    fn open_picker(&self, title: &str, placeholder: &str, comment: Option<&str>, chose: Chooser) {
         let entry = gtk::SearchEntry::builder()
             .placeholder_text(placeholder)
             .margin_start(12)
@@ -8688,42 +8736,23 @@ impl Ui {
         }
         let layout = gtk::Box::new(gtk::Orientation::Vertical, 6);
         layout.append(&entry);
+        let remark = comment.map(|placeholder| {
+            let remark = gtk::Entry::builder()
+                .placeholder_text(placeholder)
+                .margin_start(12)
+                .margin_end(12)
+                .build();
+            name_widget(&remark, placeholder);
+            layout.append(&remark);
+            remark
+        });
         layout.append(&scroll);
         window.set_content(Some(&layout));
 
         let fill = {
             let ui = self.clone();
             let list = list.clone();
-            move |query: &str| {
-                while let Some(old) = list.first_child() {
-                    list.remove(&old);
-                }
-                for found in ui.store.borrow().find_channels(query, SWITCHER_RESULTS) {
-                    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                    line.append(&ui.channel_mark(&found));
-                    line.append(
-                        &gtk::Label::builder()
-                            .label(&found.display_name)
-                            .xalign(0.0)
-                            .hexpand(true)
-                            .ellipsize(gtk::pango::EllipsizeMode::End)
-                            .css_classes(if found.is_unread() {
-                                ["heading"]
-                            } else {
-                                ["dim-label"]
-                            })
-                            .build(),
-                    );
-                    let row = gtk::ListBoxRow::builder().child(&line).build();
-                    row.set_widget_name(found.channel.as_str());
-                    list.append(&row);
-                }
-                ui.append_elsewhere(&list, query);
-                // So Return goes somewhere without arrowing down first.
-                if let Some(first) = first_selectable(&list, 0, 1) {
-                    list.select_row(Some(&first));
-                }
-            }
+            move |query: &str| ui.fill_picker(&list, query)
         };
         fill("");
         {
@@ -8756,8 +8785,12 @@ impl Ui {
             let window = window.clone();
             move |row: &gtk::ListBoxRow| {
                 let name = row.widget_name();
+                let said = remark
+                    .as_ref()
+                    .map(|r| r.text().to_string())
+                    .unwrap_or_default();
                 window.close();
-                chose(&ui, name.as_str());
+                chose(&ui, name.as_str(), &said);
             }
         };
         {
