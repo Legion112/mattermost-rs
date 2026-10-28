@@ -245,8 +245,13 @@ because it looks that name up among installed applications.
 
 Verified on this machine with `dbus-monitor`: the \
 `Notify` call carries the `default` action, the right icon name, \
-`desktop-entry`, `category` `im.received` and `sound-name`. NOT \
-verified: the click itself, which needs somebody to send a mention. \
+`desktop-entry`, `category` `im.received` and `sound-name`. The click is \
+lab-verified too, by `opens-a-channel-from-a-notification`: the lab takes \
+`org.freedesktop.Notifications` on the container's session bus itself, \
+since nothing else there does, sees the banner a mention in a closed \
+channel sends -- naming the sender and the channel, with a `default` action \
+-- invokes that action the way a shell does for a click, and watches the \
+window open the channel. \
 Muting silences notifications outright, mentions included: Mattermost's own \
 documentation says that once a channel is muted "all notifications for that \
 channel are disabled, including email, desktop, incoming call ring tones, \

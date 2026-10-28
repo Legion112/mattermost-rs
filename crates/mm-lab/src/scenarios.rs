@@ -36,6 +36,7 @@ pub const SCENARIOS: &[&str] = &[
     "follows-edits-reactions-and-deletions",
     "shows-an-unread-and-clears-it",
     "filters-the-sidebar-to-unreads",
+    "opens-a-channel-from-a-notification",
     "shows-a-new-direct-message",
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
@@ -160,6 +161,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
         "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
         "filters-the-sidebar-to-unreads" => filters_sidebar_to_unreads(screen, admin).await,
+        "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
         "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
         "mutes-and-unmutes" => mutes(screen, admin).await,
         "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
@@ -438,6 +440,54 @@ async fn filters_sidebar_to_unreads(screen: &Screen, admin: &Admin) -> Result<()
         .await?;
     // Read again, so the next scenario starts where this one did.
     screen.open_channel("Design").await?;
+    screen.open_channel("Engineering").await
+}
+
+/// A mention in a channel that is not open sends a desktop banner, and
+/// clicking the banner opens that channel.
+///
+/// The lab is the desktop here: it takes the notifications name on the
+/// session bus, which the container has nobody else on, sees what the
+/// client sends, and invokes the banner's default action the way a shell
+/// does when the banner is clicked.
+async fn opens_from_notification(screen: &Screen, admin: &Admin) -> Result<()> {
+    let desk = crate::notify::Desk::serve().await?;
+    screen.open_channel("Engineering").await?;
+    let said = format!("@legion a banner from the lab at {}", crate::seed::stamp());
+    admin.say_as("ada", "design", &said).await?;
+    let mut banner = None;
+    for _ in 0..50 {
+        banner = desk.banners().into_iter().find(|b| b.body.contains(&said));
+        if banner.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let Some(banner) = banner else {
+        return Err(Error(format!(
+            "no banner carried the mention; the desk saw {:?}",
+            desk.banners()
+        )));
+    };
+    if !banner.summary.contains("ada") || !banner.summary.contains("Design") {
+        return Err(Error(format!(
+            "the banner says {:?}, naming neither ada nor Design",
+            banner.summary
+        )));
+    }
+    if !banner.actions.iter().any(|a| a == "default") {
+        return Err(Error(format!(
+            "the banner offers {:?}, with no default action to click",
+            banner.actions
+        )));
+    }
+    desk.click(banner.id).await?;
+    screen
+        .until("the click opened Design", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Design"))
+        })
+        .await?;
     screen.open_channel("Engineering").await
 }
 
