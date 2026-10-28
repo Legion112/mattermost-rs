@@ -6456,22 +6456,7 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
     // fifteen. What is left is aligned, and the per-row pass takes it
     // from there.
     let mut moved = false;
-    let shift = shift_between(&drawn, next);
-    if crate::perf::watching() && drawn.len() == next.len() && shift.is_none() {
-        let ids = |rows: &[PostRow]| -> Vec<String> {
-            rows.iter()
-                .take(3)
-                .map(|r| r.id().chars().take(6).collect())
-                .collect()
-        };
-        eprintln!(
-            "  splice: same length {} and no shift; drawn starts {:?}, next starts {:?}",
-            drawn.len(),
-            ids(&drawn),
-            ids(next)
-        );
-    }
-    if let Some((drawn_at, next_at)) = shift {
+    if let Some((drawn_at, next_at)) = shift_between(&drawn, next) {
         crate::perf::marked("splice:shift", || {
             // The heads: everything before the first message they share.
             // Older rows put in, or the oldest let go of -- and the day
@@ -6540,6 +6525,21 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
                 next.len(),
                 drawn[first].differs(&next[first]).unwrap_or("nothing"),
             );
+            // Every row differing is the shape of a move the shift pass
+            // did not see, and the ids are what it would have needed.
+            if changed.len() == next.len() {
+                let ids = |rows: &[PostRow]| -> Vec<String> {
+                    rows.iter()
+                        .take(3)
+                        .map(|r| r.id().chars().take(6).collect())
+                        .collect()
+                };
+                eprintln!(
+                    "  splice: all of them; drawn starts {:?}, next starts {:?}",
+                    ids(&drawn),
+                    ids(next)
+                );
+            }
         }
         for (from, upto) in runs(&changed, SPLICE_GAP) {
             let count = upto - from + 1;
