@@ -106,7 +106,15 @@ mod imp {
         /// whose text lives in `body`.
         pub blocks: RefCell<Vec<super::BlockView>>,
         pub time: RefCell<String>,
-        pub ago: RefCell<String>,
+        /// When it was said, for the views that say it as a distance.
+        ///
+        /// The moment, not the sentence. "4 minutes ago" is a string
+        /// that changes every minute on its own, and a row that carries
+        /// it is a row that differs from its own redraw: sixty of
+        /// sixty-one rows were replaced by a clock tick, which on a real
+        /// account is most of a second of rebuilding a channel nobody
+        /// touched. The sentence is now written at bind time instead.
+        pub at: Cell<mm_types::Timestamp>,
         pub full_time: RefCell<String>,
         /// A trailing line for attachments and reply counts; empty hides it.
         pub files: RefCell<Vec<mm_types::FileRef>>,
@@ -173,10 +181,10 @@ pub struct PostRowFields<'a> {
     pub body: &'a str,
     pub blocks: Vec<BlockView>,
     pub time: &'a str,
-    /// The same moment said as a distance -- "2 weeks ago" -- which is
-    /// what the thread pane shows, where there are no day separators to
-    /// put a bare clock time in any context.
-    pub ago: &'a str,
+    /// When it was said. The thread pane says it as a distance -- "2
+    /// weeks ago" -- because it has no day separators to put a bare
+    /// clock time in any context, and works that out at bind time.
+    pub at: mm_types::Timestamp,
     /// The whole date and time, for the tooltip on the clock. A message
     /// says "17:01" and the reader needs to know which day that was.
     pub full_time: &'a str,
@@ -234,7 +242,7 @@ impl PostRow {
         inner.body.replace(fields.body.to_owned());
         inner.blocks.replace(fields.blocks);
         inner.time.replace(fields.time.to_owned());
-        inner.ago.replace(fields.ago.to_owned());
+        inner.at.set(fields.at);
         inner.full_time.replace(fields.full_time.to_owned());
         inner.files.replace(fields.files);
         inner.voice.set(fields.flags.voice);
@@ -280,26 +288,43 @@ impl PostRow {
     /// history loaded into it.
     #[must_use]
     pub fn matches(&self, other: &Self) -> bool {
+        self.differs(other).is_none()
+    }
+
+    /// Which field makes these two rows different, if any.
+    ///
+    /// `matches` is the question the splice asks; this is the one asked
+    /// when the answer is surprising. A redraw that replaces sixty rows
+    /// nobody changed is a field that moves on its own, and the only way
+    /// to know which is to name it.
+    #[must_use]
+    pub fn differs(&self, other: &Self) -> Option<&'static str> {
         let (a, b) = (self.imp(), other.imp());
-        a.separator.get() == b.separator.get()
-            && a.unread_mark.get() == b.unread_mark.get()
-            && a.voice.get() == b.voice.get()
-            && a.grouped.get() == b.grouped.get()
-            && a.replies.get() == b.replies.get()
-            && *a.id.borrow() == *b.id.borrow()
-            && *a.author.borrow() == *b.author.borrow()
-            && *a.body.borrow() == *b.body.borrow()
-            && *a.time.borrow() == *b.time.borrow()
-            && *a.ago.borrow() == *b.ago.borrow()
-            && *a.files.borrow() == *b.files.borrow()
-            && *a.blocks.borrow() == *b.blocks.borrow()
-            && *a.cards.borrow() == *b.cards.borrow()
-            && *a.previews.borrow() == *b.previews.borrow()
-            && a.presence.get() == b.presence.get()
-            && *a.images.borrow() == *b.images.borrow()
-            && *a.reactions.borrow() == *b.reactions.borrow()
-            && *a.quick_reactions.borrow() == *b.quick_reactions.borrow()
-            && *a.avatar.borrow() == *b.avatar.borrow()
+        let same = [
+            ("separator", a.separator.get() == b.separator.get()),
+            ("unread_mark", a.unread_mark.get() == b.unread_mark.get()),
+            ("voice", a.voice.get() == b.voice.get()),
+            ("grouped", a.grouped.get() == b.grouped.get()),
+            ("replies", a.replies.get() == b.replies.get()),
+            ("id", *a.id.borrow() == *b.id.borrow()),
+            ("author", *a.author.borrow() == *b.author.borrow()),
+            ("body", *a.body.borrow() == *b.body.borrow()),
+            ("time", *a.time.borrow() == *b.time.borrow()),
+            ("files", *a.files.borrow() == *b.files.borrow()),
+            ("blocks", *a.blocks.borrow() == *b.blocks.borrow()),
+            ("cards", *a.cards.borrow() == *b.cards.borrow()),
+            ("previews", *a.previews.borrow() == *b.previews.borrow()),
+            ("presence", a.presence.get() == b.presence.get()),
+            ("images", *a.images.borrow() == *b.images.borrow()),
+            ("reactions", *a.reactions.borrow() == *b.reactions.borrow()),
+            (
+                "quick_reactions",
+                *a.quick_reactions.borrow() == *b.quick_reactions.borrow(),
+            ),
+            ("avatar", *a.avatar.borrow() == *b.avatar.borrow()),
+        ];
+        same.into_iter()
+            .find_map(|(what, same)| (!same).then_some(what))
     }
 
     #[must_use]
@@ -404,8 +429,8 @@ impl PostRow {
     }
 
     #[must_use]
-    pub fn ago(&self) -> String {
-        self.imp().ago.borrow().clone()
+    pub fn at(&self) -> mm_types::Timestamp {
+        self.imp().at.get()
     }
 
     #[must_use]

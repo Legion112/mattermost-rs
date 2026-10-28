@@ -285,14 +285,28 @@ struct Ui {
     /// reader had already looked at once. Now the view is handed the
     /// model that channel already has.
     posts: Rc<RefCell<gio::ListStore>>,
-    /// A model per channel, most recently opened last.
+    /// A whole list per channel, most recently opened last.
+    ///
+    /// Not a model per channel, which is what this was: handing a
+    /// different channel's rows to one `ListView` makes it build a
+    /// widget set for every row it is handed -- all sixty of them,
+    /// measured, because a list of variable-height rows has to measure
+    /// them all to know how tall it is. That was 55ms of the 60ms a
+    /// switch cost in the lab, and ten times that on a real account.
+    ///
+    /// Keeping the list itself makes going back to a channel a `Stack`
+    /// page change, which builds nothing at all.
     ///
     /// Bounded: a reader who visits forty channels should not be holding
     /// forty channels' worth of built rows, and the ones they have not
     /// looked at for a while are the cheapest to rebuild.
-    models: Rc<RefCell<Vec<(ChannelId, gio::ListStore)>>>,
-    post_view: gtk::ListView,
-    scroller: gtk::ScrolledWindow,
+    drawn: Rc<RefCell<Vec<Drawn>>>,
+    /// The channel lists, one page each, and whichever is on show.
+    channel_views: gtk::Stack,
+    post_view: Rc<RefCell<gtk::ListView>>,
+    scroller: Rc<RefCell<gtk::ScrolledWindow>>,
+    /// What a new channel list is built from.
+    row_ctx: RowContext,
     /// Whether the view should follow new messages.
     ///
     /// Set when a channel is opened, and cleared as soon as the reader
@@ -679,6 +693,15 @@ type PickerRefill = Rc<dyn Fn()>;
 /// lands in it.
 const EMOJI_PIXELS: i32 = 18;
 
+/// One channel's drawn conversation, kept so that going back is free.
+#[derive(Clone)]
+struct Drawn {
+    channel: ChannelId,
+    posts: gio::ListStore,
+    view: gtk::ListView,
+    scroller: gtk::ScrolledWindow,
+}
+
 /// Everything a post row's widgets need to reach, as one thing.
 ///
 /// Each field is an `Rc` or a sender the factory clones per row, and
@@ -1055,6 +1078,10 @@ fn build(
     let emoji = Emoji::new(&store, commands);
     let rows = RowContext::new(commands, &store, &server, &emoji);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
+    // The page shown before any channel is open, and the one every
+    // channel's own list is added beside.
+    let channel_views = gtk::Stack::new();
+    channel_views.add_child(&scroller);
 
     let (composer, status) = build_composer_row(&emoji);
 
@@ -1062,7 +1089,7 @@ fn build(
     // in the same space. The status line and the composer stay put under
     // all three -- the composer insensitive for the two that have nothing
     // to send to.
-    let panes = build_middle(&scroller);
+    let panes = build_middle(&channel_views);
     let Middle {
         threads_list,
         drafts_list,
@@ -1159,9 +1186,11 @@ fn build(
         asked: Rc::new(RefCell::new(HashSet::new())),
         asked_files: Rc::new(RefCell::new(HashSet::new())),
         posts: Rc::new(RefCell::new(posts)),
-        models: Rc::new(RefCell::new(Vec::new())),
-        post_view,
-        scroller,
+        drawn: Rc::new(RefCell::new(Vec::new())),
+        channel_views,
+        post_view: Rc::new(RefCell::new(post_view)),
+        scroller: Rc::new(RefCell::new(scroller)),
+        row_ctx: rows.clone(),
         stick_to_bottom: Rc::new(std::cell::Cell::new(true)),
         status,
         title,
@@ -1458,13 +1487,13 @@ fn empty_view(what: &str) -> gtk::ListBoxRow {
 
 /// The three things that take turns in the middle of the window: the
 /// conversation, the Threads view and the Drafts view.
-fn build_middle(scroller: &gtk::ScrolledWindow) -> Middle {
+fn build_middle(channel_views: &gtk::Stack) -> Middle {
     let (threads_list, threads_scroll) = build_view_list();
     let (unreads_tab, read_all_threads, threads_page) = build_threads_page(&threads_scroll);
     let (drafts_list, drafts_page) = build_view_list();
     let (search_entry, found_title, found_list, found_page) = build_found_page();
     let stack = gtk::Stack::new();
-    stack.add_named(scroller, Some("channel"));
+    stack.add_named(channel_views, Some("channel"));
     stack.add_named(&threads_page, Some("threads"));
     stack.add_named(&drafts_page, Some("drafts"));
     stack.add_named(&found_page, Some("found"));
@@ -3838,81 +3867,7 @@ fn wire(
             commands.send(Command::Sync).ok();
         });
     }
-    {
-        // Following new messages, driven by what the reader did rather than by
-        // arithmetic on the scroll position.
-        //
-        // The arithmetic version was tried and does not work: `upper` is an
-        // estimate GTK revises as rows are realized, so a view pinned to the
-        // bottom stops looking pinned the moment the estimate grows, and the
-        // flag clears itself. Scroll gestures and edge hits are facts about
-        // intent and do not drift.
-        let scrolling_up = gtk::EventControllerScroll::new(
-            gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC,
-        );
-        {
-            let stick = Rc::clone(&ui.stick_to_bottom);
-            scrolling_up.connect_scroll(move |_, _, dy| {
-                // Any upward scroll means the reader is looking at history and
-                // must not be yanked away from it.
-                if dy < 0.0 {
-                    stick.set(false);
-                }
-                glib::Propagation::Proceed
-            });
-        }
-        ui.scroller.add_controller(scrolling_up);
-
-        // Arriving back at the bottom opts back in; arriving at the top
-        // asks for the page of history before what is held.
-        let stick = Rc::clone(&ui.stick_to_bottom);
-        let loading = Rc::clone(&ui.loading_older);
-        let restore = Rc::clone(&ui.restore_to);
-        let selected = Rc::clone(&ui.selected);
-        let posts = ui.posts.clone();
-        let commands = commands.clone();
-        // Asking for the page before what is held. Shared by the edge and
-        // by the watcher below, because they are the same request made at
-        // two different moments.
-        let ask_for_older = older_asker(ui, &loading, &restore, &selected, &posts, &commands);
-
-        // Asking *early* -- a screenful before the top -- was tried and
-        // measured worse, which is why it is not here. It does remove the
-        // round trip from the middle of the scroll, but it also packs the
-        // splices closer together: against the lab it took the share of
-        // frames over budget from 24% to 49% and the 99th percentile from
-        // 383ms to 567ms. The stall is the splice, not the request, and
-        // fetching sooner only arrives at it sooner. Worth revisiting if
-        // the splice ever stops being the expensive part.
-        let ask = Rc::clone(&ask_for_older);
-        let settling = Rc::clone(&ui.settling);
-        ui.scroller.connect_edge_reached(move |_, edge| match edge {
-            gtk::PositionType::Bottom => stick.set(true),
-            // Only when the reader put themselves there.
-            //
-            // A list that has just been handed a channel's rows is at
-            // the top until the scroll to the bottom runs, and GTK
-            // reports that as reaching the top edge. So opening a
-            // channel asked for the page before it, every time: the
-            // window doubled, every row was rebuilt, and a channel
-            // whose rows are expensive -- the one this was reported
-            // against -- went from 91 rows drawn in 311ms to 182 rows
-            // two seconds after the click, on every visit, including
-            // going back to it.
-            //
-            // So the top edge counts only once that scroll has run.
-            // Not `stick_to_bottom`, which looks like the same thing
-            // and is not: it is cleared by a scroll *gesture*, so a
-            // reader who drags the scrollbar or pages up with the
-            // keyboard would never backfill again.
-            gtk::PositionType::Top => {
-                if !settling.get() {
-                    ask();
-                }
-            }
-            _ => {}
-        });
-    }
+    wire_scroller(ui, &ui.scroller.borrow().clone());
     wire_selection(ui, sidebar);
     wire_categories(ui, sidebar);
 
@@ -5873,7 +5828,11 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         bind_author(&author, &data);
     }
     if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
-        let said = if relative { data.ago() } else { data.time() };
+        let said = if relative {
+            describe_ago(data.at())
+        } else {
+            data.time()
+        };
         time.set_text(&said);
         // The clock is short either way, so the whole date lives here.
         time.set_tooltip_text(Some(&data.full_time()));
@@ -6349,6 +6308,15 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
         if changed.is_empty() {
             return false;
         }
+        if crate::perf::watching_switch() {
+            let first = changed[0];
+            eprintln!(
+                "  splice: {} of {} rows differ, the first at {first} by {}",
+                changed.len(),
+                next.len(),
+                drawn[first].differs(&next[first]).unwrap_or("nothing"),
+            );
+        }
         for (from, upto) in runs(&changed, SPLICE_GAP) {
             let count = upto - from + 1;
             crate::perf::marked("splice:run", || {
@@ -6493,7 +6461,7 @@ fn build_post_list(
     let for_setup = ctx.clone();
     factory.connect_setup(move |_, item| {
         if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            setup_post_row(item, &for_setup);
+            crate::perf::marked("row:setup", || setup_post_row(item, &for_setup));
         }
     });
     let for_bind = ctx.clone();
@@ -6503,7 +6471,9 @@ fn build_post_list(
             // toolbar. The message under it has just changed, so the
             // toolbar is wrong whatever the pointer is doing.
             hide_tools(item, &for_bind.shown);
-            crate::perf::timed(|| bind_post_row(item, &for_bind, relative));
+            crate::perf::marked("row:bind", || {
+                crate::perf::timed(|| bind_post_row(item, &for_bind, relative));
+            });
         }
     });
     let post_view = gtk::ListView::builder()
@@ -6522,12 +6492,9 @@ fn build_post_list(
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    // The channel's list, never the thread pane's: `relative` is what
-    // distinguishes them, and the thread pane is built first and is empty.
-    if crate::perf::watching() && !relative {
-        crate::perf::sweep(&scroller);
-    }
-
+    // The sweep attaches where the list is shown, not where it is
+    // built: this one may be the placeholder nobody ever sees, and the
+    // thread pane's, which is built first and is always empty.
     (posts, post_view, scroller)
 }
 
@@ -8073,30 +8040,51 @@ impl Ui {
     /// conversation out and another in. The reconcile is the ordinary
     /// `refresh_posts` that follows: where nothing has changed it finds
     /// nothing to splice, which is the whole point.
+    /// A list of its own for a channel being opened for the first time,
+    /// at the cost of the oldest one if too many are being kept.
+    fn draw_channel(&self, channel: &ChannelId) -> Drawn {
+        let (posts, view, scroller) = build_post_list(&self.row_ctx, false);
+        wire_scroller(self, &scroller);
+        self.channel_views.add_child(&scroller);
+        let fresh = Drawn {
+            channel: channel.clone(),
+            posts,
+            view,
+            scroller,
+        };
+        let evicted = {
+            let mut drawn = self.drawn.borrow_mut();
+            drawn.push(fresh.clone());
+            (drawn.len() > CHANNELS_KEPT_DRAWN).then(|| drawn.remove(0))
+        };
+        if let Some(gone) = evicted {
+            self.channel_views.remove(&gone.scroller);
+        }
+        fresh
+    }
+
     fn show_model_for(&self, channel: &ChannelId) {
-        let model = {
-            let mut models = self.models.borrow_mut();
-            if let Some(at) = models.iter().position(|(id, _)| id == channel) {
+        let held = {
+            let mut drawn = self.drawn.borrow_mut();
+            drawn.iter().position(|d| &d.channel == channel).map(|at| {
                 // Most recently opened goes last, so the eviction below
                 // always takes the one nobody has looked at for longest.
-                let held = models.remove(at);
-                models.push(held.clone());
-                held.1
-            } else {
-                let fresh = gio::ListStore::new::<PostRow>();
-                models.push((channel.clone(), fresh.clone()));
-                if models.len() > CHANNELS_KEPT_DRAWN {
-                    models.remove(0);
-                }
-                fresh
-            }
+                let held = drawn.remove(at);
+                drawn.push(held.clone());
+                held
+            })
         };
-        if self.posts.borrow().as_ptr() == model.as_ptr() {
-            return;
+        let shown = held.unwrap_or_else(|| self.draw_channel(channel));
+        *self.posts.borrow_mut() = shown.posts.clone();
+        *self.post_view.borrow_mut() = shown.view.clone();
+        *self.scroller.borrow_mut() = shown.scroller.clone();
+        self.channel_views.set_visible_child(&shown.scroller);
+        // The benchmark sweeps whichever list is on show when it starts,
+        // which is this one: there is no single list to attach to any
+        // more.
+        if crate::perf::watching() {
+            crate::perf::sweep(&shown.scroller);
         }
-        *self.posts.borrow_mut() = model.clone();
-        self.post_view
-            .set_model(Some(&gtk::NoSelection::new(Some(model))));
     }
 
     /// Go somewhere readable after the open channel has gone.
@@ -8427,7 +8415,7 @@ impl Ui {
         // Before anything moves: what is in the boxes belongs to where
         // they were, and a channel switch is the commonest way to lose
         // it.
-        self.remember_drafts();
+        crate::perf::marked("open:drafts", || self.remember_drafts());
         crate::perf::switch_began(id.as_str());
         // Until the list has been scrolled to the newest message it is
         // sitting at the top, and GTK says so: see the top-edge handler
@@ -8449,9 +8437,9 @@ impl Ui {
         // which is what makes opening one cost the same whether it was
         // read for the first time or scrolled through all morning.
         self.shown_window.set(CHANNEL_WINDOW);
-        self.show_model_for(id);
-        self.restore_draft(id);
-        self.show_pane(&Pane::Channel);
+        crate::perf::marked("open:model", || self.show_model_for(id));
+        crate::perf::marked("open:draft", || self.restore_draft(id));
+        crate::perf::marked("open:pane", || self.show_pane(&Pane::Channel));
         // Draw what is already held, before asking for anything. A
         // channel read earlier, or warmed in the background, is in the
         // store already -- and waiting for the round trip to redraw it
@@ -8462,7 +8450,7 @@ impl Ui {
         // the way Mattermost puts it there: clicking a channel is how a
         // reader starts writing in it, and the alternative is a second
         // click at the bottom of the window before the first letter.
-        self.composer.view.grab_focus();
+        crate::perf::marked("open:focus", || self.composer.view.grab_focus());
         // Written down now rather than at close, so a client killed or
         // crashed still comes back here -- but only when the reader
         // chose this. The first-channel fallback's stand-in would
@@ -8470,7 +8458,7 @@ impl Ui {
         // is how "reopen where I was" quietly became "reopen whatever
         // sorts first" after one launch.
         if !self.provisional.replace(false) {
-            self.remember_state();
+            crate::perf::marked("open:state", || self.remember_state());
         }
         self.commands.send(Command::OpenChannel(id.clone())).ok();
         self.commands.send(Command::MarkRead(id.clone())).ok();
@@ -8957,7 +8945,7 @@ impl Ui {
             body: "",
             blocks,
             time: &clock_time(post.create_at.millis()),
-            ago: &describe_ago(post.create_at),
+            at: post.create_at,
             full_time: &full_time(post.create_at.millis()),
             files: post
                 .attachments()
@@ -9663,7 +9651,7 @@ impl Ui {
     }
 
     fn refresh_posts_inner(&self, channel: &ChannelId) {
-        self.refresh_heading(channel);
+        crate::perf::marked("heading", || self.refresh_heading(channel));
         // Was the newest message in view before this update? Asked of the
         // model, not of the scroll adjustment: `upper` is an estimate GTK
         // revises as rows are realized, and it was observed moving 20% in both
@@ -9752,7 +9740,7 @@ impl Ui {
                 .find(|(_, row)| row.id() == anchor.as_str())
                 .map(|(i, _)| i);
             if let Some(at) = at {
-                let view = self.post_view.clone();
+                let view = self.post_view.borrow().clone();
                 let posts = model.clone();
                 // The same timer as the initial scroll, for the same reason:
                 // ListView has not measured the rows it was just handed.
@@ -9787,7 +9775,7 @@ impl Ui {
                 // The adjustment handlers in `wire` still earn their place:
                 // they follow messages arriving *later*, when the list is
                 // already measured.
-                let view = self.post_view.clone();
+                let view = self.post_view.borrow().clone();
                 let posts = model.clone();
                 let settling = Rc::clone(&self.settling);
                 glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
@@ -9807,6 +9795,85 @@ impl Ui {
     }
 }
 
+/// The controllers on one channel's list.
+///
+/// Per list rather than once, because there is a list per channel
+/// now: see `Drawn`.
+fn wire_scroller(ui: &Ui, scroller: &gtk::ScrolledWindow) {
+    // Following new messages, driven by what the reader did rather than by
+    // arithmetic on the scroll position.
+    //
+    // The arithmetic version was tried and does not work: `upper` is an
+    // estimate GTK revises as rows are realized, so a view pinned to the
+    // bottom stops looking pinned the moment the estimate grows, and the
+    // flag clears itself. Scroll gestures and edge hits are facts about
+    // intent and do not drift.
+    let scrolling_up = gtk::EventControllerScroll::new(
+        gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC,
+    );
+    {
+        let stick = Rc::clone(&ui.stick_to_bottom);
+        scrolling_up.connect_scroll(move |_, _, dy| {
+            // Any upward scroll means the reader is looking at history and
+            // must not be yanked away from it.
+            if dy < 0.0 {
+                stick.set(false);
+            }
+            glib::Propagation::Proceed
+        });
+    }
+    scroller.add_controller(scrolling_up);
+
+    // Arriving back at the bottom opts back in; arriving at the top
+    // asks for the page of history before what is held.
+    let stick = Rc::clone(&ui.stick_to_bottom);
+    let loading = Rc::clone(&ui.loading_older);
+    let restore = Rc::clone(&ui.restore_to);
+    let selected = Rc::clone(&ui.selected);
+    let posts = ui.posts.clone();
+    let commands = ui.commands.clone();
+    // Asking for the page before what is held. Shared by the edge and
+    // by the watcher below, because they are the same request made at
+    // two different moments.
+    let ask_for_older = older_asker(ui, &loading, &restore, &selected, &posts, &commands);
+
+    // Asking *early* -- a screenful before the top -- was tried and
+    // measured worse, which is why it is not here. It does remove the
+    // round trip from the middle of the scroll, but it also packs the
+    // splices closer together: against the lab it took the share of
+    // frames over budget from 24% to 49% and the 99th percentile from
+    // 383ms to 567ms. The stall is the splice, not the request, and
+    // fetching sooner only arrives at it sooner. Worth revisiting if
+    // the splice ever stops being the expensive part.
+    let ask = Rc::clone(&ask_for_older);
+    let settling = Rc::clone(&ui.settling);
+    scroller.connect_edge_reached(move |_, edge| match edge {
+        gtk::PositionType::Bottom => stick.set(true),
+        // Only when the reader put themselves there.
+        //
+        // A list that has just been handed a channel's rows is at
+        // the top until the scroll to the bottom runs, and GTK
+        // reports that as reaching the top edge. So opening a
+        // channel asked for the page before it, every time: the
+        // window doubled, every row was rebuilt, and a channel
+        // whose rows are expensive -- the one this was reported
+        // against -- went from 91 rows drawn in 311ms to 182 rows
+        // two seconds after the click, on every visit, including
+        // going back to it.
+        //
+        // So the top edge counts only once that scroll has run.
+        // Not `stick_to_bottom`, which looks like the same thing
+        // and is not: it is cleared by a scroll *gesture*, so a
+        // reader who drags the scrollbar or pages up with the
+        // keyboard would never backfill again.
+        gtk::PositionType::Top => {
+            if !settling.get() {
+                ask();
+            }
+        }
+        _ => {}
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::{SPLICE_GAP, runs};

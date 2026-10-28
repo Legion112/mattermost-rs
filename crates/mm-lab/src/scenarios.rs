@@ -334,6 +334,26 @@ impl Client {
         Self::spawn(home, &[("MMRS_PERF", &mode), ("MMRS_PERF_AFTER", "25")])
     }
 
+    /// What the client is holding, before it is asked to stop.
+    ///
+    /// Keeping a drawn list per channel buys an instant switch with
+    /// memory, and a trade is only a trade if both sides are measured.
+    fn say_memory(&self) {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", self.0.id()));
+        let Ok(status) = status else {
+            println!("memory: no /proc for the client");
+            return;
+        };
+        for line in status.lines() {
+            if line.starts_with("VmRSS:") || line.starts_with("VmHWM:") {
+                println!(
+                    "memory: {}",
+                    line.split_whitespace().collect::<Vec<_>>().join(" ")
+                );
+            }
+        }
+    }
+
     fn stop(&mut self) {
         let _ = Command::new("kill").arg(self.0.id().to_string()).status();
         for _ in 0..40 {
@@ -477,10 +497,13 @@ pub async fn contained(shots: &Path, keep_data: bool, perf: Option<&str>) -> Res
             "--volume",
         ])
         .arg(format!("{}:/out", out.display()));
-    // Which measurement to run belongs to the client inside the
-    // container, and a container inherits nothing from this shell.
-    if let Ok(mode) = std::env::var("MMRS_PERF_MODE") {
-        docker.arg("--env").arg(format!("MMRS_PERF_MODE={mode}"));
+    // A container inherits nothing from this shell, and what is being
+    // measured is chosen out here: the mode, and whatever else an
+    // experiment is turning on and off.
+    for (name, value) in std::env::vars() {
+        if name.starts_with("MMRS_") {
+            docker.arg("--env").arg(format!("{name}={value}"));
+        }
     }
     docker.arg(IMAGE);
     if let Some(channel) = perf {
@@ -512,6 +535,10 @@ const PERF_MESSAGES: usize = 800;
 /// that the second visit to each is in the trace, which is the visit
 /// that should cost nothing.
 const SWITCHES: usize = 4;
+
+/// How many further channels the switch run wanders through. More than
+/// the client keeps drawn, so the oldest are dropped on the way.
+const TOURED: usize = 16;
 
 /// Build the image the scenarios run in.
 ///
@@ -583,7 +610,20 @@ pub async fn measure(channel: &str, guest: bool) -> Result<()> {
                 screen.open_channel(name).await?;
             }
         }
+
+        // And then a tour, because the client keeps a whole drawn list
+        // per channel and the question that answers is what a reader
+        // who wanders costs. Far enough to pass the limit and start
+        // dropping the oldest.
+        println!("touring {TOURED} channels, then back");
+        for n in 0..TOURED {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            screen.open_channel(&format!("Bulk {n:03}")).await?;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        screen.open_channel(channel).await?;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        client.say_memory();
         client.stop();
         return Ok(());
     }

@@ -44,9 +44,10 @@ const PATIENCE_FRAMES: u32 = 180;
 
 thread_local! {
     static STATE: RefCell<Option<Run>> = const { RefCell::new(None) };
-    /// The channel list, not the thread pane beside it: `build_post_list`
-    /// makes two, and the second sweep would measure an empty one.
-    static CLAIMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Which sweep attachment is the live one. A list is shown, then
+    /// another, and only the last one before the sweep starts is the
+    /// one with the channel in it.
+    static CLAIMED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Debug, Default)]
@@ -110,9 +111,19 @@ pub(crate) fn bound(took: Duration) {
 /// Stops after a fixed number of frames rather than at the top, because
 /// a channel with a year of history has no top worth reaching.
 pub(crate) fn sweep(scroller: &gtk::ScrolledWindow) {
-    if CLAIMED.with(|c| c.replace(true)) {
+    // Once a sweep has begun it owns the window; before then, the list
+    // to measure is whichever one is on show. There is a list per
+    // channel now, so the one that existed when the window opened is
+    // usually the empty placeholder -- which measured 180 perfect
+    // frames of nothing at all.
+    if STATE.with_borrow(Option::is_some) {
         return;
     }
+    let mine = CLAIMED.with(|c| {
+        let next = c.get() + 1;
+        c.set(next);
+        next
+    });
     if watching_switch() {
         // Nothing to sweep: this mode measures clicks, not scrolling.
         return;
@@ -131,6 +142,11 @@ pub(crate) fn sweep(scroller: &gtk::ScrolledWindow) {
     let began = std::cell::Cell::new(0i64);
     let waited = std::cell::Cell::new(0u32);
     scroller.add_tick_callback(move |widget, clock| {
+        // A later list took the sweep over: this one is a page nobody
+        // is looking at.
+        if CLAIMED.with(std::cell::Cell::get) != mine {
+            return glib::ControlFlow::Break;
+        }
         let now = clock.frame_time();
         if began.get() == 0 {
             began.set(now);
