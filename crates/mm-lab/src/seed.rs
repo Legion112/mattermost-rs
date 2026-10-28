@@ -1030,6 +1030,23 @@ impl Admin {
             .map(|_| ())
     }
 
+    /// Whether the admin has a direct-message channel with somebody.
+    pub async fn has_dm_with(&self, username: &str) -> Result<bool> {
+        let who = self.user_id(username).await?;
+        let mine = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/me/teams/{}/channels",
+                self.team
+            )))
+            .await?;
+        Ok(mine.as_array().is_some_and(|list| {
+            list.iter().any(|c| {
+                c["type"] == "D" && c["name"].as_str().is_some_and(|name| name.contains(&who))
+            })
+        }))
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self

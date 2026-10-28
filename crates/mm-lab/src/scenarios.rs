@@ -40,6 +40,10 @@ pub const SCENARIOS: &[&str] = &[
     "keeps-a-draft-on-the-server",
     "sends-a-draft-with-its-file",
     "sends-a-message",
+    "completes-a-mention-with-tab",
+    "completes-an-emoji-with-tab",
+    "opens-a-dm-from-the-switcher",
+    "deletes-a-message-from-the-menu",
     "edits-with-the-up-key",
     "reacts-with-the-keyboard",
     "searches-messages",
@@ -150,6 +154,10 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
         "sends-a-draft-with-its-file" => draft_with_file(screen, admin).await,
         "sends-a-message" => sends_a_message(screen, admin).await,
+        "completes-a-mention-with-tab" => completes_mention(screen).await,
+        "completes-an-emoji-with-tab" => completes_emoji(screen).await,
+        "opens-a-dm-from-the-switcher" => dm_from_switcher(screen, admin).await,
+        "deletes-a-message-from-the-menu" => deletes_from_menu(screen, admin).await,
         "edits-with-the-up-key" => edits_with_up(screen, admin).await,
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
@@ -1181,6 +1189,121 @@ async fn makes_private(screen: &Screen, admin: &Admin) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Typing part of a name after `@` offers the person, and Tab writes the
+/// rest.
+async fn completes_mention(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "@gr").await?;
+    screen
+        .until("the popup offers grace", |tree| tree.has("label", "@grace"))
+        .await?;
+    screen.press_key(0xff09, &[])?;
+    for _ in 0..25 {
+        if screen.text_of(&composer).await? == "@grace " {
+            screen.type_into(&composer, "").await?;
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let held = screen.text_of(&composer).await?;
+    screen.type_into(&composer, "").await?;
+    Err(Error(format!(
+        "the box holds {held:?} after Tab, not the name"
+    )))
+}
+
+/// Typing part of a shortcode after `:` offers the emoji, and Tab writes
+/// the rest, colons and all.
+async fn completes_emoji(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, ":tad").await?;
+    screen
+        .until("the popup offers tada", |tree| tree.has("label", ":tada:"))
+        .await?;
+    screen.press_key(0xff09, &[])?;
+    for _ in 0..25 {
+        if screen.text_of(&composer).await? == ":tada: " {
+            screen.type_into(&composer, "").await?;
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let held = screen.text_of(&composer).await?;
+    screen.type_into(&composer, "").await?;
+    Err(Error(format!(
+        "the box holds {held:?} after Tab, not the shortcode"
+    )))
+}
+
+/// A person found by the switcher, with no conversation yet, gets one
+/// on Return: the server has the channel.
+async fn dm_from_switcher(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x6b, &[key::CONTROL])?;
+    let finder = screen
+        .until("the switcher is up", |tree| {
+            tree.has("search box", "Find channel…")
+        })
+        .await?;
+    let entry = finder.find("search box", "Find channel…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "margaret").await?;
+    screen
+        .until("the switcher offers margaret among people", |tree| {
+            tree.has("label", "@margaret")
+        })
+        .await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the conversation with margaret is open", |tree| {
+            tree.has("button", "margaret")
+        })
+        .await?;
+    for _ in 0..25 {
+        if admin.has_dm_with("margaret").await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "the server has no direct message with margaret".to_owned(),
+    ))
+}
+
+/// Deleting one's own message asks first, and then it is gone from the
+/// server.
+async fn deletes_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!(
+        "Sent from the lab to be deleted at {}",
+        crate::seed::stamp()
+    );
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    server_hears(admin, "engineering", &said, true).await?;
+    message_menu(screen, &said).await?;
+    screen.press("Delete message").await?;
+    screen
+        .until("the window asks before deleting", |tree| {
+            tree.has("label", "Delete this message?")
+        })
+        .await?;
+    screen.press("Delete").await?;
+    screen
+        .until("the message is gone from the window", |tree| {
+            !tree.has("label", &said)
+        })
+        .await?;
+    server_hears(admin, "engineering", &said, false).await
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

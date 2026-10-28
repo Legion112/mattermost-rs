@@ -6616,8 +6616,42 @@ fn fill_message_menu(
 
         let delete = entry("user-trash-symbolic", "Delete message");
         delete.add_css_class("mmrs-destructive");
-        add(&delete, Command::Delete(post));
+        wire_delete_entry(&delete, popover, commands, &post);
+        actions.append(&delete);
     }
+}
+
+/// Connect the menu's Delete entry to the question that comes first.
+///
+/// Asked, as the webapp asks: a message deleted is gone for everybody,
+/// and the entry sits a pixel under "Edit message".
+fn wire_delete_entry(
+    delete: &gtk::Button,
+    popover: &gtk::Popover,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    post: &PostId,
+) {
+    let (commands, popover, post) = (commands.clone(), popover.clone(), post.clone());
+    delete.connect_clicked(move |button| {
+        popover.popdown();
+        let ask = adw::AlertDialog::builder()
+            .heading("Delete this message?")
+            .body("It goes for everybody, and it does not come back.")
+            .build();
+        ask.add_response("keep", "Keep");
+        ask.add_response("delete", "Delete");
+        ask.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        ask.set_default_response(Some("keep"));
+        ask.set_close_response("keep");
+        let commands = commands.clone();
+        let post = post.clone();
+        ask.connect_response(None, move |_, answer| {
+            if answer == "delete" {
+                commands.send(Command::Delete(post.clone())).ok();
+            }
+        });
+        ask.present(button.root().and_downcast::<gtk::Window>().as_ref());
+    });
 }
 
 /// Connect the menu's Edit entry to the window that does the editing.
