@@ -8385,6 +8385,7 @@ impl Ui {
         // they were, and a channel switch is the commonest way to lose
         // it.
         self.remember_drafts();
+        crate::perf::switch_began(id.as_str());
 
         // Opening a channel always starts at the newest message, and
         // closes whatever thread was open: a thread belongs to the
@@ -9658,6 +9659,13 @@ impl Ui {
         // `ListView` realizes everything it is handed, only the run that
         // actually differs is handed over at all. See docs/gtk-notes.md.
         crate::perf::marked("splice", || splice_changed(&model, &rows));
+        if crate::perf::watching_switch() {
+            let name = store
+                .channels
+                .get(channel)
+                .map_or_else(|| channel.as_str().to_owned(), |c| c.display_name.clone());
+            crate::perf::switch_drew(channel.as_str(), &name, rows.len());
+        }
         self.composer_pane.set_sensitive(true);
 
         // No bottom alignment. Resting a short channel's messages on the

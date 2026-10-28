@@ -476,8 +476,13 @@ pub async fn contained(shots: &Path, keep_data: bool, perf: Option<&str>) -> Res
             "container:mmrs-lab-app",
             "--volume",
         ])
-        .arg(format!("{}:/out", out.display()))
-        .arg(IMAGE);
+        .arg(format!("{}:/out", out.display()));
+    // Which measurement to run belongs to the client inside the
+    // container, and a container inherits nothing from this shell.
+    if let Ok(mode) = std::env::var("MMRS_PERF_MODE") {
+        docker.arg("--env").arg(format!("MMRS_PERF_MODE={mode}"));
+    }
+    docker.arg(IMAGE);
     if let Some(channel) = perf {
         println!("measuring {channel} inside {IMAGE}");
         docker.args(["perf", "--headless", "--guest", "--channel", channel]);
@@ -502,6 +507,11 @@ const IMAGE: &str = "mmrs-ui:latest";
 /// How much history the scroll measurement needs. Enough to page through
 /// several times, which is what makes the splice show up at all.
 const PERF_MESSAGES: usize = 800;
+
+/// How many times to go back and forth between two channels. Enough
+/// that the second visit to each is in the trace, which is the visit
+/// that should cost nothing.
+const SWITCHES: usize = 4;
 
 /// Build the image the scenarios run in.
 ///
@@ -559,6 +569,25 @@ pub async fn measure(channel: &str, guest: bool) -> Result<()> {
     let screen = Screen::attach_waiting("mmrs.lab").await?;
     signs_in(&screen).await?;
     screen.open_channel(channel).await?;
+
+    if std::env::var("MMRS_PERF_MODE").is_ok_and(|mode| mode == "switch") {
+        // What the complaint is actually about: not scrolling one
+        // channel but going back and forth between two, where a client
+        // that holds its own state should never wait twice for the same
+        // one. Back and forth, slowly enough that each has settled
+        // before the next click.
+        println!("switching between {channel} and Engineering; the client traces each click");
+        for _ in 0..SWITCHES {
+            for name in [&"Engineering", &channel] {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                screen.open_channel(name).await?;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        client.stop();
+        return Ok(());
+    }
+
     println!("opened {channel}; the sweep starts shortly and prints its own report");
 
     // Long enough for the delay the client waits before sweeping, the

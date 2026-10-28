@@ -113,6 +113,10 @@ pub(crate) fn sweep(scroller: &gtk::ScrolledWindow) {
     if CLAIMED.with(|c| c.replace(true)) {
         return;
     }
+    if watching_switch() {
+        // Nothing to sweep: this mode measures clicks, not scrolling.
+        return;
+    }
     if watching_startup() {
         watch_startup(scroller);
         return;
@@ -342,4 +346,60 @@ pub(crate) fn marked<T>(what: &'static str, f: impl FnOnce() -> T) -> T {
         }
     });
     out
+}
+
+/// `MMRS_PERF=switch` traces channel switches rather than frames.
+///
+/// A channel that takes five seconds to appear is one of two things,
+/// and a screencast cannot tell them apart: a main loop too busy to
+/// draw, or a window that had nothing of its own to draw and sat
+/// waiting for the server. The fixes are opposite, so the trace says
+/// which -- how many rows the click drew out of local state, and how
+/// long after it the answer from the network changed them.
+pub(crate) fn watching_switch() -> bool {
+    std::env::var("MMRS_PERF").is_ok_and(|v| v == "switch")
+}
+
+thread_local! {
+    /// The channel last clicked, when it was clicked, and how many
+    /// changes to it have been reported since.
+    static SWITCH: RefCell<Option<(String, Instant, u32)>> = const { RefCell::new(None) };
+}
+
+/// How many later changes to a channel are worth printing before the
+/// reader has the picture. The first is the one that matters; a couple
+/// more show whether it settled or kept moving.
+const CHANGES_SHOWN: u32 = 3;
+
+/// A channel was clicked.
+pub(crate) fn switch_began(channel: &str) {
+    if !watching_switch() {
+        return;
+    }
+    SWITCH.with_borrow_mut(|switch| *switch = Some((channel.to_owned(), Instant::now(), 0)));
+}
+
+/// The open channel now shows `rows` rows.
+///
+/// Called every time the list is spliced, which is once for the click
+/// itself and again for whatever arrives afterwards.
+pub(crate) fn switch_drew(channel: &str, name: &str, rows: usize) {
+    if !watching_switch() {
+        return;
+    }
+    SWITCH.with_borrow_mut(|switch| {
+        let Some((clicked, began, shown)) = switch.as_mut() else {
+            return;
+        };
+        if clicked != channel {
+            return;
+        }
+        let since = began.elapsed().as_secs_f64() * 1000.0;
+        if *shown == 0 {
+            eprintln!("switch {name}: {rows} rows from local state after {since:.0}ms");
+        } else if *shown <= CHANGES_SHOWN {
+            eprintln!("  {name}: now {rows} rows, {since:.0}ms after the click");
+        }
+        *shown += 1;
+    });
 }
