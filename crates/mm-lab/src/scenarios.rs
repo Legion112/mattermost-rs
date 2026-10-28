@@ -697,6 +697,15 @@ async fn pins_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
         screen.click_button_near("More actions", &body).await?;
         screen.press(entry).await?;
         pinned_says(admin, &post, expected).await?;
+        // And the pinned view shows it, or says there is nothing to show.
+        screen.press("Pinned in this channel").await?;
+        screen
+            .until("the pinned view agrees", move |tree| {
+                tree.has("label", "Pinned in Engineering")
+                    && tree.has("label", "Nothing pinned") != expected
+            })
+            .await?;
+        screen.open_channel("Engineering").await?;
     }
     Ok(())
 }

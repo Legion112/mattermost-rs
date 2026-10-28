@@ -39,6 +39,7 @@ const AROUND: i32 = 80;
 /// a compiler can check -- so it is asserted against a widget known to be
 /// insensitive rather than trusted.
 const STATE_SENSITIVE: u32 = 24;
+const STATE_SELECTED: u32 = 23;
 
 /// How deep to walk before deciding the tree is a loop. A GTK window is a
 /// dozen levels; sixty is far past anything real.
@@ -424,6 +425,21 @@ impl Screen {
                     );
                     continue;
                 }
+                // A row selected already answers the bus's select with a
+                // yes that means nothing to the window; the click that
+                // brings a reader back from a view to the channel they were
+                // in is a real one on the row, as a person's is.
+                let was_selected = self
+                    .states(row)
+                    .await
+                    .first()
+                    .is_some_and(|word| word & (1 << STATE_SELECTED) != 0);
+                if was_selected
+                    && let Some(text) = inside.iter().find(|n| n.role == "label" && n.name == label)
+                {
+                    self.click_into(text).await?;
+                    return Ok(());
+                }
                 let index = i32::try_from(index).unwrap_or(0);
                 // Two halves of a click. A list that selects -- the
                 // sidebar -- answers the first; a list that does not,
@@ -443,12 +459,21 @@ impl Screen {
                         .unwrap_or(false),
                     Err(_) => false,
                 };
-                if !selected && !activated {
-                    return Err(Error(format!(
-                        "the list would neither select nor activate {label:?}"
-                    )));
+                // A list row offers no action to the bus, and selecting a
+                // row that is selected already says nothing to the window
+                // -- which is the click that brings the reader back from
+                // a view to the channel they were in. A real click on the
+                // row's label does both, as a person's does.
+                if selected || activated {
+                    return Ok(());
                 }
-                return Ok(());
+                if let Some(text) = inside.iter().find(|n| n.role == "label" && n.name == label) {
+                    self.click_into(text).await?;
+                    return Ok(());
+                }
+                return Err(Error(format!(
+                    "the list would neither select nor activate {label:?}"
+                )));
             }
         }
         seen.sort();
@@ -468,7 +493,8 @@ impl Screen {
             match self.select_row_once(label).await {
                 Err(e)
                     if std::time::Instant::now() < deadline
-                        && e.0.starts_with("no list row labelled") =>
+                        && (e.0.starts_with("no list row labelled")
+                            || e.0.contains("does not exist")) =>
                 {
                     tokio::time::sleep(POLL).await;
                 }
@@ -608,8 +634,11 @@ impl Screen {
         let (wx, wy, ww, wh) = self.toplevel_box(node).await?;
         for _ in 0..12 {
             let (x, y, w, h) = self.extents(node).await?;
+            // The title bar above, the box below: what a row must clear to
+            // be hovered, and no more -- the newest message sits right over
+            // the box, and a wider margin never let it count as in view.
             let above = y < wy + 90;
-            let below = y + h > wy + wh - 120;
+            let below = y + h > wy + wh - 40;
             if !above && !below {
                 return Ok(());
             }
@@ -660,15 +689,6 @@ impl Screen {
 
     /// The first text widget holding this text.
     pub async fn text_holding(&self, needle: &str) -> Result<Node> {
-        let tree = self
-            .until(
-                &format!("a text view holding {needle:?} is on screen"),
-                |tree| {
-                    tree.iter()
-                        .any(|n| n.role == "text box" || n.role == "text")
-                },
-            )
-            .await?;
         // Every widget with text in its role, and what each said, so a
         // miss names what was there rather than nothing.
         let deadline = std::time::Instant::now() + PATIENCE;
@@ -688,10 +708,22 @@ impl Screen {
             {
                 seen.push(format!("a plain label says {:?}", label.name));
             }
-            for node in tree
+            // A label's name is its text, so it is read off the tree; only
+            // a text view has to be asked, and there are few of those. A
+            // sidebar of a hundred labels asked one by one over the bus
+            // took longer than the patience allowed.
+            // A drawn one: the thread pane keeps the root's label when it
+            // is put away, and a hover on that lands nowhere.
+            for label in tree
                 .iter()
-                .filter(|n| n.role.contains("text") || n.role == "label")
+                .filter(|n| n.role == "label" && n.name.contains(needle))
             {
+                let (_, _, w, h) = self.extents(label).await?;
+                if w > 0 && h > 0 {
+                    return Ok(label.clone());
+                }
+            }
+            for node in tree.iter().filter(|n| n.role.contains("text")) {
                 match self.text_of(node).await {
                     Ok(text) if text.contains(needle) => return Ok(node.clone()),
                     Ok(text) => seen.push(format!("{} {text:?}", node.role)),
@@ -700,7 +732,6 @@ impl Screen {
             }
             tokio::time::sleep(POLL).await;
         }
-        let _ = tree;
         Err(Error(format!(
             "no text view holds {needle:?}. Text widgets seen: {seen:#?}"
         )))

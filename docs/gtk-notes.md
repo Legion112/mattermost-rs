@@ -556,3 +556,22 @@ sensitive, because the state reflects the widget's own flag, not the
 effective one. A test that wants to know whether something is usable
 asks the widget that was actually set, or looks at what the window
 says about it.
+
+## The sidebar is patched, not rebuilt
+
+A sidebar of a hundred and thirty rows cost 37ms to rebuild, measured
+with `MMRS_LAB_BULK=120` on the switch run -- and it was rebuilt for
+every message in any channel (one row's unread moved), every status
+change (the sidebar was marked stale for a person's dot) and every
+picture landing (for one DM face). On a real account that is a 37ms
+stall on the main thread several times a minute, all day.
+
+Now a redraw compares the sidebar's *shape* -- the same rows in the
+same places under the same headings, with a folded heading's figures
+counted as shape -- and when it is unchanged, gives each row whose
+state moved a new line (`channel_line`) and leaves the `ListBoxRow`,
+and so the selection, alone: `sidebar:patch` is 0.3ms. A person's
+status or picture moving repaints their DM row alone
+(`sidebar:person`, 0.2ms) without marking anything stale. Only a
+change of shape -- a channel joined or archived, a category folded, the
+unread filter -- rebuilds the list.

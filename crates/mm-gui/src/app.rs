@@ -7409,6 +7409,31 @@ const THREAD_PANE_WIDTH: i32 = 380;
 
 /// A category heading: not selectable, so arrow keys and the first-channel
 /// fallback walk straight past it.
+/// Whether two sidebars have the same rows in the same places under the
+/// same headings, whatever the rows say: the shape a redraw can patch
+/// rather than rebuild. A heading folded shut shows only what is unread,
+/// and what it says of what is hidden, so its figures are shape too.
+fn same_shape(
+    drawn: &[mm_core::SidebarSection],
+    now: &[mm_core::SidebarSection],
+    open: Option<&ChannelId>,
+) -> bool {
+    drawn.len() == now.len()
+        && drawn.iter().zip(now).all(|(a, b)| {
+            a.id == b.id
+                && a.display_name == b.display_name
+                && a.collapsed == b.collapsed
+                && a.muted == b.muted
+                && a.rows.is_empty() == b.rows.is_empty()
+                && (!a.collapsed
+                    || (a.is_unread() == b.is_unread() && a.mentions() == b.mentions()))
+                && a.visible_rows(open)
+                    .iter()
+                    .map(|r| &r.channel)
+                    .eq(b.visible_rows(open).iter().map(|r| &r.channel))
+        })
+}
+
 fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     line.set_margin_top(10);
@@ -9655,15 +9680,17 @@ impl Ui {
         }
         // A person changing -- their custom status, mostly -- is drawn on
         // the rows on screen without rebuilding them.
-        if changes
-            .iter()
-            .any(|change| matches!(change, mm_core::Change::User(_)))
-        {
+        for change in &changes {
+            let mm_core::Change::User(user) = change else {
+                continue;
+            };
             self.refresh_moods();
-            // The sidebar shows it after a conversation's name, and the
-            // reader's own sits beside their dot; neither is part of what
-            // the sidebar compares against, so say so.
-            self.sidebar_stale.set(true);
+            // The sidebar shows a person's status after their conversation's
+            // name, and the reader's own sits beside their dot; neither is
+            // part of what the sidebar compares against, and a presence
+            // or status moving must not rebuild a sidebar of a hundred
+            // rows -- it did, at 40ms a time, all day. Their row alone.
+            self.repaint_rows_of(user);
             self.refresh_presence();
         }
         // A post saved or unsaved from another client: the saved list on
@@ -10476,7 +10503,11 @@ impl Ui {
         None
     }
 
-    fn channel_row(&self, row: &mm_core::SidebarRow) -> gtk::ListBoxRow {
+    /// What a sidebar row shows: the mark, the name, and whatever the
+    /// channel's state adds after it. Built apart from the row so a row
+    /// whose state moved can be given a new line and keep its place --
+    /// and its selection -- in the list.
+    fn channel_line(&self, row: &mm_core::SidebarRow) -> gtk::Box {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         line.append(&self.channel_mark(row));
         let name = gtk::Label::builder()
@@ -10541,6 +10572,11 @@ impl Ui {
             line.append(&gtk::Image::from_icon_name("audio-volume-muted-symbolic"));
         }
 
+        line
+    }
+
+    fn channel_row(&self, row: &mm_core::SidebarRow) -> gtk::ListBoxRow {
+        let line = self.channel_line(row);
         let list_row = gtk::ListBoxRow::builder().child(&line).build();
         // The channel id travels on the widget name, so selection does not
         // need a parallel index that could drift from the sidebar.
@@ -10596,14 +10632,100 @@ impl Ui {
         crate::perf::marked("refresh_sidebar", || self.refresh_sidebar_inner());
     }
 
+    /// Give the sidebar rows that show a person -- their direct message
+    /// -- a new line, for a presence or a custom status that moved.
+    fn repaint_rows_of(&self, user: &UserId) {
+        let drawn = self.drawn_sidebar.borrow();
+        let Some(sections) = drawn.as_ref() else {
+            return;
+        };
+        let theirs: HashMap<&ChannelId, &mm_core::SidebarRow> = sections
+            .iter()
+            .flat_map(|s| &s.rows)
+            .filter(|r| r.avatar_user.as_ref() == Some(user))
+            .map(|r| (&r.channel, r))
+            .collect();
+        if theirs.is_empty() {
+            return;
+        }
+        crate::perf::marked("sidebar:person", || {
+            let mut child = self.sidebar.first_child();
+            while let Some(row) = child {
+                child = row.next_sibling();
+                let Some(list_row) = row.downcast_ref::<gtk::ListBoxRow>() else {
+                    continue;
+                };
+                let name = list_row.widget_name();
+                if let Some(theirs) = theirs.get(&ChannelId::new(name.as_str())) {
+                    list_row.set_child(Some(&self.channel_line(theirs)));
+                }
+            }
+        });
+    }
+
+    /// Give every row whose state moved a new line, in place.
+    fn patch_sidebar(
+        &self,
+        drawn: &[mm_core::SidebarSection],
+        now: &[mm_core::SidebarSection],
+        open: Option<&ChannelId>,
+    ) {
+        let was: HashMap<&ChannelId, &mm_core::SidebarRow> = drawn
+            .iter()
+            .flat_map(|s| s.visible_rows(open))
+            .map(|r| (&r.channel, r))
+            .collect();
+        let changed: HashMap<&ChannelId, &mm_core::SidebarRow> = now
+            .iter()
+            .flat_map(|s| s.visible_rows(open))
+            .filter(|r| was.get(&r.channel) != Some(r))
+            .map(|r| (&r.channel, r))
+            .collect();
+        if changed.is_empty() {
+            return;
+        }
+        let mut child = self.sidebar.first_child();
+        while let Some(row) = child {
+            child = row.next_sibling();
+            let Some(list_row) = row.downcast_ref::<gtk::ListBoxRow>() else {
+                continue;
+            };
+            let name = list_row.widget_name();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(fresh) = changed.get(&ChannelId::new(name.as_str())) {
+                list_row.set_child(Some(&self.channel_line(fresh)));
+            }
+        }
+    }
+
     fn refresh_sidebar_inner(&self) {
         self.refresh_badge();
         let sections = self.store.borrow().sidebar_sections();
         // Nothing to redraw, and redrawing anyway would destroy the row
         // under the reader's cursor.
-        if !self.sidebar_stale.replace(false)
-            && self.drawn_sidebar.borrow().as_ref() == Some(&sections)
+        let stale = self.sidebar_stale.replace(false);
+        if !stale && self.drawn_sidebar.borrow().as_ref() == Some(&sections) {
+            return;
+        }
+        // The same rows in the same places, with some of them changed --
+        // a message arriving somewhere moves one row's unread -- is the
+        // common case, and rebuilding a sidebar of a hundred rows for it
+        // cost 40ms on the main thread every time. Those rows get a new
+        // line each and keep their place; only a change of shape -- a
+        // channel joined, a category folded -- rebuilds the list.
+        let keep = self.selected.borrow().clone();
+        let drawn = self.drawn_sidebar.borrow().clone();
+        if !stale
+            && !self.sidebar_unread_only.get()
+            && let Some(drawn) = drawn
+            && same_shape(&drawn, &sections, keep.as_ref())
         {
+            crate::perf::marked("sidebar:patch", || {
+                self.patch_sidebar(&drawn, &sections, keep.as_ref());
+            });
+            self.drawn_sidebar.replace(Some(sections));
             return;
         }
         self.drawn_sidebar.replace(Some(sections.clone()));
@@ -10630,8 +10752,6 @@ impl Ui {
                     .ok();
             }
         }
-        let keep = self.selected.borrow().clone();
-
         while let Some(child) = self.sidebar.first_child() {
             self.sidebar.remove(&child);
         }
@@ -11415,11 +11535,12 @@ impl Ui {
         self.avatars.borrow_mut().insert(user.clone(), texture);
         // The rows on screen wear it at once, without being rebuilt.
         self.refresh_faces(user);
-        // A face is drawn in the sidebar for a DM, and the rows it is
-        // built from have not changed, so say so explicitly. The thread
-        // pane and the member list build their faces by hand and are
-        // redrawn whole, which the back-off keeps cheap.
-        self.sidebar_stale.set(true);
+        // A face is drawn in the sidebar for a DM: that row alone gets a
+        // new line, since marking the sidebar stale rebuilt a hundred rows
+        // for one picture, 37ms a time, once per person at startup. The
+        // thread pane and the member list build their faces by hand and
+        // are redrawn whole, which the back-off keeps cheap.
+        self.repaint_rows_of(user);
         self.redraw_soon();
     }
 
