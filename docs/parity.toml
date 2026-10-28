@@ -796,7 +796,12 @@ arithmetic is in `mm_md::wrap`, where the awkward cases are settled by \
 tests rather than by trying them in the window, and it counts characters \
 rather than bytes so a Cyrillic word is not sliced in half. Verified on a \
 live account: Ctrl+B made `**bold**`, Ctrl+B again took it back, and \
-Ctrl+Shift+C made a code span of it.
+Ctrl+Shift+C made a code span of it -- and in the lab, by \
+`formats-with-the-keys`: Ctrl+B round a selected word and off again with the \
+markers inside the selection, and the same for Ctrl+Shift+C. Everything is \
+reselected before each chord there: under keys faked over XTEST the \
+selection the window keeps inside new markers was sometimes gone by the \
+next chord, which a desktop keyboard does not do.
 
 The formatting bar is built too, under the box the way Mattermost draws it: \
 bold, italic, strikethrough, heading, link, code, bulleted and numbered \
@@ -1101,7 +1106,10 @@ toolbar shown beside it; the gesture is taken in the capture phase so the \
 text underneath does not put up its own copy-and-paste menu over it. \
 Lab-verified by `opens-the-menu-with-a-right-click`: a right-click on the \
 seeded root brought the menu up, and the entry pressed in it moved the \
-post on and off the server's saved list."""
+post on and off the server's saved list. Copy text and Copy link are \
+lab-verified by `copies-from-the-menu`, which reads the X clipboard the way \
+any other client would -- asking the owner to convert `CLIPBOARD` to \
+`UTF8_STRING` -- and finds the message as written, and then its permalink."""
 
 [[feature]]
 id       = "channels.info_and_members"
@@ -1478,7 +1486,11 @@ clone and an artefact.
 The control stanza is rendered in `mm-desktop`, inside the coverage gate, \
 because what a package claims about itself is a decision and a wrong one \
 fails at install time on somebody else's machine with a dependency solver's \
-error message. GTK, libadwaita and GtkSourceView are `Depends`; the \
+error message. GTK, libadwaita, GtkSourceView and the Adwaita icon theme are \
+`Depends` -- the theme because every button in the window is one of its \
+symbolic icons, and GTK draws a broken-image placeholder for an icon it \
+cannot find, which is what the lab's container showed before the theme \
+was put in it; the \
 dictionaries and the GNOME `AppIndicator` extension are `Recommends`, since \
 without them the client still runs -- it just draws no spelling underlines \
 and has no tray. Dependencies are named rather than derived with \

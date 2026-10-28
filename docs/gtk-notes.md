@@ -557,6 +557,44 @@ effective one. A test that wants to know whether something is usable
 asks the widget that was actually set, or looks at what the window
 says about it.
 
+**A key goes to the window under the pointer.** The lab hands the
+toplevel under the pointer the keyboard before each chord, which is
+right for a window and wrong for a dialog opened from a menu: the
+pointer is still on the menu entry in the main window, and Return
+meant for the picker went to the conversation behind it. A click into
+the dialog's box first is what moves the pointer.
+
+**The unfiltered list has the name in it too.** A picker fills its
+list with everything before any letter is typed, and the search entry
+reports a change a moment after the text is set; a test that waits
+for "Design" to be offered finds it at once in the unfiltered list,
+and Return then acts on whatever row was first -- a message was
+forwarded to Archive Practice this way. Wait for the filtered list:
+the name offered *and* something the filter should have removed gone.
+
+**A selection kept across faked chords is not kept.** The formatting
+keys leave the word selected inside its new markers, and on a desktop
+keyboard the next chord finds it there -- Ctrl+B twice was verified
+live. Under keys faked over XTEST the selection was sometimes gone by
+the next chord, with the caret where the selection had started; it was
+not any handler of this window's (none moves the caret), and the
+buttons on the formatting bar, which do not go through the keyboard,
+keep the selection every time. The keys scenario reselects before each
+chord and tests the keys, not the lab's keyboard.
+
+**A right-click on a text view is the text view's.** A `GtkTextView`
+puts up its own copy-and-paste menu on the secondary button, and a
+gesture on the row around it sees the press only after. In the capture
+phase and claimed on press, the row's gesture takes it first, and the
+message menu comes up alone.
+
+**The clipboard is read the X way.** A window of the lab's own asks
+the selection owner -- the client under test, once it has copied -- to
+convert `CLIPBOARD` to `UTF8_STRING` into a property, and reads the
+property when `SelectionNotify` says it is there. GTK answers that
+request like any other client, so Copy text and Copy link are checked
+against what a paste would give.
+
 ## The sidebar is patched, not rebuilt
 
 A sidebar of a hundred and thirty rows cost 37ms to rebuild, measured

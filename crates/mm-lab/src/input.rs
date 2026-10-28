@@ -280,3 +280,76 @@ pub fn scroll_at(x: i32, y: i32, up: bool, ticks: u32) -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(60));
     Ok(())
 }
+
+/// What the clipboard holds, as text.
+///
+/// Asked the X way: a window of this process asks the selection's owner
+/// -- the client under test, which GTK makes the owner when it copies
+/// -- to convert `CLIPBOARD` to `UTF8_STRING` into a property on that
+/// window, and reads the property when the owner says it is there. A
+/// clipboard with nothing in it, or nothing textual, answers `None`.
+pub fn clipboard_text() -> Result<Option<String>> {
+    let (conn, root) = connect()?;
+    let atom = |name: &str| -> Result<xproto::Atom> {
+        conn.intern_atom(false, name.as_bytes())
+            .map_err(|e| Error(format!("naming {name}: {e}")))?
+            .reply()
+            .map(|r| r.atom)
+            .map_err(|e| Error(format!("naming {name}: {e}")))
+    };
+    let (clipboard, utf8, slot) = (
+        atom("CLIPBOARD")?,
+        atom("UTF8_STRING")?,
+        atom("MMRS_PASTE")?,
+    );
+    let window = conn
+        .generate_id()
+        .map_err(|e| Error(format!("a window id for the clipboard: {e}")))?;
+    let screen = &conn.setup().roots[0];
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        window,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        xproto::WindowClass::INPUT_OUTPUT,
+        screen.root_visual,
+        &xproto::CreateWindowAux::new().event_mask(xproto::EventMask::PROPERTY_CHANGE),
+    )
+    .map_err(|e| Error(format!("a window for the clipboard: {e}")))?;
+    conn.convert_selection(window, clipboard, utf8, slot, x11rb::CURRENT_TIME)
+        .map_err(|e| Error(format!("asking for the clipboard: {e}")))?;
+    conn.flush()
+        .map_err(|e| Error(format!("flushing the display: {e}")))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let answer = loop {
+        if std::time::Instant::now() > deadline {
+            return Err(Error("nobody answered for the clipboard".to_owned()));
+        }
+        match conn
+            .poll_for_event()
+            .map_err(|e| Error(format!("waiting for the clipboard: {e}")))?
+        {
+            Some(x11rb::protocol::Event::SelectionNotify(notify)) => break notify,
+            Some(_) => {}
+            None => std::thread::sleep(std::time::Duration::from_millis(20)),
+        }
+    };
+    if answer.property == x11rb::NONE {
+        return Ok(None);
+    }
+    let held = conn
+        .get_property(true, window, slot, utf8, 0, u32::MAX)
+        .map_err(|e| Error(format!("reading the clipboard: {e}")))?
+        .reply()
+        .map_err(|e| Error(format!("reading the clipboard: {e}")))?;
+    let _ = conn.destroy_window(window);
+    let _ = conn.flush();
+    if held.type_ != utf8 {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&held.value).into_owned()))
+}

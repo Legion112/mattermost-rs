@@ -17,6 +17,12 @@ const DEPENDS: &[&str] = &[
     "libgtk-4-1",
     "libadwaita-1-0",
     "libgtksourceview-5-0",
+    // Every button in the window is a symbolic icon from this theme,
+    // and GTK draws a broken-image placeholder for one it cannot find
+    // -- seen in the lab's container before the theme was put in it,
+    // where the whole toolbar was placeholders. A desktop has it; a
+    // container or a bare server does not.
+    "adwaita-icon-theme",
 ];
 
 /// What makes it work properly, without which it still runs.

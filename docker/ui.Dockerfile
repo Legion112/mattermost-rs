@@ -27,9 +27,12 @@ FROM ubuntu:24.04
 #   dbus-x11      dbus-run-session, which starts one around the test
 #   ca-certificates  so the client can reach an https server, if ever asked
 #   fonts-dejavu-core  or every screenshot of a failure is a grid of boxes
+#   adwaita-icon-theme  or every icon in those screenshots is the broken-image
+#                       placeholder, and a wrong icon name can never be seen
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       xvfb at-spi2-core dbus-daemon dbus-x11 ca-certificates fonts-dejavu-core \
+      adwaita-icon-theme \
  && rm -rf /var/lib/apt/lists/*
 
 # The package and its dependencies. Copied separately from the apt layer

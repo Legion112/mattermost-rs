@@ -48,6 +48,8 @@ fn dictionaries_and_the_tray_are_recommended_not_required() {
 
     assert!(depends.contains("libgtk-4-1"), "{depends}");
     assert!(depends.contains("libadwaita-1-0"), "{depends}");
+    // The icons, without which every button is a broken-image placeholder.
+    assert!(depends.contains("adwaita-icon-theme"), "{depends}");
     // Without GTK it cannot start; without a dictionary it just draws
     // no underlines.
     assert!(!depends.contains("hunspell"), "{depends}");

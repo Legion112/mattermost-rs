@@ -35,6 +35,7 @@ pub const SCENARIOS: &[&str] = &[
     "shows-who-is-typing",
     "follows-edits-reactions-and-deletions",
     "shows-an-unread-and-clears-it",
+    "filters-the-sidebar-to-unreads",
     "shows-a-new-direct-message",
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
@@ -42,6 +43,7 @@ pub const SCENARIOS: &[&str] = &[
     "sends-a-draft-with-its-file",
     "sends-a-message",
     "formats-from-the-toolbar",
+    "formats-with-the-keys",
     "completes-a-mention-with-tab",
     "completes-an-emoji-with-tab",
     "opens-a-dm-from-the-switcher",
@@ -55,6 +57,7 @@ pub const SCENARIOS: &[&str] = &[
     "saves-from-the-menu",
     "opens-the-menu-with-a-right-click",
     "forwards-from-the-menu",
+    "copies-from-the-menu",
     "marks-unread-from-the-menu",
     "replies-in-the-thread-box",
     "jumps-with-the-switcher",
@@ -156,6 +159,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "shows-who-is-typing" => who_is_typing(screen, admin).await,
         "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
         "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
+        "filters-the-sidebar-to-unreads" => filters_sidebar_to_unreads(screen, admin).await,
         "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
         "mutes-and-unmutes" => mutes(screen, admin).await,
         "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
@@ -163,6 +167,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "sends-a-draft-with-its-file" => draft_with_file(screen, admin).await,
         "sends-a-message" => sends_a_message(screen, admin).await,
         "formats-from-the-toolbar" => formats_from_toolbar(screen, admin).await,
+        "formats-with-the-keys" => formats_with_keys(screen).await,
         "completes-a-mention-with-tab" => completes_mention(screen).await,
         "completes-an-emoji-with-tab" => completes_emoji(screen).await,
         "opens-a-dm-from-the-switcher" => dm_from_switcher(screen, admin).await,
@@ -176,6 +181,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "saves-from-the-menu" => saves_from_menu(screen, admin).await,
         "opens-the-menu-with-a-right-click" => right_click_menu(screen, admin).await,
         "forwards-from-the-menu" => forwards_from_menu(screen, admin).await,
+        "copies-from-the-menu" => copies_from_menu(screen, admin).await,
         "marks-unread-from-the-menu" => marks_unread_from_menu(screen, admin).await,
         "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
@@ -402,6 +408,39 @@ async fn unread_and_clears(screen: &Screen, admin: &Admin) -> Result<()> {
     )))
 }
 
+/// The sidebar's unread filter hides what is read and keeps what is
+/// not -- and the open channel, whatever its state.
+async fn filters_sidebar_to_unreads(screen: &Screen, admin: &Admin) -> Result<()> {
+    // Town Square read, Engineering read and open.
+    screen.open_channel("Town Square").await?;
+    screen.open_channel("Engineering").await?;
+    admin
+        .say_as("ada", "design", "Something new in Design, for the filter.")
+        .await?;
+    screen
+        .until("the Design row is unread", |tree| {
+            matches!(badge_after(tree, "Design"), Some("1" | "●"))
+        })
+        .await?;
+    screen.press("Show unread channels only").await?;
+    screen
+        .until("only the unread and the open channel are left", |tree| {
+            !tree.has("label", "Town Square")
+                && tree.has("label", "Design")
+                && tree.has("label", "Engineering")
+        })
+        .await?;
+    screen.press("Show unread channels only").await?;
+    screen
+        .until("the whole sidebar is back", |tree| {
+            tree.has("label", "Town Square")
+        })
+        .await?;
+    // Read again, so the next scenario starts where this one did.
+    screen.open_channel("Design").await?;
+    screen.open_channel("Engineering").await
+}
+
 /// A first message from somebody with no conversation yet makes a
 /// row in the sidebar, and the row opens on the message.
 async fn new_direct_message(screen: &Screen, admin: &Admin) -> Result<()> {
@@ -582,6 +621,36 @@ async fn formats_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
     // Nothing left in the box for the draft scenarios to trip over.
     screen.type_into(&composer, "").await?;
     Ok(())
+}
+
+/// The formatting keys: Ctrl+B round a selection and off again, and
+/// Ctrl+Shift+C for a code span, which are the same arithmetic as the
+/// bar's buttons reached without leaving the keyboard.
+///
+/// Everything is selected before each chord. The window keeps the word
+/// selected inside its new markers, and on a desktop the second Ctrl+B
+/// finds it there; under keys faked over XTEST that selection was
+/// sometimes gone by the next chord, so this is about the keys and the
+/// markers, not about what the lab's input does to a selection.
+async fn formats_with_keys(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "shout").await?;
+    screen.click_into(&composer).await?;
+    for (keysym, modifiers, on) in [
+        (0x62, &[key::CONTROL][..], "**shout**"),
+        (0x43, &[key::CONTROL, key::SHIFT][..], "`shout`"),
+    ] {
+        screen.press_key(0x61, &[key::CONTROL])?;
+        screen.press_key(keysym, modifiers)?;
+        composer_says(screen, &composer, on).await?;
+        // Selected with its markers this time, which is the other way
+        // the markers are found: inside the selection rather than round it.
+        screen.press_key(0x61, &[key::CONTROL])?;
+        screen.press_key(keysym, modifiers)?;
+        composer_says(screen, &composer, "shout").await?;
+    }
+    screen.type_into(&composer, "").await
 }
 
 /// Wait for the composer to hold exactly `expected`.
@@ -1268,6 +1337,44 @@ async fn forwards_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Copy text and Copy link from the message menu put what they say on
+/// the clipboard: the message as written, and its permalink.
+async fn copies_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    let link = format!("{}/{}/pl/{post}", crate::stack::URL, crate::seed::TEAM);
+    for (entry, expected) in [
+        (
+            "Copy text",
+            "Morning. The nightly run went red again — `mm-core` store tests, not the transport \
+             this time."
+                .to_owned(),
+        ),
+        ("Copy link", link),
+    ] {
+        message_menu(screen, ROOT).await?;
+        screen.press(entry).await?;
+        clipboard_says(&expected).await?;
+    }
+    Ok(())
+}
+
+/// Wait for the clipboard to hold exactly `expected`.
+async fn clipboard_says(expected: &str) -> Result<()> {
+    let mut last = None;
+    for _ in 0..25 {
+        last = crate::input::clipboard_text()?;
+        if last.as_deref() == Some(expected) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the clipboard holds {last:?}, not {expected:?}"
+    )))
 }
 
 /// Save and unsave from the message menu, with the server's saved list
