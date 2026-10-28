@@ -391,3 +391,36 @@ about 1.4 ms a row it is 150 ms for a hundred. If it ever matters, the
 thing to find out is why `ListView` does not virtualise here — the obvious
 candidates (scroll policy, `hscrollbar-policy: never`, bottom alignment)
 have all been ruled out by measurement.
+
+## Tooltips are not free
+
+`gtk_widget_set_tooltip_text` costs **5.79ms a call** on a real GNOME
+desktop and **0.1ms** in the test container. Measured on both, the same
+day, with the same binary.
+
+That difference is why a channel took most of a second to draw on the
+machine it was reported from while the lab said 60ms, and why a day of
+looking at splices, windows and row counts found nothing: every
+measurement in the container was honest and none of it could see this.
+
+A message row used to set three per bind -- one per reaction chip, one
+on the clock, one on the presence dot -- so binding one row cost 5.09ms
+there against 0.42ms here, and ninety-four chips in one channel cost
+544ms of a 648ms draw.
+
+What to do instead, in order of preference:
+
+1. **Answer `query-tooltip`.** Set `has-tooltip` once, where the widget
+   is built, and work the text out when the pointer stops. A `ListItem`
+   captured in the handler outlives every row that passes through the
+   widget, so it is the handle to whatever is showing now.
+2. **One handler for many children.** A row of reaction chips has one,
+   and finds the chip under the point with `compute_bounds`. The chips
+   carry their emoji as their widget name.
+3. **Set it once.** A profile card or a roster row is built when it is
+   opened and thrown away after; a tooltip written in there is paid for
+   once.
+
+The rule: nothing that runs per row per bind may call
+`set_tooltip_text`. `MMRS_PERF=switch` prints the per-part breakdown
+that catches it -- `bind:one-chip` was the mark that named it.
