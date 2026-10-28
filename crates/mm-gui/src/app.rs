@@ -5988,6 +5988,19 @@ const CHANNELS_KEPT_DRAWN: usize = 12;
 /// small enough that a `splice` is cheap.
 const CHANNEL_WINDOW: usize = 60;
 
+/// How many rows a channel opens with, before it grows to
+/// `CHANNEL_WINDOW`.
+///
+/// Enough to fill a tall window with a little over, and no more,
+/// because every one of them is a widget set built while the reader
+/// waits.
+const OPENING_WINDOW: usize = 20;
+
+/// How soon after opening the rest of the window arrives. After the
+/// scroll to the newest message, so the two do not fight over where the
+/// list is resting.
+const WINDOW_GROWS_IN: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How much further back to show when the reader reaches the top and
 /// the posts are already held. A page, so it matches what a fetch would
 /// have added.
@@ -8436,7 +8449,23 @@ impl Ui {
         // A channel opens at its newest page however much of it is held,
         // which is what makes opening one cost the same whether it was
         // read for the first time or scrolled through all morning.
-        self.shown_window.set(CHANNEL_WINDOW);
+        // A channel opens on enough to fill the window and grows to its
+        // full window a moment later. `ListView` builds a widget set
+        // for every row it is handed, so the opening count is what the
+        // click costs: sixty rows is 48ms in the lab and most of a
+        // second on a real account, and fifty of them are below the
+        // fold. The rest arrives once the first frame is up, where
+        // nobody is waiting on it.
+        //
+        // Only for a channel being drawn for the first time. One that
+        // still has its list has its rows already and nothing to
+        // rebuild, and narrowing it would throw them away.
+        let fresh = !self.drawn.borrow().iter().any(|d| &d.channel == id);
+        self.shown_window.set(if fresh {
+            OPENING_WINDOW
+        } else {
+            CHANNEL_WINDOW
+        });
         crate::perf::marked("open:model", || self.show_model_for(id));
         crate::perf::marked("open:draft", || self.restore_draft(id));
         crate::perf::marked("open:pane", || self.show_pane(&Pane::Channel));
@@ -8446,6 +8475,21 @@ impl Ui {
         // was most of what opening a channel felt like. The answer,
         // when it comes, splices in only what differs.
         self.refresh_posts(id);
+        if fresh {
+            let ui = self.clone();
+            let grown = id.clone();
+            glib::timeout_add_local_once(WINDOW_GROWS_IN, move || {
+                // Unless the reader has moved on, or has already
+                // widened it themselves by scrolling back.
+                if ui.selected.borrow().as_ref() != Some(&grown)
+                    || ui.shown_window.get() >= CHANNEL_WINDOW
+                {
+                    return;
+                }
+                ui.shown_window.set(CHANNEL_WINDOW);
+                ui.refresh_posts(&grown);
+            });
+        }
         // The caret belongs in the composer the moment a channel opens,
         // the way Mattermost puts it there: clicking a channel is how a
         // reader starts writing in it, and the alternative is a second
