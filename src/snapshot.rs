@@ -7,13 +7,21 @@
 //! names, and the preferences — is small, changes slowly, and is exactly
 //! the sort of thing worth keeping.
 //!
-//! It is a **cache, not a source of truth**: it is painted immediately and
-//! then overwritten by the sync that follows. The store's joins make that
-//! safe, since applying fresh data over stale data is the same as applying
-//! it over nothing. The one thing a merge cannot do is *remove*, so the
-//! sync ends by pruning channels the snapshot had and the server does not.
+//! It holds the **conversations** too, not only the sidebar. A client
+//! that keeps its own copy of what the server told it can be opened and
+//! used; one that keeps nothing has to ask for everything first, and
+//! every channel clicked in those first seconds is a round trip the
+//! reader waits through. What is written here is what the window draws
+//! from on the next launch, before a single request is made.
+//!
+//! It is still **not a source of truth**: it is painted immediately and
+//! then reconciled with the sync that follows. The store's joins make
+//! that safe, since applying fresh data over stale data is the same as
+//! applying it over nothing. The one thing a merge cannot do is
+//! *remove*, so the sync ends by pruning channels the snapshot had and
+//! the server does not.
 
-use mm_types::{CategoryList, Channel, ChannelMember, Preference, Team, User};
+use mm_types::{CategoryList, Channel, ChannelId, ChannelMember, Post, Preference, Team, User};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -34,10 +42,25 @@ pub(crate) struct Snapshot {
     /// from. Without them the first channel opened on a cold start asks
     /// the server for the wrong thing.
     pub config: std::collections::BTreeMap<String, String>,
+    /// The newest messages of every channel this client has been told
+    /// about, by channel.
+    ///
+    /// Bounded per channel by `KEPT_PER_CHANNEL`: enough to fill a
+    /// window on opening, not an archive. The point is that opening a
+    /// channel after a restart draws immediately and asks afterwards.
+    pub conversations: std::collections::BTreeMap<ChannelId, Vec<Post>>,
 }
 
+/// How many messages of each channel are written down.
+///
+/// A screenful and a bit, matching what the window shows when a channel
+/// opens. More would make the file bigger and the launch slower for
+/// messages nobody is going to scroll back to before the server has
+/// answered anyway.
+pub(crate) const KEPT_PER_CHANNEL: usize = 60;
+
 /// The shape this code writes and will read back.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 fn path(server: &str, user: &str) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")

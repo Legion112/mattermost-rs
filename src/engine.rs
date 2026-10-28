@@ -58,6 +58,16 @@ struct Active {
     /// means handing the frame to that task rather than writing it
     /// from here.
     typing: tokio::sync::mpsc::UnboundedSender<(ChannelId, String)>,
+    /// What this client knows, written down between launches.
+    ///
+    /// Held here because the engine is what the server talks to: every
+    /// page it fetches and every message the socket brings goes through
+    /// it. The window's store is still the one that *decides* anything;
+    /// this is a copy of what arrived, so the next launch can draw
+    /// before it asks.
+    held: Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    /// Whether `held` has anything in it that is not on disk yet.
+    dirty: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Active {
@@ -248,12 +258,17 @@ fn spawn_sync(a: &Active, events: &async_channel::Sender<Event>) {
     let events = events.clone();
     let collapsed = Arc::clone(&a.collapsed);
     let warmed = Arc::clone(&a.warmed);
+    let held = Arc::clone(&a.held);
+    let dirty = Arc::clone(&a.dirty);
     tokio::spawn(async move {
-        let channels = sync(&client, &session, &events, &collapsed).await;
+        let channels = sync(&client, &session, &events, &collapsed, &held, &dirty).await;
         // Only once the reader has everything they asked for. Warming
         // first would put speculative requests in front of the sidebar.
         let collapsed = collapsed.load(std::sync::atomic::Ordering::Relaxed);
-        warm_channels(&client, &warmed, collapsed, channels, &events).await;
+        warm_channels(
+            &client, &warmed, collapsed, channels, &events, &held, &dirty,
+        )
+        .await;
     });
 }
 
@@ -480,7 +495,14 @@ async fn follow_permalink(a: &Active, post: &PostId, events: &async_channel::Sen
     let channel = found.channel_id.clone();
     let root = found.thread_root().clone();
     let collapsed = a.collapsed.load(std::sync::atomic::Ordering::Relaxed);
-    open_channel(&a.client, &channel, events, collapsed).await;
+    open_channel(
+        &a.client,
+        &channel,
+        events,
+        collapsed,
+        Some((&a.held, &a.dirty)),
+    )
+    .await;
     let _ = events.send(Event::Opened(channel)).await;
     if let Ok(page) = fetch(
         &a.client,
@@ -577,6 +599,7 @@ async fn open_direct(a: &Active, them: &UserId, events: &async_channel::Sender<E
                 &channel.id,
                 events,
                 a.collapsed.load(std::sync::atomic::Ordering::Relaxed),
+                Some((&a.held, &a.dirty)),
             )
             .await;
             let _ = events.send(Event::Opened(channel.id)).await;
@@ -724,6 +747,8 @@ async fn warm_channels(
     collapsed: bool,
     channels: Vec<mm_types::Channel>,
     events: &async_channel::Sender<Event>,
+    held: &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    dirty: &Arc<std::sync::atomic::AtomicBool>,
 ) {
     let mut wanted: Vec<mm_types::Channel> = channels
         .into_iter()
@@ -755,12 +780,17 @@ async fn warm_channels(
         };
         let client = client.clone();
         let events = events.clone();
+        let held = Arc::clone(held);
+        let dirty = Arc::clone(dirty);
         tokio::spawn(async move {
             let request = rest::posts_for_channel(&channel.id, &PostQuery::first(), collapsed);
             // Silent on failure, unlike a click: nobody asked for this,
             // so nobody should be told it did not work. The channel is
             // simply fetched the ordinary way when it is opened.
             if let Ok(page) = fetch(&client, &request, rest::parse_post_list).await {
+                // Written down as well as drawn: this is the whole of
+                // why a second launch has every channel in hand.
+                keep(&held, &dirty, &channel.id, &page).await;
                 let _ = events
                     .send(Event::Posts {
                         channel: channel.id.clone(),
@@ -855,8 +885,10 @@ fn spawn_open_channel(a: &Active, channel: ChannelId, events: &async_channel::Se
     let client = a.client.clone();
     let events = events.clone();
     let collapsed = a.collapsed();
+    let held = Arc::clone(&a.held);
+    let dirty = Arc::clone(&a.dirty);
     tokio::spawn(async move {
-        open_channel(&client, &channel, &events, collapsed).await;
+        open_channel(&client, &channel, &events, collapsed, Some((&held, &dirty))).await;
     });
 }
 
@@ -993,6 +1025,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             .await
             {
                 Ok(page) => {
+                    remember_page(a, &channel, &page).await;
                     let _ = events.send(Event::OlderPosts { channel, page }).await;
                 }
                 Err(e) => {
@@ -1313,11 +1346,19 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
     // polled. The server pings every 60s and closes after 100s without a pong,
     // so a connection nobody is reading dies while looking healthy.
     let (typing, typing_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Loaded before anything is fetched, so the window has the account
+    // as this client last saw it rather than an empty one.
+    let held = Arc::new(tokio::sync::Mutex::new(
+        crate::snapshot::load(&session.server, &session.user_id).unwrap_or_default(),
+    ));
+    let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    keep_writing_down(&held, &dirty, &session);
     let socket = tokio::spawn(socket_loop(
         client.clone(),
         session.token.clone(),
         events.clone(),
         typing_rx,
+        Some((Arc::clone(&held), Arc::clone(&dirty))),
     ));
 
     let tray = spawn_tray(events).await;
@@ -1331,7 +1372,83 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         warmed: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
         tray,
         typing,
+        held,
+        dirty,
     })
+}
+
+/// How often the local state is written down.
+///
+/// Often enough that a client killed outright loses seconds of it, far
+/// enough apart that a busy channel does not turn into a stream of
+/// writes. Nothing is lost that the server does not still have.
+const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Write the local state down whenever it has changed.
+///
+/// On its own task, and the write itself on a blocking one: this is a
+/// few megabytes of JSON and the command loop should not stop for it.
+fn keep_writing_down(
+    held: &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    dirty: &Arc<std::sync::atomic::AtomicBool>,
+    session: &Session,
+) {
+    let held = Arc::clone(held);
+    let dirty = Arc::clone(dirty);
+    let (server, user) = (session.server.clone(), session.user_id.clone());
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(SAVE_EVERY);
+        loop {
+            tick.tick().await;
+            if !dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
+            let written = held.lock().await.clone();
+            let (server, user) = (server.clone(), user.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::snapshot::store(&server, &user, &written);
+            })
+            .await;
+        }
+    });
+}
+
+/// Keep the newest of a channel's messages in the local state.
+///
+/// Every page this client is given passes through here -- the one a
+/// channel opens with, the ones warming fetches in the background, the
+/// ones scrolling back asks for -- so what is written down is simply
+/// what the server has said, newest first and bounded.
+async fn remember_page(a: &Active, channel: &ChannelId, page: &mm_types::PostList) {
+    keep(&a.held, &a.dirty, channel, page).await;
+}
+
+/// The same, for the background work that has no `Active` to hand.
+async fn keep(
+    store: &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    dirty: &Arc<std::sync::atomic::AtomicBool>,
+    channel: &ChannelId,
+    page: &mm_types::PostList,
+) {
+    if page.posts.is_empty() {
+        return;
+    }
+    let mut held = store.lock().await;
+    let kept = held.conversations.entry(channel.clone()).or_default();
+    for post in page.posts.values() {
+        match kept.iter().position(|held| held.id == post.id) {
+            Some(at) => kept[at] = post.clone(),
+            None => kept.push(post.clone()),
+        }
+    }
+    // Newest last, and only the tail: this is what a channel opens with,
+    // not an archive of it.
+    kept.sort_by(|a, b| a.create_at.cmp(&b.create_at).then_with(|| a.id.cmp(&b.id)));
+    if kept.len() > crate::snapshot::KEPT_PER_CHANNEL {
+        let drop = kept.len() - crate::snapshot::KEPT_PER_CHANNEL;
+        kept.drain(..drop);
+    }
+    dirty.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Ask the server how it wants messages read, and tell the window.
@@ -1511,6 +1628,8 @@ async fn sync(
     session: &Session,
     events: &async_channel::Sender<Event>,
     collapsed: &std::sync::atomic::AtomicBool,
+    held: &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    dirty: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Vec<mm_types::Channel> {
     let _ = events.send(Event::Status("loading…".into())).await;
 
@@ -1646,11 +1765,29 @@ async fn sync(
                 snapshot.channels.iter().map(|c| c.id.clone()).collect(),
             ))
             .await;
-        crate::snapshot::store(&session.server, &session.user_id, &snapshot);
+        take_in_sidebar(held, dirty, snapshot.clone()).await;
     }
 
     let _ = events.send(Event::Status("ready".into())).await;
     snapshot.channels
+}
+
+/// Put what the sync learned into the local state, keeping what it did
+/// not learn.
+///
+/// The conversations were filled in elsewhere -- by warming, by opening
+/// a channel, by the socket -- and a sidebar refresh must not throw
+/// them away. Writing is left to the task that writes it down.
+async fn take_in_sidebar(
+    held: &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    dirty: &Arc<std::sync::atomic::AtomicBool>,
+    fresh: crate::snapshot::Snapshot,
+) {
+    let mut held = held.lock().await;
+    let conversations = std::mem::take(&mut held.conversations);
+    *held = fresh;
+    held.conversations = conversations;
+    dirty.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Replay a snapshot as the events a sync would have sent, so the window
@@ -1668,6 +1805,39 @@ async fn send_snapshot(
         let _ = events.send(Event::Categories(list)).await;
     }
     let _ = events.send(Event::Users(held.users)).await;
+
+    // The conversations, before a single request has been made. This is
+    // the difference between a client that can be used the moment it
+    // opens and one that has to ask the server what it already knew.
+    for (channel, posts) in held.conversations {
+        if posts.is_empty() {
+            continue;
+        }
+        let _ = events
+            .send(Event::Posts {
+                channel,
+                page: as_page(posts),
+            })
+            .await;
+    }
+}
+
+/// Messages written down earlier, shaped as the page the server would
+/// have sent.
+///
+/// `prev_post_id` is the oldest message's own id rather than empty.
+/// Empty is how the server says "there is nothing before this", and the
+/// store believes it: a window that had been told a channel's history
+/// was complete would never fetch the rest of it.
+fn as_page(mut posts: Vec<mm_types::Post>) -> mm_types::PostList {
+    posts.sort_by(|a, b| b.create_at.cmp(&a.create_at).then_with(|| b.id.cmp(&a.id)));
+    let oldest = posts.last().map(|p| p.id.to_string()).unwrap_or_default();
+    mm_types::PostList {
+        order: posts.iter().map(|p| p.id.clone()).collect(),
+        posts: posts.into_iter().map(|p| (p.id.clone(), p)).collect(),
+        prev_post_id: oldest,
+        ..mm_types::PostList::default()
+    }
 }
 
 /// Ask for a batch of presences and pass on whatever comes back.
@@ -1755,6 +1925,10 @@ async fn open_channel(
     channel: &ChannelId,
     events: &async_channel::Sender<Event>,
     collapsed: bool,
+    keeping: Option<(
+        &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+        &Arc<std::sync::atomic::AtomicBool>,
+    )>,
 ) {
     // Together: the member count and the messages do not depend on each
     // other, and a round trip saved here is one off every click on a
@@ -1801,6 +1975,9 @@ async fn open_channel(
                 .map(|p| p.user_id.to_string())
                 .filter(|id| !id.is_empty())
                 .collect();
+            if let Some((held, dirty)) = keeping {
+                keep(held, dirty, channel, &page).await;
+            }
             let _ = events
                 .send(Event::Posts {
                     channel: channel.clone(),
@@ -1834,6 +2011,10 @@ async fn socket_loop(
     token: String,
     events: async_channel::Sender<Event>,
     mut typing: tokio::sync::mpsc::UnboundedReceiver<(ChannelId, String)>,
+    keeping: Option<(
+        Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
 ) {
     let mut protocol = WsProtocol::new();
     let mut attempt: u32 = 0;
@@ -1858,7 +2039,9 @@ async fn socket_loop(
                     let outgoing = tokio::select! {
                         frame = socket.next_text() => {
                             let Some(Ok(text)) = frame else { break };
-                            if !handle_frame(&mut protocol, &text, &events).await {
+                            if !handle_frame(&mut protocol, &text, &events, keeping.as_ref())
+                                .await
+                            {
                                 return;
                             }
                             None
@@ -1901,10 +2084,28 @@ async fn handle_frame(
     protocol: &mut WsProtocol,
     text: &str,
     events: &async_channel::Sender<Event>,
+    keeping: Option<&(
+        Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
 ) -> bool {
     for outcome in protocol.on_frame(text) {
         match outcome {
             WsOutcome::Event(event) => {
+                // A message that arrives while the window is open is as
+                // much a part of what this client knows as a page it
+                // fetched. Without this the local state would be
+                // whatever was last fetched, and a restart would show a
+                // channel missing everything said since.
+                if let (Some((held, dirty)), mm_api::ws::WsEvent::Posted { post, .. }) =
+                    (keeping, &event)
+                {
+                    let mut one = mm_types::PostList::default();
+                    one.order.push(post.id.clone());
+                    one.posts.insert(post.id.clone(), post.clone());
+                    one.prev_post_id = post.id.to_string();
+                    keep(held, dirty, &post.channel_id, &one).await;
+                }
                 if events.send(Event::Ws(event)).await.is_err() {
                     return false;
                 }
