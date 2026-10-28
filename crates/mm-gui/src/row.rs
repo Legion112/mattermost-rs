@@ -138,6 +138,15 @@ mod imp {
         pub cards: RefCell<Vec<super::AttachmentView>>,
         pub previews: RefCell<Vec<mm_types::LinkPreview>>,
         pub presence: std::cell::Cell<mm_types::Presence>,
+        /// Which build of this row it is.
+        ///
+        /// A `PostRow` is never changed after it is made: a redraw makes
+        /// a new one, and `splice_changed` keeps the old object wherever
+        /// nothing moved. So two rows carrying the same serial are the
+        /// same object, and a widget that already shows that serial
+        /// already shows that row -- which is how `bind_post_row` knows
+        /// it has nothing to do.
+        pub serial: Cell<u64>,
     }
 
     #[glib::object_subclass]
@@ -218,6 +227,7 @@ impl PostRow {
     pub fn new(fields: PostRowFields<'_>) -> Self {
         let this: Self = glib::Object::new();
         let inner = this.imp();
+        inner.serial.set(next_serial());
         inner.id.replace(fields.id.to_owned());
         inner.author.replace(fields.author.to_owned());
         inner.author_id.replace(fields.author_id);
@@ -342,6 +352,12 @@ impl PostRow {
         self.imp().replies.get()
     }
 
+    /// Which build of this row it is. See the field's own note.
+    #[must_use]
+    pub fn serial(&self) -> u64 {
+        self.imp().serial.get()
+    }
+
     #[must_use]
     pub fn avatar(&self) -> Option<gtk::gdk::Texture> {
         self.imp().avatar.borrow().clone()
@@ -406,4 +422,19 @@ impl PostRow {
     pub fn is_system(&self) -> bool {
         self.imp().voice.get() == Voice::System
     }
+}
+
+thread_local! {
+    /// Rows are only ever made on the GUI thread, so a thread-local
+    /// counter is the whole of it. Wrapping would need a channel open
+    /// for ten million years at sixty redraws a second.
+    static SERIAL: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn next_serial() -> u64 {
+    SERIAL.with(|n| {
+        let next = n.get().wrapping_add(1);
+        n.set(next);
+        next
+    })
 }

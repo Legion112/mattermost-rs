@@ -683,6 +683,11 @@ async fn long_channel(
         voices.push(Api::as_token("")?);
     }
 
+    // Reactions on most messages and a picture on some: a seeded
+    // channel of plain one-line text binds its rows twenty times faster
+    // than a real one, and a fixture that cannot reproduce the cost
+    // cannot be used to measure a fix for it.
+    let swatch = swatch_png();
     let shapes: &[&str] = &[
         "Line {n} of the long channel, which is here to be scrolled through.",
         "Shorter one. {n}",
@@ -696,10 +701,47 @@ async fn long_channel(
     ];
 
     println!("filling {LONG} to {how_many} messages (from {already})");
+    let me = id_of(&admin.call(&HttpRequest::get("/api/v4/users/me")).await?)?;
     for n in already..how_many {
         let who = &voices[n % voices.len()];
         let text = shapes[n % shapes.len()].replace("{n}", &n.to_string());
-        who.call(&post(&channel, &text, None)).await?;
+
+        // Every fifth message carries a picture, which is the shape that
+        // makes a row expensive to draw.
+        let body = if n % 5 == 0 {
+            let upload = who
+                .call(&mm_api::rest::upload_file(
+                    &mm_types::ChannelId::from(channel.clone()),
+                    "swatch.png",
+                    swatch.clone(),
+                ))
+                .await?;
+            let file = upload["file_infos"][0]["id"].as_str().unwrap_or_default();
+            HttpRequest::new(Method::Post, "/api/v4/posts").json(&json!({
+                "channel_id": channel,
+                "message": text,
+                "file_ids": [file],
+            }))
+        } else {
+            post(&channel, &text, None)
+        };
+        let posted = who.call(&body).await?;
+
+        // And most of them carry reactions, which are rebuilt on every
+        // bind and so are part of what a bind costs.
+        if n % 3 != 0 {
+            for emoji in ["eyes", "+1", "tada"].iter().take(1 + n % 3) {
+                admin
+                    .create(
+                        &HttpRequest::new(Method::Post, "/api/v4/reactions").json(&json!({
+                            "user_id": me,
+                            "post_id": id_of(&posted)?,
+                            "emoji_name": emoji,
+                        })),
+                    )
+                    .await?;
+            }
+        }
     }
     println!("{LONG} now has {how_many} messages");
     Ok(())

@@ -5820,20 +5820,43 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         time.set_tooltip_text(Some(&data.full_time()));
     }
 
-    fill_blocks(&body, &data.blocks());
+    // Everything below here builds widgets, and it is most of what a
+    // bind costs -- 0.21ms of a 0.50ms bind goes into the reaction chips
+    // alone on a seeded channel, and a bind on a real account costs
+    // 6.15ms. None of it is worth doing when this widget already shows
+    // this exact row.
+    //
+    // "This exact row" is object identity, not equality: a `PostRow` is
+    // never changed after it is made, and `splice_changed` keeps the old
+    // object wherever nothing moved, so the serial matching means the
+    // content matches. It happens on every redraw -- a splice re-binds
+    // the rows it covers, and a run deliberately covers up to eight that
+    // did not change.
+    let fresh = data.serial().to_string();
+    if body.widget_name() == fresh {
+        return;
+    }
+    body.set_widget_name(&fresh);
+
+    crate::perf::marked("bind:blocks", || fill_blocks(&body, &data.blocks()));
     if system {
         body.add_css_class("dim-label");
     } else {
         body.remove_css_class("dim-label");
     }
 
-    bind_message_tools(&floating, &data, &ctx.emoji);
+    crate::perf::marked("bind:tools", || {
+        bind_message_tools(&floating, &data, &ctx.emoji);
+    });
 
-    bind_cards(&cards, &data, commands, links);
-    bind_images(&images, &data, commands, viewer);
+    crate::perf::marked("bind:cards", || bind_cards(&cards, &data, commands, links));
+    crate::perf::marked("bind:images", || {
+        bind_images(&images, &data, commands, viewer);
+    });
 
-    bind_files(&files, &data, commands);
+    crate::perf::marked("bind:files", || bind_files(&files, &data, commands));
 
+    let started_reactions = std::time::Instant::now();
     while let Some(chip) = reactions.first_child() {
         reactions.remove(&chip);
     }
@@ -5863,6 +5886,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     for chip in chips {
         reactions.append(&reaction_chip(&data.id(), &chip, &ctx.emoji));
     }
+    crate::perf::record("bind:reactions", started_reactions.elapsed());
 }
 
 /// How big the edit window opens: a few lines of message, not a page.
