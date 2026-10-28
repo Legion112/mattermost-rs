@@ -14,10 +14,12 @@ usage: cargo run -p mm-lab --bin mmlab -- <command>
 
   up                  start the lab (creating it the first time) and wait
                       until the server answers
-  seed                fill a running lab with a team, colleagues, channels
-                      and a conversation; safe to run twice
+  seed [--bulk N]     fill a running lab with a team, colleagues, channels
+                      and a conversation; safe to run twice. --bulk adds N
+                      further channels, for measuring anything that scales
+                      with how many an account is in
   reset               throw the lab away and build a fresh seeded one
-  ui [--only <name>] [--shots <dir>] [--keep-data]
+  ui [--headless] [--only <name>] [--shots <dir>] [--keep-data]
                       drive the client's own widgets against the lab and
                       check the server agrees; a failure writes a screenshot.
                       Builds a fresh server first unless --keep-data
@@ -48,8 +50,14 @@ async fn main() -> ExitCode {
 
     let result = match command.as_str() {
         "up" => mm_lab::stack::up().await,
-        "seed" => mm_lab::seed::seed().await,
+        "seed" => {
+            let bulk = flag(rest, "--bulk")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            mm_lab::seed::seed_with(bulk).await
+        }
         "reset" => reset().await,
+        "ui" if rest.iter().any(|a| a == "--headless") => mm_lab::scenarios::headless(rest),
         "ui" => {
             let shots = flag(rest, "--shots").unwrap_or_else(|| "target/ui-failures".into());
             mm_lab::scenarios::run(

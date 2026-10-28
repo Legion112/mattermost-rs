@@ -731,10 +731,18 @@ async fn warm_channels(
         .filter(|c| !c.is_deleted() && c.last_post_at.millis() > 0)
         .collect();
     wanted.sort_by(|x, y| y.last_post_at.millis().cmp(&x.last_post_at.millis()));
-    wanted.truncate(WARM_CHANNELS);
+    let total = wanted.len();
+    if total > WARM_CEILING {
+        let _ = events
+            .send(Event::Status(format!(
+                "warming the {WARM_CEILING} most recent of {total} channels"
+            )))
+            .await;
+        wanted.truncate(WARM_CEILING);
+    }
 
     let permits = Arc::new(tokio::sync::Semaphore::new(WARM_AT_ONCE));
-    for channel in wanted {
+    for (position, channel) in wanted.into_iter().enumerate() {
         {
             // Already asked for, this run or a previous sync.
             let mut warmed = warmed.lock().await;
@@ -762,7 +770,13 @@ async fn warm_channels(
             }
             drop(permit);
         });
-        tokio::time::sleep(WARM_GAP).await;
+        // Brisk through the head, a trickle after it.
+        tokio::time::sleep(if position < WARM_EAGER {
+            WARM_GAP
+        } else {
+            WARM_GAP_TAIL
+        })
+        .await;
     }
 }
 
@@ -1388,17 +1402,33 @@ const ELSEWHERE_PEOPLE: u32 = 20;
 ///
 /// A channel fetched only when it is clicked costs a round trip the
 /// reader waits through, every first visit -- on a server a third of a
-/// second away that is most of what opening a channel feels like. So
-/// the ones they are most likely to open are fetched while nothing else
-/// is happening.
+/// second away that is most of what opening a channel feels like. The
+/// window does not freeze while it waits, which is almost worse: it
+/// draws an empty pane, and an empty pane is indistinguishable from a
+/// channel that failed to load.
 ///
-/// Bounded three ways, because speculative work on somebody's work
-/// server should be polite: the most recently active channels only, two
-/// requests at a time, and a gap between starts so a channel the reader
-/// *does* click is never queued behind a burst of guesses.
-const WARM_CHANNELS: usize = 30;
-const WARM_AT_ONCE: usize = 2;
-const WARM_GAP: std::time::Duration = std::time::Duration::from_millis(120);
+/// So **every** channel is warmed, not a top slice of them. The slice
+/// was the wrong shape of answer: it made the thirty channels somebody
+/// uses most feel instant and left every other one feeling broken, and
+/// which thirty those are is not something this client can know better
+/// than the person clicking.
+///
+/// Pace rather than quantity is what keeps it polite. Two speeds: the
+/// recently-active head goes out briskly, because that is what gets
+/// clicked in the first few seconds, and the long tail trickles. A
+/// channel the reader *does* click is never queued behind the guesses
+/// -- that request is issued on the click and shares nothing with
+/// these but the connection pool, which `WARM_AT_ONCE` keeps room in.
+const WARM_EAGER: usize = 40;
+const WARM_AT_ONCE: usize = 4;
+const WARM_GAP: std::time::Duration = std::time::Duration::from_millis(40);
+const WARM_GAP_TAIL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A ceiling, not a policy: an account in four figures of channels is
+/// not a shape this has been measured against, and an unbounded loop
+/// issuing requests on somebody's work server is the wrong thing to
+/// find out with. Everything below it is warmed.
+const WARM_CEILING: usize = 500;
 
 /// How many followed threads to ask for. The view shows the ones that
 /// have moved, and a reader with more than this many followed threads is

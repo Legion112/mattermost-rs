@@ -213,23 +213,17 @@ jobs:
       # pretending to be one.
       - run: cargo build --release --locked --bin mattermost-rs
 
-      # Three layers, and each one is needed:
-      #   xvfb-run          a display server, because GTK will not start
-      #                     without one and the runner has no screen
-      #   dbus-run-session  a session bus, because the runner has none and
-      #                     the accessibility bus is D-Bus activated off it
-      #   mmlab ui          brings up Postgres and Mattermost in Docker,
-      #                     seeds them, starts the client, drives its real
-      #                     widgets, and asks the server whether each thing
-      #                     actually happened
+      # `--headless` re-runs this inside an Xvfb display, a session bus of
+      # its own and a private XDG_RUNTIME_DIR -- none of which a runner
+      # has, and the last of which a workstation must not share. It then
+      # brings up Postgres and Mattermost in Docker, seeds them, starts the
+      # client, drives its real widgets, and asks the server whether each
+      # thing actually happened.
       #
       # Docker is already running on this runner, which is the one thing
       # here that cannot be installed from the manifest.
       - name: drive the client against a lab server
-        run: >
-          xvfb-run -a --server-args="-screen 0 1600x1200x24"
-          dbus-run-session --
-          cargo run -q -p mm-lab --bin mmlab -- ui
+        run: cargo run -q -p mm-lab --bin mmlab -- ui --headless
 
       # A failure on a machine nobody can log into needs a picture. The
       # runner's display holds nothing but the client, so this is the

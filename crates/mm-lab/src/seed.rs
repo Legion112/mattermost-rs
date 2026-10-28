@@ -229,6 +229,16 @@ fn id_of(value: &Value) -> Result<String> {
 ///
 /// Safe to run twice: anything already present is left alone.
 pub async fn seed() -> Result<()> {
+    seed_with(0).await
+}
+
+/// Seed, plus `bulk` further channels with one message each.
+///
+/// For measuring anything that scales with how many channels an account
+/// is in -- background warming, above all. A lab of five channels says
+/// nothing about a work account in sixty, and sixty is the shape the
+/// complaint came from.
+pub async fn seed_with(bulk: usize) -> Result<()> {
     let anon = Api::anonymous()?;
 
     // The first non-bot account on a server is promoted to system admin, and
@@ -287,6 +297,9 @@ pub async fn seed() -> Result<()> {
 
     converse(&admin, &tokens, &channels, &admin_id, &emoji).await?;
     direct_message(&admin, &tokens, &ids, &admin_id).await?;
+    if bulk > 0 {
+        bulk_channels(&admin, &team, bulk).await?;
+    }
 
     println!(
         "\nseeded. Point the client at {}\n  server    {}\n  username  {ADMIN}\n  password  {PASSWORD}",
@@ -592,4 +605,25 @@ impl Admin {
             .await
             .map(|_| ())
     }
+}
+
+/// Channels whose only purpose is to be numerous.
+///
+/// One message each, because a channel with nothing in it is not warmed
+/// and so would not be measuring anything.
+async fn bulk_channels(admin: &Api, team: &str, how_many: usize) -> Result<()> {
+    let mut made = 0;
+    for n in 0..how_many {
+        let name = format!("bulk-{n:03}");
+        let channel =
+            find_or_make_channel(admin, team, &name, &format!("Bulk {n:03}"), false).await?;
+        if admin.written_posts(&channel).await? == 0 {
+            admin
+                .call(&post(&channel, &format!("Something in {name}."), None))
+                .await?;
+            made += 1;
+        }
+    }
+    println!("{how_many} bulk channels ({made} newly filled)");
+    Ok(())
 }

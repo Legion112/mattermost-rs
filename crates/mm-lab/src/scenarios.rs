@@ -323,3 +323,69 @@ fn repo_root() -> PathBuf {
         .unwrap_or(Path::new("."))
         .to_path_buf()
 }
+
+/// Re-run `mmlab ui` inside a display and a session bus of its own.
+///
+/// Three things have to be true before a single widget can be driven, and
+/// a CI runner has none of them: an X display for GTK to draw into, a
+/// session bus for the accessibility bus to be activated off, and a
+/// runtime directory that is not shared with anybody.
+///
+/// That last one is not housekeeping. `at-spi-bus-launcher` is a
+/// singleton keyed by `XDG_RUNTIME_DIR`, and its socket is named after
+/// the display -- so a nested session activating it **takes down the one
+/// the desktop is already using**. Running this on a workstation emptied
+/// the developer's own `at-spi` directory twice before the cause was
+/// found, which on a machine somebody is using means the screen reader
+/// stops working. A private runtime directory gives this run a bus of its
+/// own and leaves the desktop's alone.
+///
+/// Driven from here rather than from the Makefile because it is logic,
+/// and logic in this repository lives in Rust where it is compiled and
+/// linted.
+pub fn headless(passthrough: &[String]) -> Result<()> {
+    let runtime = std::env::temp_dir().join(format!("mmrs-ui-{}", std::process::id()));
+    make_private(&runtime)?;
+
+    let me = std::env::current_exe().map_err(|e| Error(format!("cannot find my own path: {e}")))?;
+    // System directories first: Homebrew ships its own `dbus-run-session`
+    // and `dbus-daemon`, and the session bus that daemon starts cannot
+    // activate org.a11y.Bus -- GTK then reports the accessibility bus as
+    // closed and there is nothing to drive. The rest of PATH is kept after
+    // them, because cargo is not in /usr/bin.
+    let path = std::env::var("PATH").unwrap_or_default();
+    let status = Command::new("xvfb-run")
+        .args(["-a", "--server-args=-screen 0 1600x1200x24"])
+        .arg("dbus-run-session")
+        .arg("--")
+        .arg(&me)
+        .arg("ui")
+        .args(passthrough.iter().filter(|a| *a != "--headless"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("PATH", format!("/usr/bin:/bin:{path}"))
+        .status()
+        .map_err(|e| {
+            Error(format!(
+                "could not start xvfb-run: {e}
+It comes from the `xvfb` package;                  `make apt-deps` installs it along with at-spi2-core and dbus-daemon."
+            ))
+        })?;
+    let _ = std::fs::remove_dir_all(&runtime);
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error(format!("the headless run exited {status}")))
+    }
+}
+
+/// A directory only this user can read, which is what `XDG_RUNTIME_DIR`
+/// has to be or the session bus refuses to put its socket there.
+fn make_private(at: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let _ = std::fs::remove_dir_all(at);
+    std::fs::create_dir_all(at)
+        .map_err(|e| Error(format!("cannot create {}: {e}", at.display())))?;
+    std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| Error(format!("cannot lock down {}: {e}", at.display())))
+}

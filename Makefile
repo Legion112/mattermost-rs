@@ -220,11 +220,11 @@ lab-logs: ## The lab server's log, where a failed boot says why
 
 .PHONY: ui-test
 ui-test: release ## Drive the client's real widgets against a fresh lab
-	@# xvfb-run for a display and dbus-run-session for a session bus: on a
-	@# workstation both already exist and the nesting is harmless, while on
-	@# a CI runner neither does and nothing starts without them.
-	xvfb-run -a --server-args="-screen 0 1600x1200x24" \
-		dbus-run-session -- $(MMLAB) ui
+	@# --headless re-runs this inside an Xvfb display, a session bus of
+	@# its own, and a private XDG_RUNTIME_DIR. The last one matters on a
+	@# workstation: at-spi's bus launcher is a singleton keyed by that
+	@# directory, so sharing it takes down the one the desktop is using.
+	$(MMLAB) ui --headless
 
 .PHONY: ui-test-here
 ui-test-here: release ## ui-test on the display you are looking at
