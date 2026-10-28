@@ -868,6 +868,12 @@ fn build_sidebar() -> (
         .tooltip_text("Set your status")
         .child(&presence_dot(mm_types::Presence::Offline))
         .build();
+    {
+        // A dot is not a name: without this the button announces itself
+        // as nothing, and the lab cannot find it either.
+        use gtk::prelude::AccessibleExtManual as _;
+        presence.update_property(&[gtk::accessible::Property::Label("Set your status")]);
+    }
 
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     identity.set_hexpand(true);
@@ -1299,20 +1305,305 @@ fn wire_presence(ui: &Ui) {
             row.set_widget_name(presence.as_str());
             list.append(&row);
         }
+        custom_status_rows(&list, &menu);
 
         let ui = menu.clone();
         let popdown = popup.clone();
+        let near = button.clone();
         list.connect_row_activated(move |_, row| {
-            ui.commands
-                .send(Command::SetPresence(mm_types::Presence::parse(
-                    &row.widget_name(),
-                )))
-                .ok();
             popdown.popdown();
+            match row.widget_name().as_str() {
+                "custom:set" => open_custom_status_dialog(&ui, near.upcast_ref()),
+                "custom:clear" => {
+                    ui.commands.send(Command::ClearCustomStatus).ok();
+                }
+                presence => {
+                    ui.commands
+                        .send(Command::SetPresence(mm_types::Presence::parse(presence)))
+                        .ok();
+                }
+            }
         });
         popup.popup();
     });
 }
+
+/// The bottom of the status menu: what this reader said they were up
+/// to, if anything, and the rows that set and clear it.
+///
+/// Mattermost puts the custom status above the presence choices, under
+/// the avatar; this menu has no avatar and the presence is what the dot
+/// the menu hangs off is about, so it comes first and this comes after,
+/// set off by a margin. The list is a navigation sidebar, which draws
+/// no separators.
+fn custom_status_rows(list: &gtk::ListBox, ui: &Ui) {
+    let mine = {
+        let store = ui.store.borrow();
+        store
+            .users
+            .get(&store.me)
+            .and_then(|me| me.custom_status(utc_now()))
+    };
+    if let Some(status) = &mine {
+        let shown = status_line(status, &ui.emoji);
+        shown.set_halign(gtk::Align::Start);
+        shown.set_margin_start(6);
+        shown.set_margin_end(6);
+        let row = gtk::ListBoxRow::builder()
+            .child(&shown)
+            .activatable(false)
+            .selectable(false)
+            .margin_top(6)
+            .build();
+        list.append(&row);
+    }
+    let offered = [
+        ("Set a custom status…", "custom:set", true),
+        ("Clear custom status", "custom:clear", mine.is_some()),
+    ];
+    for (label, name, shown) in offered {
+        if !shown {
+            continue;
+        }
+        let text = gtk::Label::new(Some(label));
+        text.set_halign(gtk::Align::Start);
+        // A button inside the row rather than a bare label, as in the
+        // Threads view: a `ListBoxRow` offers nothing a screen reader
+        // -- or the lab -- can press, and a button does.
+        let press = gtk::Button::builder()
+            .child(&text)
+            .css_classes(["flat"])
+            .can_focus(false)
+            .build();
+        let row = gtk::ListBoxRow::builder().child(&press).build();
+        row.set_widget_name(name);
+        {
+            let row = row.clone();
+            press.connect_clicked(move |_| {
+                row.activate();
+            });
+        }
+        if name == "custom:set" && mine.is_none() {
+            row.set_margin_top(6);
+        }
+        list.append(&row);
+    }
+}
+
+/// The server's limit on the text, which the dialog enforces before
+/// the server has to.
+const CUSTOM_STATUS_LENGTH: i32 = 100;
+
+/// The "clear after" choices, as the dialog shows them and as the
+/// server names them. The moment each one means is worked out when
+/// the status is saved, by `custom_status_expiry`.
+const CLEAR_AFTER: &[(&str, &str)] = &[
+    ("Don't clear", ""),
+    ("30 minutes", "thirty_minutes"),
+    ("1 hour", "one_hour"),
+    ("4 hours", "four_hours"),
+    ("Today", "today"),
+    ("This week", "this_week"),
+];
+
+/// The emoji the server fills in for a status given none, so it is the
+/// one the dialog starts on.
+const DEFAULT_STATUS_EMOJI: &str = "speech_balloon";
+
+/// When a status chosen now runs out, written the way the server
+/// writes a moment; `None` for one that stays.
+///
+/// The webapp works these out on the client too -- the server stores
+/// the duration word and the moment and checks neither against the
+/// other. "Today" ends at the last second of the local day and "this
+/// week" at the last second of Sunday: ISO's week, not the en-US
+/// `moment()` one that ends on Saturday.
+fn custom_status_expiry(duration: &str, now: chrono::DateTime<chrono::Local>) -> Option<String> {
+    use chrono::{Datelike, Duration, TimeZone, Utc};
+    let end_of = |day: chrono::NaiveDate| {
+        let last = day.and_hms_opt(23, 59, 59).expect("a valid time of day");
+        chrono::Local
+            .from_local_datetime(&last)
+            .earliest()
+            .unwrap_or(now)
+    };
+    let at = match duration {
+        "thirty_minutes" => now + Duration::minutes(30),
+        "one_hour" => now + Duration::hours(1),
+        "four_hours" => now + Duration::hours(4),
+        "today" => end_of(now.date_naive()),
+        "this_week" => {
+            let to_sunday = 6 - i64::from(now.weekday().num_days_from_monday());
+            end_of(now.date_naive() + Duration::days(to_sunday))
+        }
+        _ => return None,
+    };
+    Some(
+        at.with_timezone(&Utc)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
+    )
+}
+
+/// The "clear after" line of the status dialog: the label and the
+/// choice, which is returned on its own to be read at save time.
+fn clear_after_choice() -> (gtk::Box, gtk::DropDown) {
+    let names: Vec<&str> = CLEAR_AFTER.iter().map(|(label, _)| *label).collect();
+    let choice = gtk::DropDown::from_strings(&names);
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    line.append(&gtk::Label::new(Some("Clear after")));
+    line.append(&choice);
+    (line, choice)
+}
+
+/// The status dialog's emoji: a button wearing the one chosen, which
+/// opens the composer's picker and writes the pick into `chosen`.
+fn status_emoji_button(emoji: &Emoji, chosen: &Rc<RefCell<String>>) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .css_classes(["flat"])
+        .tooltip_text("Pick an emoji")
+        .child(&emoji_face(emoji, &chosen.borrow()))
+        .build();
+    let emoji = emoji.clone();
+    let chosen = Rc::clone(chosen);
+    let picking = Rc::new(std::cell::Cell::new(false));
+    button.connect_clicked(move |button| {
+        let shown = button.clone();
+        let face_of = emoji.clone();
+        let chosen = Rc::clone(&chosen);
+        open_emoji_picker(
+            button.upcast_ref::<gtk::Widget>(),
+            &picking,
+            &emoji,
+            move |shortcode| {
+                shown.set_child(Some(&emoji_face(&face_of, shortcode)));
+                shortcode.clone_into(&mut chosen.borrow_mut());
+            },
+        );
+    });
+    button
+}
+
+/// The dialog behind "Set a custom status…": an emoji, a line of text
+/// and how long to keep them.
+///
+/// A window rather than a popover because it holds the emoji picker,
+/// which is a popover of its own and does not nest. Saving with the
+/// text emptied clears the status, which is what emptying it means.
+fn open_custom_status_dialog(ui: &Ui, near: &gtk::Widget) {
+    let was = {
+        let store = ui.store.borrow();
+        store
+            .users
+            .get(&store.me)
+            .and_then(|me| me.custom_status(utc_now()))
+    };
+    let chosen = Rc::new(RefCell::new(was.as_ref().map_or_else(
+        || DEFAULT_STATUS_EMOJI.to_owned(),
+        |status| status.emoji.clone(),
+    )));
+    let text = gtk::Entry::builder()
+        .placeholder_text("What are you up to?")
+        .max_length(CUSTOM_STATUS_LENGTH)
+        .hexpand(true)
+        .activates_default(true)
+        .build();
+    {
+        // A placeholder is not a name; see the add-somebody field.
+        use gtk::prelude::AccessibleExtManual as _;
+        text.update_property(&[gtk::accessible::Property::Label("What are you up to?")]);
+    }
+    if let Some(was) = &was {
+        text.set_text(&was.text);
+    }
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    line.append(&status_emoji_button(&ui.emoji, &chosen));
+    line.append(&text);
+
+    let (after, clear_after) = clear_after_choice();
+
+    // Not "Save": the lab finds buttons by a name *containing* the
+    // text, and "Saved posts" is on the title bar.
+    let save = gtk::Button::with_label("Set status");
+    save.add_css_class("suggested-action");
+    let cancel = gtk::Button::with_label("Cancel");
+    let clear = gtk::Button::with_label("Clear status");
+    clear.set_visible(was.is_some());
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_top(6);
+    buttons.append(&clear);
+    buttons.append(&cancel);
+    buttons.append(&save);
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    column.set_margin_start(18);
+    column.set_margin_end(18);
+    column.set_margin_bottom(18);
+    column.append(&line);
+    column.append(&after);
+    column.append(&buttons);
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    layout.append(&adw::HeaderBar::new());
+    layout.append(&column);
+
+    let window = adw::Window::builder()
+        .title("Set a custom status")
+        .modal(true)
+        .default_width(CUSTOM_STATUS_WIDTH)
+        .content(&layout)
+        .build();
+    if let Some(parent) = near.root().and_downcast::<gtk::Window>() {
+        window.set_transient_for(Some(&parent));
+    }
+    window.set_default_widget(Some(&save));
+
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| window.close());
+    }
+    {
+        let commands = ui.commands.clone();
+        let window = window.clone();
+        clear.connect_clicked(move |_| {
+            commands.send(Command::ClearCustomStatus).ok();
+            window.close();
+        });
+    }
+    {
+        let commands = ui.commands.clone();
+        let window = window.clone();
+        save.connect_clicked(move |_| {
+            let said = text.text().trim().to_owned();
+            window.close();
+            if said.is_empty() {
+                if was.is_some() {
+                    commands.send(Command::ClearCustomStatus).ok();
+                }
+                return;
+            }
+            let picked = usize::try_from(clear_after.selected()).unwrap_or(0);
+            let (_, duration) = CLEAR_AFTER.get(picked).copied().unwrap_or(CLEAR_AFTER[0]);
+            let status = mm_types::CustomStatus {
+                emoji: chosen.borrow().clone(),
+                text: said,
+                expires_at: custom_status_expiry(duration, chrono::Local::now())
+                    .unwrap_or_default(),
+            };
+            commands
+                .send(Command::SetCustomStatus {
+                    status,
+                    duration: duration.to_owned(),
+                })
+                .ok();
+        });
+    }
+
+    window.present();
+}
+
+/// How wide the custom status dialog opens.
+const CUSTOM_STATUS_WIDTH: i32 = 420;
 
 /// Connect the sign-in form.
 fn wire_login(login: &Rc<LoginPage>, commands: &tokio::sync::mpsc::UnboundedSender<Command>) {
@@ -2805,13 +3096,7 @@ fn status_line(status: &mm_types::CustomStatus, emoji: &Emoji) -> gtk::Box {
     line.set_halign(gtk::Align::Center);
     line.set_margin_top(4);
     if !status.emoji.is_empty() {
-        match emoji.texture(&status.emoji) {
-            Some(texture) => line.append(&Emoji::image(&texture)),
-            None => line.append(&gtk::Label::new(Some(
-                &mm_md::glyph(&status.emoji)
-                    .map_or_else(|| format!(":{}:", status.emoji), ToOwned::to_owned),
-            ))),
-        }
+        line.append(&emoji_face(emoji, &status.emoji));
     }
     if !status.text.is_empty() {
         line.append(
@@ -2823,6 +3108,18 @@ fn status_line(status: &mm_types::CustomStatus, emoji: &Emoji) -> gtk::Box {
         );
     }
     line
+}
+
+/// One emoji on its own, by name: its picture if the server has one,
+/// the glyph if the table knows it, and the shortcode otherwise.
+fn emoji_face(emoji: &Emoji, name: &str) -> gtk::Widget {
+    match emoji.texture(name) {
+        Some(texture) => Emoji::image(&texture).upcast(),
+        None => gtk::Label::new(Some(
+            &mm_md::glyph(name).map_or_else(|| format!(":{name}:"), ToOwned::to_owned),
+        ))
+        .upcast(),
+    }
 }
 
 /// Now, as the comparison a custom status's expiry wants.
@@ -10379,7 +10676,66 @@ fn wire_scroller(ui: &Ui, scroller: &gtk::ScrolledWindow) {
 }
 #[cfg(test)]
 mod tests {
-    use super::{SPLICE_GAP, runs};
+    use super::{SPLICE_GAP, custom_status_expiry, runs};
+
+    /// A moment in local time, for the expiry arithmetic.
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
+        use chrono::TimeZone as _;
+        chrono::Local
+            .with_ymd_and_hms(y, mo, d, h, mi, 0)
+            .single()
+            .expect("an unambiguous local time")
+    }
+
+    /// Back from the server's wording to local time, to read the result.
+    fn back(wire: &str) -> chrono::DateTime<chrono::Local> {
+        chrono::DateTime::parse_from_rfc3339(wire)
+            .expect("the server's shape")
+            .with_timezone(&chrono::Local)
+    }
+
+    #[test]
+    fn a_status_that_stays_has_no_expiry() {
+        assert_eq!(custom_status_expiry("", local(2026, 10, 28, 21, 0)), None);
+        assert_eq!(
+            custom_status_expiry("date_and_time", local(2026, 10, 28, 21, 0)),
+            None
+        );
+    }
+
+    #[test]
+    fn the_short_ones_count_from_now() {
+        use chrono::Timelike as _;
+        let now = local(2026, 10, 28, 21, 10);
+        let soon = back(&custom_status_expiry("thirty_minutes", now).unwrap());
+        assert_eq!((soon.hour(), soon.minute()), (21, 40));
+        let later = back(&custom_status_expiry("one_hour", now).unwrap());
+        assert_eq!((later.hour(), later.minute()), (22, 10));
+        let tonight = back(&custom_status_expiry("four_hours", now).unwrap());
+        assert_eq!((tonight.hour(), tonight.minute()), (1, 10));
+        assert_eq!(tonight.date_naive(), now.date_naive().succ_opt().unwrap());
+    }
+
+    #[test]
+    fn today_ends_at_the_last_second_of_the_day() {
+        use chrono::Timelike as _;
+        let end = back(&custom_status_expiry("today", local(2026, 10, 28, 9, 0)).unwrap());
+        assert_eq!(end.date_naive(), local(2026, 10, 28, 9, 0).date_naive());
+        assert_eq!((end.hour(), end.minute(), end.second()), (23, 59, 59));
+    }
+
+    #[test]
+    fn this_week_ends_on_sunday() {
+        use chrono::{Datelike as _, Timelike as _};
+        // 2026-10-28 is a Wednesday; the Sunday after it is the 1st.
+        let end = back(&custom_status_expiry("this_week", local(2026, 10, 28, 9, 0)).unwrap());
+        assert_eq!(end.weekday(), chrono::Weekday::Sun);
+        assert_eq!((end.month(), end.day()), (11, 1));
+        assert_eq!((end.hour(), end.minute(), end.second()), (23, 59, 59));
+        // On a Sunday the week ends tonight, not in seven days.
+        let end = back(&custom_status_expiry("this_week", local(2026, 11, 1, 9, 0)).unwrap());
+        assert_eq!((end.month(), end.day()), (11, 1));
+    }
 
     /// The grouping that decides how many `splice` calls a redraw costs.
     ///

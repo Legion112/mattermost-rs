@@ -1026,6 +1026,41 @@ pub fn parse_status(resp: &HttpResponse) -> Result<Status, ApiError> {
     parse_json(resp, "PUT /users/{user}/status")
 }
 
+// -------------------------------------------------------- custom status
+
+/// Say what this reader is up to: an emoji and a line of text.
+///
+/// `PUT`, on `me` -- the server lets nobody set anybody else's. The
+/// expiry is the client's to work out: the server stores `duration` as
+/// a word and `expires_at` as a moment and checks neither against the
+/// other, so both are sent. An empty `expires_at` is **left out** rather
+/// than sent as `""`, which Go cannot read as a time; absent, the server
+/// stores its year-one sentinel and the status stays until it is
+/// cleared. Everybody, this reader included, hears about it as a
+/// `user_updated` carrying the new `customStatus` prop.
+#[must_use]
+pub fn set_custom_status(status: &mm_types::CustomStatus, duration: &str) -> HttpRequest {
+    let mut body = serde_json::json!({
+        "emoji": status.emoji,
+        "text": status.text,
+        "duration": duration,
+    });
+    if !status.expires_at.is_empty() {
+        body["expires_at"] = serde_json::Value::String(status.expires_at.clone());
+    }
+    HttpRequest::put(format!("{API}/users/me/status/custom")).json(&body)
+}
+
+pub fn parse_custom_status(resp: &HttpResponse) -> Result<mm_types::CustomStatus, ApiError> {
+    parse_json(resp, "PUT /users/me/status/custom")
+}
+
+/// Take it back. Answers a bare `{"status":"OK"}`.
+#[must_use]
+pub fn clear_custom_status() -> HttpRequest {
+    HttpRequest::delete(format!("{API}/users/me/status/custom"))
+}
+
 // ---------------------------------------------------------------- prefs
 
 #[must_use]

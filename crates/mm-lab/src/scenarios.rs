@@ -24,6 +24,7 @@ use crate::{Error, Result};
 /// the sidebar holds.
 pub const SCENARIOS: &[&str] = &[
     "signs-in",
+    "sets-a-custom-status",
     "shows-a-thread-reply-count",
     "shows-a-new-reply-in-threads",
     "adds-and-removes-somebody",
@@ -105,6 +106,7 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool)
 async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
     match name {
         "signs-in" => signs_in(screen).await,
+        "sets-a-custom-status" => custom_status(screen, admin).await,
         "shows-a-thread-reply-count" => reply_count(screen).await,
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
@@ -139,6 +141,50 @@ async fn signs_in(screen: &Screen) -> Result<()> {
         .until("the sidebar is drawn", |tree| tree.has("label", "CHANNELS"))
         .await
         .map(|_| ())
+}
+
+/// Setting a custom status from the status menu reaches the server, and
+/// clearing it from the same menu takes it back. The window is checked
+/// only for having the dialog; what matters is the server's copy of the
+/// user, which is the one everybody else reads.
+async fn custom_status(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.press("Set your status").await?;
+    screen.press("Set a custom status…").await?;
+    let form = screen
+        .until("the status dialog is up", |tree| {
+            tree.has("text box", "What are you up to?")
+        })
+        .await?;
+    screen
+        .type_into(form.find("text box", "What are you up to?")?, "In the lab")
+        .await?;
+    screen.press("Set status").await?;
+    server_holds(admin, Some("In the lab")).await?;
+
+    screen.press("Set your status").await?;
+    screen
+        .until("the status menu shows what was set", |tree| {
+            tree.has("label", "In the lab") && tree.has("label", "Clear custom status")
+        })
+        .await?;
+    screen.press("Clear custom status").await?;
+    server_holds(admin, None).await
+}
+
+/// Wait, briefly, for the server's copy of the admin's custom status to
+/// say what it should.
+async fn server_holds(admin: &Admin, expected: Option<&str>) -> Result<()> {
+    let mut last = None;
+    for _ in 0..25 {
+        last = admin.my_custom_status().await?;
+        if last.as_deref() == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server holds custom status {last:?}, expected {expected:?}"
+    )))
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

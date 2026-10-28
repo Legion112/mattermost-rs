@@ -1121,6 +1121,26 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
                 }
             }
         }
+        Command::SetCustomStatus { status, duration } => {
+            // Nothing to apply here on success: the server tells everybody,
+            // this reader included, with a `user_updated` carrying the prop.
+            if let Err(e) = fetch(
+                &a.client,
+                &rest::set_custom_status(&status, &duration),
+                rest::parse_custom_status,
+            )
+            .await
+            {
+                let _ = events
+                    .send(Event::Failed(format!(
+                        "could not set your custom status: {e}"
+                    )))
+                    .await;
+            }
+        }
+        Command::ClearCustomStatus => {
+            best_effort(a, &rest::clear_custom_status(), events).await;
+        }
         Command::FetchEmoji { name, id } => {
             spawn_download(a, events.clone(), Download::Emoji { name, id });
         }

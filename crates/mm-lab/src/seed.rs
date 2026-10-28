@@ -596,6 +596,25 @@ impl Admin {
         Ok(list.as_array().map_or(0, Vec::len))
     }
 
+    /// The admin's own custom status text, as the server holds it:
+    /// `None` once it has been cleared, which the server records as a
+    /// prop with empty fields rather than no prop.
+    pub async fn my_custom_status(&self) -> Result<Option<String>> {
+        let me = self
+            .api
+            .call(&HttpRequest::get(format!("/api/v4/users/{}", self.me)))
+            .await?;
+        let Some(raw) = me.pointer("/props/customStatus").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let status: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+        Ok(status
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned))
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self

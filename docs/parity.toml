@@ -554,8 +554,13 @@ id       = "users.presence"
 area     = "users"
 upstream = "server-api"
 status   = "partial"
-endpoints = ["POST /api/v4/users/status/ids", "PUT /api/v4/users/{user_id}/status"]
-ws_events = ["status_change"]
+endpoints = [
+  "POST /api/v4/users/status/ids",
+  "PUT /api/v4/users/{user_id}/status",
+  "PUT /api/v4/users/me/status/custom",
+  "DELETE /api/v4/users/me/status/custom",
+]
+ws_events = ["status_change", "user_updated"]
 verified_against = "12.0.1"
 notes = """
 A dot in the corner of every face: green for online, amber for away, red for \
@@ -596,7 +601,21 @@ who went home. A minute is what Mattermost's own webapp uses: a dot a \
 minute out of date is nobody's problem, and anything faster is a request a \
 minute for decoration.
 
-NOT built: a do-not-disturb timer, and custom status text."""
+**A custom status** -- the emoji and line of text Mattermost shows \
+beside a name -- is read off the `customStatus` prop and drawn on the \
+profile card, with its expiry honoured locally so a lunch that ended \
+is not still being eaten. Setting your own is in the status menu: a \
+dialog with the emoji picker, the text and a "clear after" choice, and \
+the menu shows the one that is set with a row to clear it. The expiry \
+is the client's to work out, as in the webapp -- the server stores the \
+duration word and the moment and checks neither against the other -- \
+and "this week" ends on Sunday here, not on the Saturday an en-US \
+`moment()` picks. Verified in the lab: the dialog set it, the server's \
+own copy of the user carried the text, and clearing it from the menu \
+left the server with empty fields, which is how it records "none".
+
+NOT built: a do-not-disturb timer, and the status emoji beside the \
+author's name on every message the way the webapp draws it."""
 
 [[feature]]
 id       = "posts.typing"

@@ -1254,3 +1254,48 @@ fn a_channels_notification_level_patches_only_that_prop() {
         Body::Json(r#"{"mark_unread":"mention"}"#.to_owned())
     );
 }
+
+#[test]
+fn a_custom_status_is_put_on_me_and_an_empty_expiry_is_left_out() {
+    let forever = mm_types::CustomStatus {
+        emoji: "palm_tree".to_owned(),
+        text: "On a vacation".to_owned(),
+        expires_at: String::new(),
+    };
+    let req = set_custom_status(&forever, "");
+    assert_eq!(req.method, Method::Put);
+    assert_eq!(req.path, "/api/v4/users/me/status/custom");
+    let Body::Json(body) = &req.body else {
+        panic!("expected a JSON body, got {:?}", req.body);
+    };
+    assert!(body.contains(r#""emoji":"palm_tree""#), "{body}");
+    assert!(body.contains(r#""text":"On a vacation""#), "{body}");
+    assert!(body.contains(r#""duration":"""#), "{body}");
+    assert!(!body.contains("expires_at"), "{body}");
+
+    let today = mm_types::CustomStatus {
+        expires_at: "2026-10-28T20:59:59Z".to_owned(),
+        ..forever
+    };
+    let Body::Json(body) = &set_custom_status(&today, "today").body else {
+        panic!("expected a JSON body");
+    };
+    assert!(body.contains(r#""duration":"today""#), "{body}");
+    assert!(
+        body.contains(r#""expires_at":"2026-10-28T20:59:59Z""#),
+        "{body}"
+    );
+
+    let back = parse_custom_status(&ok(
+        r#"{"emoji":"palm_tree","text":"On a vacation","duration":"today","expires_at":"2026-10-28T20:59:59Z"}"#,
+    ))
+    .unwrap();
+    assert_eq!(back.text, "On a vacation");
+    assert_eq!(back.expires_at, "2026-10-28T20:59:59Z");
+    let err = HttpResponse::new(400, r#"{"id":"api.bad","message":"too long"}"#);
+    assert!(parse_custom_status(&err).is_err());
+
+    let gone = clear_custom_status();
+    assert_eq!(gone.method, Method::Delete);
+    assert_eq!(gone.path, "/api/v4/users/me/status/custom");
+}

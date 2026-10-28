@@ -186,6 +186,17 @@ pub enum Command {
     /// The server stops moving a status it was told, so choosing one is
     /// also choosing to keep it until it is changed again.
     SetPresence(mm_types::Presence),
+    /// Say what this reader is up to, as an emoji and a line of text,
+    /// and for how long. `duration` is the server's word for the
+    /// choice -- `today`, `this_week`, `thirty_minutes` and so on, or
+    /// empty for one that stays -- beside the moment already worked out
+    /// in the status's `expires_at`.
+    SetCustomStatus {
+        status: mm_types::CustomStatus,
+        duration: String,
+    },
+    /// Take the custom status back.
+    ClearCustomStatus,
     /// Leave a channel.
     ///
     /// The server has no "leave": it is removing yourself, and it posts a
