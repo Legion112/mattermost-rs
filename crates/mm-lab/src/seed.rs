@@ -229,7 +229,7 @@ fn id_of(value: &Value) -> Result<String> {
 ///
 /// Safe to run twice: anything already present is left alone.
 pub async fn seed() -> Result<()> {
-    seed_with(0).await
+    seed_with(0, 0).await
 }
 
 /// Seed, plus `bulk` further channels with one message each.
@@ -238,7 +238,7 @@ pub async fn seed() -> Result<()> {
 /// is in -- background warming, above all. A lab of five channels says
 /// nothing about a work account in sixty, and sixty is the shape the
 /// complaint came from.
-pub async fn seed_with(bulk: usize) -> Result<()> {
+pub async fn seed_with(bulk: usize, long: usize) -> Result<()> {
     let anon = Api::anonymous()?;
 
     // The first non-bot account on a server is promoted to system admin, and
@@ -299,6 +299,9 @@ pub async fn seed_with(bulk: usize) -> Result<()> {
     direct_message(&admin, &tokens, &ids, &admin_id).await?;
     if bulk > 0 {
         bulk_channels(&admin, &team, bulk).await?;
+    }
+    if long > 0 {
+        long_channel(&admin, &team, &tokens, long).await?;
     }
 
     println!(
@@ -625,5 +628,79 @@ async fn bulk_channels(admin: &Api, team: &str, how_many: usize) -> Result<()> {
         }
     }
     println!("{how_many} bulk channels ({made} newly filled)");
+    Ok(())
+}
+
+/// The URL name of the channel with a lot of scrollback in it.
+pub const LONG: &str = "long";
+/// And what the sidebar calls it.
+pub const LONG_LABEL: &str = "Long";
+
+/// One channel with enough history to scroll through.
+///
+/// Scrolling is the one thing a handful of messages cannot show anything
+/// about: a list of six rows never recycles a widget, and recycling is
+/// where the cost is. Messages are a mix of shapes on purpose -- plain
+/// lines, a code block, a list, a long paragraph -- because they do not
+/// cost the same to draw and a channel of one shape would measure one
+/// shape.
+async fn long_channel(
+    admin: &Api,
+    team: &str,
+    tokens: &std::collections::BTreeMap<&str, String>,
+    how_many: usize,
+) -> Result<()> {
+    let channel = find_or_make_channel(admin, team, LONG, LONG_LABEL, false).await?;
+    // Everybody who is going to speak has to be in it first; the server
+    // answers a post from a non-member with a flat 403.
+    for person in PEOPLE {
+        let found = admin
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/username/{}",
+                person.username
+            )))
+            .await?;
+        admin
+            .create(
+                &HttpRequest::new(Method::Post, format!("/api/v4/channels/{channel}/members"))
+                    .json(&json!({ "user_id": id_of(&found)? })),
+            )
+            .await?;
+    }
+    let already = admin.written_posts(&channel).await?;
+    if already >= how_many {
+        println!("{LONG} already has {already} messages");
+        return Ok(());
+    }
+
+    // Round robin through the seeded people, so author grouping and avatar
+    // changes happen the way they do in a real channel.
+    let mut voices = Vec::new();
+    for token in tokens.values() {
+        voices.push(Api::as_token(token)?);
+    }
+    if voices.is_empty() {
+        voices.push(Api::as_token("")?);
+    }
+
+    let shapes: &[&str] = &[
+        "Line {n} of the long channel, which is here to be scrolled through.",
+        "Shorter one. {n}",
+        "A longer paragraph, number {n}, with enough words in it to wrap onto a \
+         second line in the usual window width, because a message that wraps is \
+         measured differently from one that does not and the difference is the \
+         whole point of having a mix.",
+        "```rust\nlet n = {n};\nassert!(n > 0);\n```",
+        "- first of {n}\n- second\n- third",
+        "**Bold {n}**, _italic_, `code`, and a [link](https://example.com/{n}).",
+    ];
+
+    println!("filling {LONG} to {how_many} messages (from {already})");
+    for n in already..how_many {
+        let who = &voices[n % voices.len()];
+        let text = shapes[n % shapes.len()].replace("{n}", &n.to_string());
+        who.call(&post(&channel, &text, None)).await?;
+    }
+    println!("{LONG} now has {how_many} messages");
     Ok(())
 }

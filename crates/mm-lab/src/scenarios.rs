@@ -277,6 +277,10 @@ struct Client(Child);
 
 impl Client {
     fn start(home: &Path) -> Result<Self> {
+        Self::spawn(home, &[])
+    }
+
+    fn spawn(home: &Path, extra: &[(&str, &str)]) -> Result<Self> {
         // The build tree first, then the installed one. Inside the test
         // container there is no build tree at all -- the client is there
         // because the .deb put it in /usr/bin, which is the whole point of
@@ -299,11 +303,16 @@ impl Client {
                 .map_err(|e| Error(format!("cannot create {}: {e}", home.display())))?;
         }
         println!("running {}", binary.display());
-        Command::new(&binary)
+        let mut command = Command::new(&binary);
+        command
             .env("MMRS_APP_ID", "mmrs.lab")
             .env("XDG_STATE_HOME", home.join("state"))
             .env("XDG_CACHE_HOME", home.join("cache"))
-            .env("XDG_DATA_HOME", home.join("data"))
+            .env("XDG_DATA_HOME", home.join("data"));
+        for (key, value) in extra {
+            command.env(key, value);
+        }
+        command
             .spawn()
             .map(Self)
             .map_err(|e| Error(format!("could not start {}: {e}", binary.display())))
@@ -312,6 +321,18 @@ impl Client {
     /// Asked to go rather than killed outright: a `SIGKILL`ed GTK app leaves
     /// the desktop's crash reporter with something to say about it, and the
     /// client has a stored session to write on the way out.
+    /// The same client, told to measure itself.
+    ///
+    /// On the child's environment rather than this process's: setting a
+    /// variable in a running program is `unsafe` in this edition, and the
+    /// workspace forbids `unsafe` -- rightly, since the only reason to
+    /// want it here is laziness about plumbing.
+    fn measuring(home: &Path) -> Result<Self> {
+        // Opening the channel has to happen before the sweep starts, and
+        // signing in from cold is most of that wait.
+        Self::spawn(home, &[("MMRS_PERF", "1"), ("MMRS_PERF_AFTER", "25")])
+    }
+
     fn stop(&mut self) {
         let _ = Command::new("kill").arg(self.0.id().to_string()).status();
         for _ in 0..40 {
@@ -368,7 +389,7 @@ fn repo_root() -> PathBuf {
 /// Driven from here rather than from the Makefile because it is logic,
 /// and logic in this repository lives in Rust where it is compiled and
 /// linted.
-pub fn headless(passthrough: &[String]) -> Result<()> {
+pub fn headless(command: &str, passthrough: &[String]) -> Result<()> {
     let runtime = std::env::temp_dir().join(format!("mmrs-ui-{}", std::process::id()));
     make_private(&runtime)?;
 
@@ -384,7 +405,7 @@ pub fn headless(passthrough: &[String]) -> Result<()> {
         .arg("dbus-run-session")
         .arg("--")
         .arg(&me)
-        .arg("ui")
+        .arg(command)
         .args(passthrough.iter().filter(|a| *a != "--headless"))
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("PATH", format!("/usr/bin:/bin:{path}"))
@@ -428,13 +449,15 @@ fn make_private(at: &Path) -> Result<()> {
 /// the server's own `SiteURL` still matches what the client connects to.
 /// Joining the network by name instead would make the WebSocket's origin
 /// disagree with `SiteURL`, and the socket would be refused.
-pub async fn contained(shots: &Path, keep_data: bool) -> Result<()> {
+pub async fn contained(shots: &Path, keep_data: bool, perf: Option<&str>) -> Result<()> {
     // The server first, from out here, because there is no Docker inside.
     if !keep_data {
         crate::stack::down(false)?;
     }
     crate::stack::up().await?;
-    crate::seed::seed().await?;
+    // Measuring a scroll needs something to scroll through, and six
+    // messages measure nothing.
+    crate::seed::seed_with(0, if perf.is_some() { PERF_MESSAGES } else { 0 }).await?;
 
     build_image()?;
     std::fs::create_dir_all(shots)
@@ -443,8 +466,8 @@ pub async fn contained(shots: &Path, keep_data: bool) -> Result<()> {
         .canonicalize()
         .map_err(|e| Error(format!("cannot resolve {}: {e}", shots.display())))?;
 
-    println!("running the scenarios inside {IMAGE}");
-    let status = Command::new("docker")
+    let mut docker = Command::new("docker");
+    docker
         .args([
             "run",
             "--rm",
@@ -453,7 +476,14 @@ pub async fn contained(shots: &Path, keep_data: bool) -> Result<()> {
             "--volume",
         ])
         .arg(format!("{}:/out", out.display()))
-        .arg(IMAGE)
+        .arg(IMAGE);
+    if let Some(channel) = perf {
+        println!("measuring {channel} inside {IMAGE}");
+        docker.args(["perf", "--headless", "--guest", "--channel", channel]);
+    } else {
+        println!("running the scenarios inside {IMAGE}");
+    }
+    let status = docker
         .status()
         .map_err(|e| Error(format!("could not run docker: {e}")))?;
     if status.success() {
@@ -467,6 +497,10 @@ pub async fn contained(shots: &Path, keep_data: bool) -> Result<()> {
 }
 
 const IMAGE: &str = "mmrs-ui:latest";
+
+/// How much history the scroll measurement needs. Enough to page through
+/// several times, which is what makes the splice show up at all.
+const PERF_MESSAGES: usize = 800;
 
 /// Build the image the scenarios run in.
 ///
@@ -500,4 +534,37 @@ fn build_image() -> Result<()> {
     } else {
         Err(Error(format!("docker build failed with {status}")))
     }
+}
+
+/// Measure scrolling, which is the one thing about this window that
+/// cannot be argued about from the source.
+///
+/// Signs in, opens the channel, and leaves the client to sweep it: the
+/// client scrolls itself a fixed number of pixels per frame and prints
+/// the distribution of frame times when it reaches the bottom. Driving it
+/// from in here rather than from a hand on a wheel is what makes two
+/// measurements comparable -- the same pixels, at the same rate, past the
+/// same messages.
+pub async fn measure(channel: &str, guest: bool) -> Result<()> {
+    if guest {
+        crate::stack::wait_ready().await?;
+    } else {
+        crate::stack::up().await?;
+    }
+
+    let home = lab_home();
+    let _ = std::fs::remove_dir_all(&home);
+    let mut client = Client::measuring(&home)?;
+    let screen = Screen::attach_waiting("mmrs.lab").await?;
+    signs_in(&screen).await?;
+    screen.open_channel(channel).await?;
+    println!("opened {channel}; the sweep starts shortly and prints its own report");
+
+    // Long enough for the delay the client waits before sweeping, the
+    // sweep itself, and the pauses at the top while older messages are
+    // fetched. It prints as it finishes; this is only how long to leave
+    // it alive.
+    tokio::time::sleep(std::time::Duration::from_secs(150)).await;
+    client.stop();
+    Ok(())
 }

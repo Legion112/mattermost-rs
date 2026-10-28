@@ -14,12 +14,15 @@ usage: cargo run -p mm-lab --bin mmlab -- <command>
 
   up                  start the lab (creating it the first time) and wait
                       until the server answers
-  seed [--bulk N]     fill a running lab with a team, colleagues, channels
+  seed [--bulk N] [--long N]
+                      fill a running lab with a team, colleagues, channels
                       and a conversation; safe to run twice. --bulk adds N
                       further channels, for measuring anything that scales
-                      with how many an account is in
+                      with how many an account is in; --long fills one
+                      channel with N messages, for measuring scrolling
   reset               throw the lab away and build a fresh seeded one
   ui [--contained|--headless] [--only <name>] [--shots <dir>] [--keep-data]
+     [--perf [--channel <name>]]
                       drive the client's own widgets against the lab and
                       check the server agrees; a failure writes a screenshot.
                       Builds a fresh server first unless --keep-data
@@ -27,9 +30,12 @@ usage: cargo run -p mm-lab --bin mmlab -- <command>
   status              what is running, and the URL
   watch [as]          print every WebSocket frame the lab sends, as the
                       named account (default: the admin)
+  perf [--headless] [--channel <name>]
+                      scroll one channel top to bottom a fixed number of
+                      pixels per frame, and say what each frame cost
   shot [--out <dir>]  photograph the running lab window, which is what a
                       failing UI scenario does for itself
-  dump [--interfaces] [--menu <channel>]
+  dump [--interfaces] [--open <channel>] [--menu <channel>]
                       print the running lab window's widget tree, which is
                       what the UI tests find their buttons in; --menu opens
                       that channel's menu first
@@ -54,18 +60,33 @@ async fn main() -> ExitCode {
             let bulk = flag(rest, "--bulk")
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(0);
-            mm_lab::seed::seed_with(bulk).await
+            let long = flag(rest, "--long")
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            mm_lab::seed::seed_with(bulk, long).await
         }
         "reset" => reset().await,
         "ui" if rest.iter().any(|a| a == "--contained") => {
             let shots = flag(rest, "--shots").unwrap_or_else(|| "target/ui-failures".into());
+            let perf = rest
+                .iter()
+                .any(|a| a == "--perf")
+                .then(|| flag(rest, "--channel").unwrap_or_else(|| "Long".into()));
             mm_lab::scenarios::contained(
                 std::path::Path::new(&shots),
                 rest.iter().any(|a| a == "--keep-data"),
+                perf.as_deref(),
             )
             .await
         }
-        "ui" if rest.iter().any(|a| a == "--headless") => mm_lab::scenarios::headless(rest),
+        "ui" if rest.iter().any(|a| a == "--headless") => mm_lab::scenarios::headless("ui", rest),
+        "perf" if rest.iter().any(|a| a == "--headless") => {
+            mm_lab::scenarios::headless("perf", rest)
+        }
+        "perf" => {
+            let channel = flag(rest, "--channel").unwrap_or_else(|| "Long".into());
+            mm_lab::scenarios::measure(&channel, rest.iter().any(|a| a == "--guest")).await
+        }
         "ui" => {
             let shots = flag(rest, "--shots").unwrap_or_else(|| "target/ui-failures".into());
             mm_lab::scenarios::run(
@@ -103,6 +124,11 @@ async fn main() -> ExitCode {
 async fn dump(args: &[String]) -> mm_lab::Result<()> {
     let interfaces = args.iter().any(|a| a == "--interfaces");
     let screen = mm_lab::ui::Screen::attach("mmrs.lab").await?;
+    if let Some(channel) = flag(args, "--open") {
+        screen.open_channel(&channel).await?;
+        println!("opened {channel}");
+        return Ok(());
+    }
     if let Some(channel) = flag(args, "--menu") {
         screen.open_channel(&channel).await?;
         screen.press(&channel).await?;

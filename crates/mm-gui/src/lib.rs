@@ -21,6 +21,7 @@
 mod app;
 pub mod bridge;
 mod login;
+mod perf;
 mod row;
 mod spelling;
 

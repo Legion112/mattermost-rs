@@ -3805,9 +3805,17 @@ fn wire(
         let store = Rc::clone(&ui.store);
         let posts = ui.posts.clone();
         let commands = commands.clone();
-        ui.scroller.connect_edge_reached(move |_, edge| match edge {
-            gtk::PositionType::Bottom => stick.set(true),
-            gtk::PositionType::Top => {
+        // Asking for the page before what is held. Shared by the edge and
+        // by the watcher below, because they are the same request made at
+        // two different moments.
+        let ask_for_older = {
+            let loading = Rc::clone(&loading);
+            let restore = Rc::clone(&restore);
+            let selected = Rc::clone(&selected);
+            let store = Rc::clone(&store);
+            let posts = posts.clone();
+            let commands = commands.clone();
+            Rc::new(move || {
                 let Some(channel) = selected.borrow().clone() else {
                     return;
                 };
@@ -3837,7 +3845,21 @@ fn wire(
                         before: oldest,
                     })
                     .ok();
-            }
+            })
+        };
+
+        // Asking *early* -- a screenful before the top -- was tried and
+        // measured worse, which is why it is not here. It does remove the
+        // round trip from the middle of the scroll, but it also packs the
+        // splices closer together: against the lab it took the share of
+        // frames over budget from 24% to 49% and the 99th percentile from
+        // 383ms to 567ms. The stall is the splice, not the request, and
+        // fetching sooner only arrives at it sooner. Worth revisiting if
+        // the splice ever stops being the expensive part.
+        let ask = Rc::clone(&ask_for_older);
+        ui.scroller.connect_edge_reached(move |_, edge| match edge {
+            gtk::PositionType::Bottom => stick.set(true),
+            gtk::PositionType::Top => ask(),
             _ => {}
         });
     }
@@ -4926,6 +4948,43 @@ fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
 /// which is what every other Mattermost client draws and what makes an
 /// alert's details readable at all.
 fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
+    // The overwhelmingly common message is one paragraph of text, and
+    // these rows are recycled: throwing the label away and building
+    // another one is most of what binding a row costs. Measured at
+    // 0.37ms a bind and four thousand binds in a twenty-second scroll,
+    // which is one and a half seconds of a twenty-two second run spent
+    // rebuilding widgets that could have been written to instead.
+    //
+    // Only the exact shape that is safe to reuse: one plain text block,
+    // not quoted, and a box already holding exactly one label. Anything
+    // else -- a code block, a list, a table, a message with a picture in
+    // the middle of a line -- falls through to being rebuilt.
+    if let [block] = blocks
+        && block.kind == BlockKind::Text
+        && !block.quoted
+        && block.emoji.is_empty()
+        && let Some(only) = into.first_child()
+        && only.next_sibling().is_none()
+        && let Some(label) = only.downcast_ref::<gtk::Label>()
+    {
+        // set_markup on text that is not markup makes GTK log and drop
+        // it, the same trap `card_label` documents. And `set_text` does
+        // **not** clear `use-markup`, so a recycled row that last held a
+        // marked-up message would read the next one's plain text as
+        // markup -- angle brackets and ampersands in somebody's message
+        // would vanish. Saying which it is, every time, is the only way
+        // this reuse is safe.
+        if block.markup {
+            label.set_markup(&block.text);
+        } else {
+            label.set_use_markup(false);
+            label.set_text(&block.text);
+        }
+        label.remove_css_class("dim-label");
+        into.set_visible(true);
+        return;
+    }
+
     while let Some(old) = into.first_child() {
         into.remove(&old);
     }
@@ -6090,9 +6149,11 @@ fn reaction_chip(post: &str, summary: &mm_core::ReactionSummary, emoji: &Emoji) 
 ///
 /// Returns whether anything moved.
 fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
-    let drawn: Vec<PostRow> = (0..model.n_items())
-        .filter_map(|i| model.item(i).and_downcast::<PostRow>())
-        .collect();
+    let drawn: Vec<PostRow> = crate::perf::marked("splice:read_model", || {
+        (0..model.n_items())
+            .filter_map(|i| model.item(i).and_downcast::<PostRow>())
+            .collect()
+    });
 
     // The same rows, some of them redrawn: replace those, one at a time.
     // This is the common case and the one a prefix-and-suffix diff is
@@ -6115,17 +6176,22 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
     }
 
     let shared = drawn.len().min(next.len());
-    let before = (0..shared)
-        .take_while(|i| drawn[*i].matches(&next[*i]))
-        .count();
-    let after = (0..shared - before)
-        .take_while(|i| drawn[drawn.len() - 1 - i].matches(&next[next.len() - 1 - i]))
-        .count();
-    model.splice(
-        u32::try_from(before).unwrap_or(u32::MAX),
-        u32::try_from(drawn.len() - before - after).unwrap_or(u32::MAX),
-        &next[before..next.len() - after],
-    );
+    let (before, after) = crate::perf::marked("splice:diff", || {
+        let before = (0..shared)
+            .take_while(|i| drawn[*i].matches(&next[*i]))
+            .count();
+        let after = (0..shared - before)
+            .take_while(|i| drawn[drawn.len() - 1 - i].matches(&next[next.len() - 1 - i]))
+            .count();
+        (before, after)
+    });
+    crate::perf::marked("splice:model", || {
+        model.splice(
+            u32::try_from(before).unwrap_or(u32::MAX),
+            u32::try_from(drawn.len() - before - after).unwrap_or(u32::MAX),
+            &next[before..next.len() - after],
+        );
+    });
     true
 }
 
@@ -6152,7 +6218,7 @@ fn build_post_list(
             // toolbar. The message under it has just changed, so the
             // toolbar is wrong whatever the pointer is doing.
             hide_tools(item, &for_bind.shown);
-            bind_post_row(item, &for_bind, relative);
+            crate::perf::timed(|| bind_post_row(item, &for_bind, relative));
         }
     });
     let post_view = gtk::ListView::builder()
@@ -6170,6 +6236,12 @@ fn build_post_list(
         // viewport's width, which is what makes a wrapping label wrap.
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+
+    // The channel's list, never the thread pane's: `relative` is what
+    // distinguishes them, and the thread pane is built first and is empty.
+    if crate::perf::watching() && !relative {
+        crate::perf::sweep(&scroller);
+    }
 
     (posts, post_view, scroller)
 }
@@ -6236,9 +6308,11 @@ impl Ui {
                 self.store.borrow_mut().threading = threading;
             }
             Event::Posts { channel, page } => {
-                self.store
-                    .borrow_mut()
-                    .apply_post_list(&channel, &page, PageAnchor::Newest);
+                crate::perf::marked("apply_posts", || {
+                    self.store
+                        .borrow_mut()
+                        .apply_post_list(&channel, &page, PageAnchor::Newest);
+                });
                 if self.selected.borrow().as_ref() == Some(&channel)
                     && *self.pane.borrow() == Pane::Channel
                 {
@@ -8726,6 +8800,20 @@ impl Ui {
     ///
     /// Split from `on_event` so that function stays about the states a
     /// window can be in, and this stays about data arriving.
+    /// A thread's posts arriving, and the pane around them.
+    fn on_thread(&self, root: &PostId, page: &mm_types::PostList) {
+        let _ = self.store.borrow_mut().apply_thread(page);
+        // A thread just opened is read from its newest reply, whatever
+        // the reader was doing in the last one.
+        self.thread_stick.set(true);
+        // The reply half-typed in whatever thread was open before this
+        // one, before the root that names it moves.
+        self.remember_drafts();
+        *self.thread_root.borrow_mut() = Some(root.clone());
+        self.restore_thread_draft(root);
+        self.refresh_thread();
+    }
+
     fn on_data(&self, event: Event) {
         match event {
             Event::Teams(teams) => self.store.borrow_mut().apply_teams(teams),
@@ -8737,19 +8825,10 @@ impl Ui {
                 self.store.borrow_mut().apply_members(members);
                 self.sidebar_soon();
             }
-            Event::Thread { root, page } => {
-                let _ = self.store.borrow_mut().apply_thread(&page);
-                // A thread just opened is read from its newest reply,
-                // whatever the reader was doing in the last one.
-                self.thread_stick.set(true);
-                // The reply half-typed in whatever thread was open
-                // before this one, before the root that names it moves.
-                self.remember_drafts();
-                *self.thread_root.borrow_mut() = Some(root.clone());
-                self.restore_thread_draft(&root);
-                self.refresh_thread();
+            Event::Thread { root, page } => self.on_thread(&root, &page),
+            Event::OlderPosts { channel, page } => {
+                crate::perf::marked("older_page", || self.on_older_posts(&channel, &page));
             }
-            Event::OlderPosts { channel, page } => self.on_older_posts(&channel, &page),
             Event::Avatar { user, image } => self.on_avatar(user, image),
             Event::File { file, image } => self.on_file(file, image),
             Event::LinkImage { url, image } => {
@@ -9178,6 +9257,10 @@ impl Ui {
     }
 
     fn refresh_posts(&self, channel: &ChannelId) {
+        crate::perf::marked("refresh_posts", || self.refresh_posts_inner(channel));
+    }
+
+    fn refresh_posts_inner(&self, channel: &ChannelId) {
         self.refresh_heading(channel);
         // Was the newest message in view before this update? Asked of the
         // model, not of the scroll adjustment: `upper` is an estimate GTK
@@ -9194,7 +9277,11 @@ impl Ui {
         let unread_from = *self.unread_from.borrow();
         let quick = store.favourite_emoji(QUICK_REACTIONS);
         let mut rows: Vec<PostRow> = Vec::with_capacity(visible.len());
-        for row in mm_core::rows::project(&visible, offset, unread_from) {
+        let projected = crate::perf::marked("project_rows", || {
+            mm_core::rows::project(&visible, offset, unread_from)
+        });
+        let started_rows = std::time::Instant::now();
+        for row in projected {
             let (id, grouped) = match row {
                 mm_core::Row::Date { at, date } => {
                     rows.push(PostRow::separator(&describe_day(at, &date)));
@@ -9211,6 +9298,7 @@ impl Ui {
             };
             rows.push(self.row_for(&store, post, grouped, &quick));
         }
+        crate::perf::record("build_rows", started_rows.elapsed());
         // A channel nobody has written in yet says so. Without this it
         // draws as a blank pane, which reads as a channel that failed to
         // load -- there is no way for the reader to tell the difference,
@@ -9229,7 +9317,7 @@ impl Ui {
         // rows are built first and handed over together; and because
         // `ListView` realizes everything it is handed, only the run that
         // actually differs is handed over at all. See docs/gtk-notes.md.
-        splice_changed(&self.posts, &rows);
+        crate::perf::marked("splice", || splice_changed(&self.posts, &rows));
         self.composer_pane.set_sensitive(true);
 
         // No bottom alignment. Resting a short channel's messages on the

@@ -106,6 +106,58 @@ A second-order consequence: `upper` only converges once rows near the
 viewport have been realized, so any measurement taken immediately after a
 splice or a `scroll_to` is premature. Wait a tick.
 
+## Scrolling a long channel: where the time actually goes
+
+Measured with `make perf-test` — the client scrolls itself back through a
+seeded 800-message channel at 120px per frame and reports the distribution of
+frame intervals. Inside the test container, so software-rendered: the absolute
+numbers are worse than a machine with a GPU, and only the comparisons between
+rows of this table mean anything.
+
+Four guesses were measured and three of them were wrong, which is the reason
+this section exists.
+
+| Change | p99 | worst frame | sweep | total stalled |
+|---|---|---|---|---|
+| baseline, 60-message pages | 383ms | 433ms | 22.2s | 962ms |
+| ask for history a screenful early | 567ms | 717ms | 26.0s | 1241ms |
+| 30-message pages | 400ms | 417ms | 26.0s | 1694ms |
+| 200-message pages | 200ms | 433ms | 24.6s | 363ms |
+| **reuse the label instead of rebuilding it** | **233ms** | **250ms** | **19.1s** | **798ms** |
+
+What the breakdown says, and it is not what any of the guesses assumed:
+
+- **Markdown parsing is free.** Building every row model for the whole channel
+  — parse, mention-marking, block rendering — is **3ms**, and projecting them
+  is 0.1ms. The first instinct was to memoise it. There is nothing to win.
+- **The diff is free.** `splice_changed` compares every held row against every
+  new one and costs **0.4ms**. The second instinct was to replace it with a
+  digest. Also nothing to win.
+- **`gio::ListStore::splice` is the stall**: 61–94ms of CPU per page, and the
+  frame it lands in costs 200–430ms once GTK has laid the new rows out.
+- **That cost is mostly per *splice*, not per row.** Halving the page to 30
+  left the cost per call unchanged at 67ms and so doubled the total time
+  stalled. Four 200-message pages stall for 363ms where thirteen 60-message
+  pages stall for 962ms.
+- **Asking for history early makes it worse.** It does take the round trip out
+  of the middle of the scroll, but it packs the splices closer together: the
+  share of frames over budget went from 24% to 49%. The stall is the splice,
+  not the request.
+- **Frames get faster as the model grows**, not slower: 40.7ms mean over the
+  first half of a sweep against 29.2ms over the second. Whatever makes a long
+  channel feel heavy, it is not the number of rows held.
+
+The one change that helped is the one in our own code. A message body was
+rebuilt from scratch on every bind — label destroyed, label created — and
+these rows are recycled, so that is four thousand widget builds in a
+twenty-second scroll. Writing to the existing label when the body is one plain
+paragraph (the overwhelmingly common shape) took the worst frame from 433ms to
+250ms and the whole sweep from 22.2s to 19.1s.
+
+**The remaining stall is GTK's, not ours**, and shrinking it means not
+prepending into the model at all. That is a real piece of work and nobody
+should start it without re-running the table above first.
+
 ## Still untested
 
 - Prepending while at the **very top** (offset 0), where there is no room

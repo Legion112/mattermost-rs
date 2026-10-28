@@ -235,6 +235,12 @@ ui-test-docker: deb ## ui-test inside a container, touching nothing of yours
 	$(CARGO) build --release --locked -p mm-lab --bin mmlab
 	$(MMLAB) ui --contained
 
+.PHONY: perf-test
+perf-test: deb ## Measure scrolling a long channel, in a container
+	@# Needs a channel with history in it: `mmlab seed --long 800`.
+	$(CARGO) build --release --locked -p mm-lab --bin mmlab
+	$(MMLAB) ui --contained --perf
+
 .PHONY: ui-test-here
 ui-test-here: release ## ui-test on the display you are looking at
 	$(MMLAB) ui

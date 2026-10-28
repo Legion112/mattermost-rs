@@ -47,7 +47,12 @@ COPY target/release/mmlab /usr/bin/mmlab
 ENV XDG_RUNTIME_DIR=/run/mmrs
 RUN mkdir -p /run/mmrs && chmod 700 /run/mmrs
 
+# The driver is the entrypoint and the scenarios are the default command,
+# so `docker run <image> perf --headless --guest --channel Long` measures
+# scrolling in the same isolation instead.
+#
 # `--guest` because the server is already up: this container shares the
 # lab server's network namespace, so http://localhost:8065 is it, and
 # there is no Docker in here to manage anything with.
-ENTRYPOINT ["/usr/bin/mmlab", "ui", "--headless", "--guest", "--shots", "/out"]
+ENTRYPOINT ["/usr/bin/mmlab"]
+CMD ["ui", "--headless", "--guest", "--shots", "/out"]
