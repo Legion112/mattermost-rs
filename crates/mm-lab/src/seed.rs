@@ -677,6 +677,138 @@ impl Admin {
         self.api.call(&request).await.map(|_| ())
     }
 
+    /// A seeded colleague's id.
+    async fn user_id(&self, username: &str) -> Result<String> {
+        id_of(
+            &self
+                .api
+                .call(&HttpRequest::get(format!(
+                    "/api/v4/users/username/{username}"
+                )))
+                .await?,
+        )
+    }
+
+    /// Post in a channel as a colleague, so the window hears it over the
+    /// socket. Hands back the post's id.
+    pub async fn say_as(&self, username: &str, channel: &str, text: &str) -> Result<String> {
+        let id = self.channel(channel).await?;
+        let them = Api::as_token(&token_for(username).await?)?;
+        id_of(&them.call(&post(&id, text, None)).await?)
+    }
+
+    /// React to a post as a colleague.
+    pub async fn react_as(&self, username: &str, post_id: &str, emoji: &str) -> Result<()> {
+        let them = Api::as_token(&token_for(username).await?)?;
+        let me = self.user_id(username).await?;
+        them.call(
+            &HttpRequest::new(Method::Post, "/api/v4/reactions").json(&json!({
+                "user_id": me,
+                "post_id": post_id,
+                "emoji_name": emoji,
+            })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Change what a colleague's post says, as them.
+    pub async fn edit_as(&self, username: &str, post_id: &str, text: &str) -> Result<()> {
+        let them = Api::as_token(&token_for(username).await?)?;
+        them.call(
+            &HttpRequest::new(Method::Put, format!("/api/v4/posts/{post_id}/patch"))
+                .json(&json!({ "message": text })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Delete a colleague's post, as them.
+    pub async fn delete_as(&self, username: &str, post_id: &str) -> Result<()> {
+        let them = Api::as_token(&token_for(username).await?)?;
+        them.call(&HttpRequest::new(
+            Method::Delete,
+            format!("/api/v4/posts/{post_id}"),
+        ))
+        .await
+        .map(|_| ())
+    }
+
+    /// Say, as a colleague, that they are typing in a channel: the
+    /// server turns it into the `typing` frame everybody else gets.
+    pub async fn typing_as(&self, username: &str, channel: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        let me = self.user_id(username).await?;
+        let them = Api::as_token(&token_for(username).await?)?;
+        them.call(
+            &HttpRequest::new(Method::Post, format!("/api/v4/users/{me}/typing"))
+                .json(&json!({ "channel_id": id, "parent_id": "" })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Open a direct message to the admin from a colleague who has none
+    /// yet, and say something in it.
+    pub async fn dm_from(&self, username: &str, text: &str) -> Result<()> {
+        let who = self.user_id(username).await?;
+        let them = Api::as_token(&token_for(username).await?)?;
+        let channel = id_of(
+            &them
+                .call(
+                    &HttpRequest::new(Method::Post, "/api/v4/channels/direct")
+                        .json(&json!([who, self.me])),
+                )
+                .await?,
+        )?;
+        them.call(&post(&channel, text, None)).await.map(|_| ())
+    }
+
+    /// The admin's own membership of a channel, notify props and all.
+    pub async fn my_membership(&self, channel: &str) -> Result<Value> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/members/{}",
+                self.me
+            )))
+            .await
+    }
+
+    /// How many messages the server counts unread for the admin in a
+    /// channel.
+    pub async fn my_unread(&self, channel: &str) -> Result<i64> {
+        let id = self.channel(channel).await?;
+        let unread = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/channels/{id}/unread",
+                self.me
+            )))
+            .await?;
+        Ok(unread["msg_count"].as_i64().unwrap_or(-1))
+    }
+
+    /// The texts of the admin's drafts on the team, as the server holds
+    /// them.
+    pub async fn my_drafts(&self) -> Result<Vec<String>> {
+        let drafts = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/teams/{}/drafts",
+                self.me, self.team
+            )))
+            .await?;
+        Ok(drafts
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|d| d["message"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self

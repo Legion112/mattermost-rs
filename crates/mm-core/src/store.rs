@@ -1571,7 +1571,7 @@ impl Store {
 
     pub fn apply_ws(&mut self, event: &WsEvent) -> Vec<Change> {
         match event {
-            WsEvent::Posted { post, .. } => self.on_posted(post),
+            WsEvent::Posted { post, mentions, .. } => self.on_posted(post, mentions),
             WsEvent::PostEdited(post) => {
                 if self.store_post(post.clone()) {
                     vec![Change::Post(post.id.clone())]
@@ -1666,7 +1666,7 @@ impl Store {
         }
     }
 
-    fn on_posted(&mut self, post: &Post) -> Vec<Change> {
+    fn on_posted(&mut self, post: &Post, mentions: &[String]) -> Vec<Change> {
         let mut changes = Vec::new();
         if !self.store_post(post.clone()) {
             return changes;
@@ -1685,6 +1685,21 @@ impl Store {
                 channel.total_msg_count_root += 1;
             }
             channel.last_post_at = channel.last_post_at.max(post.create_at);
+            changes.push(Change::Unread(post.channel_id.clone()));
+        }
+        // The copy sent to a mentioned reader names them in `mentions`,
+        // and the badge is drawn from the membership's own counter: the
+        // server moves that counter without saying so, and a sync is the
+        // only other thing that would. Not for the reader's own message,
+        // which the server never counts against them.
+        if post.user_id != self.me
+            && mentions.iter().any(|who| *who == *self.me.as_str())
+            && let Some(member) = self.my_member.get_mut(&post.channel_id)
+        {
+            member.mention_count += 1;
+            if !post.is_reply() {
+                member.mention_count_root += 1;
+            }
             changes.push(Change::Unread(post.channel_id.clone()));
         }
         changes.extend(self.bump_thread_for(post));

@@ -310,6 +310,19 @@ fn typing_and_status_change_decode() {
         })
     );
 
+    // As the server actually sends it: the channel is on the broadcast.
+    let out = p.on_frame(
+        r#"{"event":"typing","data":{"user_id":"u1","parent_id":""},"broadcast":{"channel_id":"c2"}}"#,
+    );
+    assert_eq!(
+        out[0],
+        WsOutcome::Event(WsEvent::Typing {
+            channel_id: ChannelId::new("c2"),
+            user_id: "u1".to_owned(),
+            parent_id: String::new()
+        })
+    );
+
     let out = p.on_frame(r#"{"event":"status_change","data":{"user_id":"u1","status":"online"}}"#);
     assert_eq!(
         out[0],

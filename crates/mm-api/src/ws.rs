@@ -424,8 +424,13 @@ fn decode_event(
             data,
             "channelMember",
         )?)),
+        // The server puts the channel on the broadcast, not in the data;
+        // the data is read first in case one ever says it there.
         "typing" => Ok(WsEvent::Typing {
-            channel_id: ChannelId::new(str_field(data, "channel_id")),
+            channel_id: ChannelId::new(match str_field(data, "channel_id") {
+                said if said.is_empty() => broadcast.channel_id.clone(),
+                said => said,
+            }),
             user_id: str_field(data, "user_id"),
             parent_id: str_field(data, "parent_id"),
         }),

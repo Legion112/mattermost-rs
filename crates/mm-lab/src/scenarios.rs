@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use crate::seed::Admin;
-use crate::ui::{Find, Screen};
+use crate::ui::{Find, Node, Screen};
 use crate::{Error, Result};
 
 /// Every scenario, in the order they run.
@@ -28,6 +28,13 @@ pub const SCENARIOS: &[&str] = &[
     "shows-a-post-saved-elsewhere",
     "shows-a-thread-reply-count",
     "shows-a-new-reply-in-threads",
+    "shows-who-is-typing",
+    "follows-edits-reactions-and-deletions",
+    "shows-an-unread-and-clears-it",
+    "shows-a-new-direct-message",
+    "mutes-and-unmutes",
+    "sets-how-the-channel-notifies",
+    "keeps-a-draft-on-the-server",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "leaves-a-channel",
@@ -111,6 +118,13 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
         "shows-a-thread-reply-count" => reply_count(screen).await,
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
+        "shows-who-is-typing" => who_is_typing(screen, admin).await,
+        "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
+        "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
+        "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
+        "mutes-and-unmutes" => mutes(screen, admin).await,
+        "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
+        "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
@@ -239,6 +253,184 @@ async fn saved_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
         })
         .await
         .map(|_| ())
+}
+
+/// Somebody typing in the open channel is named under the messages.
+async fn who_is_typing(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    admin.typing_as("ada", "engineering").await?;
+    screen
+        .until("the typing line names ada", |tree| {
+            tree.has("label", "ada is typing…")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// A colleague's message arrives, gets a reaction, is edited and is
+/// deleted, each over the socket, and the window follows every step.
+async fn live_post_changes(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let said = "A fresh message, for reacting to.";
+    let post = admin.say_as("ada", "engineering", said).await?;
+    screen
+        .until("the new message is drawn", |tree| tree.has("label", said))
+        .await?;
+    admin.react_as("ada", &post, "thumbsup").await?;
+    screen
+        .until("the reaction chip appears", |tree| {
+            tree.has("button", "👍 1")
+        })
+        .await?;
+    let edited = "A fresh message, edited.";
+    admin.edit_as("ada", &post, edited).await?;
+    screen
+        .until("the edit is drawn", |tree| {
+            tree.has("label", edited) && !tree.has("label", said)
+        })
+        .await?;
+    admin.delete_as("ada", &post).await?;
+    screen
+        .until("the deleted message is gone", |tree| {
+            !tree.has("label", edited)
+        })
+        .await
+        .map(|_| ())
+}
+
+/// The label right after a sidebar row's name, which is where its badge
+/// or unread dot sits. The *last* label with that name: the title bar
+/// says the open channel's name too, and comes first.
+fn badge_after<'a>(tree: &'a [Node], row: &str) -> Option<&'a str> {
+    let at = tree
+        .iter()
+        .rposition(|n| n.role == "label" && n.name == row)?;
+    let next = tree.get(at + 1)?;
+    (next.role == "label").then_some(next.name.as_str())
+}
+
+/// A mention in a channel that is not open puts a badge on its row,
+/// and opening the channel clears it on the server too.
+async fn unread_and_clears(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    admin
+        .say_as("ada", "design", "@legion something new in Design.")
+        .await?;
+    screen
+        .until("the Design row carries a mention badge", |tree| {
+            badge_after(tree, "Design") == Some("1")
+        })
+        .await?;
+    screen.open_channel("Design").await?;
+    screen
+        .until("the badge is gone", |tree| {
+            !matches!(badge_after(tree, "Design"), Some("1" | "●"))
+        })
+        .await?;
+    let mut unread = -1;
+    for _ in 0..25 {
+        unread = admin.my_unread("design").await?;
+        if unread == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server still counts {unread} unread in Design after it was opened"
+    )))
+}
+
+/// A first message from somebody with no conversation yet makes a
+/// row in the sidebar, and the row opens on the message.
+async fn new_direct_message(screen: &Screen, admin: &Admin) -> Result<()> {
+    // Design, not Engineering: grace speaks in Engineering's thread, and
+    // her name must only be on screen because the sidebar has it.
+    screen.open_channel("Design").await?;
+    let said = "Hello from grace, out of nowhere.";
+    admin.dm_from("grace", said).await?;
+    screen
+        .until("grace appears in the sidebar", |tree| {
+            tree.has("label", "grace")
+        })
+        .await?;
+    screen.select_row("grace").await?;
+    screen
+        .until("her message is drawn", |tree| tree.has("label", said))
+        .await
+        .map(|_| ())
+}
+
+/// Wait for the server's copy of a membership prop to say something.
+async fn membership_says(admin: &Admin, channel: &str, prop: &str, expected: &str) -> Result<()> {
+    let mut last = String::new();
+    for _ in 0..25 {
+        let membership = admin.my_membership(channel).await?;
+        membership["notify_props"][prop]
+            .as_str()
+            .unwrap_or_default()
+            .clone_into(&mut last);
+        if last == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server has {prop}={last:?} on {channel}, expected {expected:?}"
+    )))
+}
+
+/// The mute switch in the channel menu reaches the server both ways.
+async fn mutes(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("Engineering").await?;
+    screen.press("Mute").await?;
+    membership_says(admin, "engineering", "mark_unread", "mention").await?;
+    screen.press("Mute").await?;
+    membership_says(admin, "engineering", "mark_unread", "all").await?;
+    screen.close_menu("Engineering").await
+}
+
+/// The row of notify buttons in the channel menu reaches the server.
+async fn notify_level(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("Engineering").await?;
+    screen.press("Mentions").await?;
+    membership_says(admin, "engineering", "desktop", "mention").await?;
+    screen.press("Default").await?;
+    membership_says(admin, "engineering", "desktop", "default").await?;
+    screen.close_menu("Engineering").await
+}
+
+/// Wait for the server's drafts to hold, or not hold, a text.
+async fn drafts_hold(admin: &Admin, text: &str, expected: bool) -> Result<()> {
+    let mut last = Vec::new();
+    for _ in 0..40 {
+        last = admin.my_drafts().await?;
+        if last.iter().any(|d| d == text) == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server's drafts are {last:?}; expected {text:?} to be held: {expected}"
+    )))
+}
+
+/// Typing in the box writes a draft to the server a moment later, and
+/// emptying the box takes it back.
+async fn draft_on_server(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let tree = screen
+        .until("the composer is on screen", |tree| {
+            tree.has("text box", "Write a message…")
+        })
+        .await?;
+    let composer = tree.find("text box", "Write a message…")?;
+    let half = "Half a thought, left in the box";
+    screen.type_into(composer, half).await?;
+    drafts_hold(admin, half, true).await?;
+    screen.type_into(composer, "").await?;
+    drafts_hold(admin, half, false).await
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

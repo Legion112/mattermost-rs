@@ -3678,3 +3678,64 @@ fn a_preference_changed_elsewhere_saves_and_unsaves() {
     store.apply_ws(&WsEvent::PreferencesDeleted(vec![other]));
     assert!(!store.prefs.contains_key(&key));
 }
+
+/// The copy of a `posted` sent to a mentioned reader names them, and
+/// that is the only live word of a mention: the badge is drawn from the
+/// membership counter, which the server moves without saying so.
+#[test]
+fn a_live_mention_raises_the_badge_until_the_channel_is_viewed() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let mention = |id: &str, who: &str| WsEvent::Posted {
+        post: Post {
+            user_id: UserId::new(who),
+            ..post(id, "c1", 900)
+        },
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: vec![ME.to_owned()],
+    };
+    let before = s.unread(&c1).mentions;
+    let changes = s.apply_ws(&mention("p-m1", "u-other"));
+    assert!(changes.contains(&Change::Unread(c1.clone())));
+    assert_eq!(s.unread(&c1).mentions, before + 1);
+    assert_eq!(s.my_member[&c1].mention_count_root, before + 1);
+
+    // Saying your own name is not a mention the server counts.
+    s.apply_ws(&mention("p-m2", ME));
+    assert_eq!(s.unread(&c1).mentions, before + 1);
+
+    // Replayed after a reconnect, it is the same message and counts once.
+    s.apply_ws(&mention("p-m1", "u-other"));
+    assert_eq!(s.unread(&c1).mentions, before + 1);
+
+    // A reply mentions too, but only the plain counter moves.
+    s.apply_ws(&WsEvent::Posted {
+        post: Post {
+            user_id: UserId::new("u-other"),
+            root_id: PostId::new("p-m1"),
+            ..post("p-m3", "c1", 901)
+        },
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: vec![ME.to_owned()],
+    });
+    assert_eq!(s.my_member[&c1].mention_count, before + 2);
+    assert_eq!(s.my_member[&c1].mention_count_root, before + 1);
+
+    // In a channel the reader has no membership for, nothing to count on.
+    let elsewhere = WsEvent::Posted {
+        post: Post {
+            user_id: UserId::new("u-other"),
+            ..post("p-m4", "c-unknown", 902)
+        },
+        channel_display_name: String::new(),
+        sender_name: String::new(),
+        team_id: String::new(),
+        mentions: vec![ME.to_owned()],
+    };
+    s.apply_ws(&elsewhere);
+    assert!(!s.my_member.contains_key(&ChannelId::new("c-unknown")));
+}

@@ -186,6 +186,11 @@ struct Ui {
     /// An avatar arrived, which changes how the sidebar looks without
     /// changing any of the rows it is built from.
     sidebar_stale: Rc<std::cell::Cell<bool>>,
+    /// When a sync was last asked for because a message arrived in a
+    /// channel the store did not know. Once in a while, not once per
+    /// message: the first message in a new conversation is followed by
+    /// the second before the sync has answered.
+    resync_asked: Rc<std::cell::Cell<Option<std::time::Instant>>>,
     /// Whether a redraw is already queued.
     ///
     /// Avatars and images arrive one at a time, and each one used to redraw
@@ -1177,6 +1182,7 @@ fn build(
         thread_root: Rc::new(RefCell::new(None)),
         drawn_sidebar: Rc::new(RefCell::new(None)),
         sidebar_stale: Rc::new(std::cell::Cell::new(false)),
+        resync_asked: Rc::new(std::cell::Cell::new(None)),
         redraw_queued: Rc::new(std::cell::Cell::new(false)),
         redraw_cost: Rc::new(std::cell::Cell::new(std::time::Duration::ZERO)),
         sidebar_queued: Rc::new(std::cell::Cell::new(false)),
@@ -1612,6 +1618,10 @@ fn open_custom_status_dialog(ui: &Ui, near: &gtk::Widget) {
 
     window.present();
 }
+
+/// How long after asking for a sync over an unknown channel another such
+/// message is not another request.
+const RESYNC_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How wide the custom status dialog opens.
 const CUSTOM_STATUS_WIDTH: i32 = 420;
@@ -2420,6 +2430,11 @@ fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
         // never to the text: nobody indents a chat message.
         .accepts_tab(false)
         .build();
+    {
+        // A placeholder is not a name; see the add-somebody field.
+        use gtk::prelude::AccessibleExtManual as _;
+        view.update_property(&[gtk::accessible::Property::Label(placeholder)]);
+    }
     let hint = gtk::Label::builder()
         .label(placeholder)
         .xalign(0.0)
@@ -8021,6 +8036,11 @@ impl Ui {
         row.append(&words);
 
         let switch = gtk::Switch::new();
+        {
+            // The words beside it are not its name.
+            use gtk::prelude::AccessibleExtManual as _;
+            switch.update_property(&[gtk::accessible::Property::Label("Mute")]);
+        }
         switch.set_valign(gtk::Align::Center);
         switch.set_active(self.store.borrow().is_muted(channel));
         let ui = self.clone();
@@ -8953,10 +8973,34 @@ impl Ui {
         self.refresh_moods();
     }
 
+    /// A message in a channel the store has never heard of -- the first
+    /// word of a new direct message, or a channel the reader was just
+    /// added to -- is a channel the sidebar is missing, and only a sync
+    /// brings the channel, its membership and its place in a category.
+    fn learn_new_channel(&self, ws: &mm_api::ws::WsEvent) {
+        let mm_api::ws::WsEvent::Posted { post, .. } = ws else {
+            return;
+        };
+        if self.store.borrow().channels.contains_key(&post.channel_id) {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let recently = self
+            .resync_asked
+            .get()
+            .is_some_and(|at| now.duration_since(at) < RESYNC_PAUSE);
+        if recently {
+            return;
+        }
+        self.resync_asked.set(Some(now));
+        self.commands.send(Command::Sync).ok();
+    }
+
     /// A frame from the socket: apply it, and redraw what it touched.
     fn on_ws(&self, ws: &mm_api::ws::WsEvent) {
         self.on_membership(ws);
         self.maybe_notify(ws);
+        self.learn_new_channel(ws);
         let changes = self.store.borrow_mut().apply_ws(ws);
         if changes.is_empty() {
             return;

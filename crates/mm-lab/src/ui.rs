@@ -553,14 +553,17 @@ On screen: {named:#?}",
 
     /// Press a button by its name, once the window is showing one.
     pub async fn press(&self, name: &str) -> Result<()> {
+        // A toggle and a switch press the same way: one action, the first.
+        const PRESSABLE: [&str; 4] = ["button", "push button", "toggle button", "switch"];
         let tree = self
             .until(&format!("a button called {name:?} is on screen"), |tree| {
-                tree.has("push button", name) || tree.has("button", name)
+                PRESSABLE.iter().any(|role| tree.has(role, name))
             })
             .await?;
-        let button = tree
-            .find("button", name)
-            .or_else(|_| tree.find("push button", name))?;
+        let button = PRESSABLE
+            .iter()
+            .find_map(|role| tree.find(role, name).ok())
+            .ok_or_else(|| Error(format!("no button called {name:?}")))?;
         self.click(button).await
     }
 }

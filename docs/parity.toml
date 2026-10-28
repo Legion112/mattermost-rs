@@ -37,7 +37,16 @@ mention total. CollapsedThreads came back as always_on and the client switched \
 itself to root-only counting. Still NOT verified at the edges: a muted channel \
 holding a direct mention, DM channels, and the interaction with \
 ignore_channel_mentions. That policy lives in the webapp's TypeScript \
-selectors and wants a recorded trace rather than more reading."""
+selectors and wants a recorded trace rather than more reading.
+
+A mention arriving live counts now too. The copy of a `posted` the server \
+sends a mentioned reader names them in `mentions`, and the membership's \
+own mention counter -- which the server moves without saying so -- is \
+raised here the same way, so the badge appears with the message rather \
+than with the next sync. Not for the reader's own message, and not twice \
+for a frame replayed after a reconnect. Verified in the lab: a colleague's \
+`@legion` in a channel not open put a 1 on its row, and opening the \
+channel took it off here and left the server counting none."""
 
 [[feature]]
 id       = "calls"
@@ -158,7 +167,14 @@ nothing at all: the page was refused and thrown away, and the channel went on \
 showing yesterday's messages with nothing newer. NOT yet done: closing the \
 gap eagerly with `after=` paging rather than waiting for the reader to \
 scroll, and catching up channels other than the open one, which re-fetch when \
-they are next opened."""
+they are next opened.
+
+A message in a channel the store has never heard of -- the first word of \
+a new direct message, or a channel the reader was just added to -- asks \
+for a sync, at most once every few seconds, since only a sync brings the \
+channel, its membership and its category. Verified in the lab: a first \
+message from a colleague with no conversation yet made her row in the \
+sidebar, and the row opened on the message."""
 
 [[feature]]
 id       = "desktop.notifications"
@@ -664,7 +680,14 @@ were about to say something when you were only looking.
 Verified on a live account: the server answered the frame with `status: \
 OK`. NOT verified: that a colleague's client draws it, which is their \
 client's business and cannot be seen from this account -- Mattermost does \
-not show you your own typing."""
+not show you your own typing.
+
+The lab caught the frame being read wrong: the server puts the channel \
+on the frame's *broadcast*, not in its data, and a decoder reading the \
+data alone filed every typing notice under an empty channel. Read from \
+the data first and the broadcast second now. Verified in the lab: a \
+colleague's `POST /users/{id}/typing` put "ada is typing…" under the \
+open channel's messages."""
 
 [[feature]]
 id       = "posts.message_times"
