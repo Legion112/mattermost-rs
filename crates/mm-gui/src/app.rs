@@ -6155,24 +6155,42 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
             .collect()
     });
 
-    // The same rows, some of them redrawn: replace those, one at a time.
-    // This is the common case and the one a prefix-and-suffix diff is
-    // worst at -- an avatar arriving changes every row that person wrote,
-    // scattered down the channel, and the run from the first of them to
-    // the last is most of it.
+    // The same rows, some of them redrawn. This is the common case: an
+    // avatar arriving changes every row that person wrote, scattered down
+    // the channel.
+    //
+    // Replaced in **runs**, not one at a time, and not as one span from
+    // the first change to the last either. Both extremes were measured
+    // and both are bad. A `splice` costs what it costs per *call* --
+    // sixty rows and thirty rows cost the same 67ms in the scroll
+    // benchmark -- so one call per changed row is one fixed cost per
+    // changed row: on a real account that was 1.17 seconds across six
+    // refreshes, and the single worst frame of the session was 2.4s.
+    // Replacing everything between the first change and the last is one
+    // call, but it re-binds every untouched row in between, and a bind
+    // on a real message costs 6ms.
+    //
+    // So: group the changed rows into runs, letting a run swallow a
+    // short gap of unchanged ones, because paying a few binds to save a
+    // whole splice is the trade that is worth making.
     if drawn.len() == next.len() {
-        let mut changed = false;
-        for (at, row) in next.iter().enumerate() {
-            if !drawn[at].matches(row) {
-                model.splice(
-                    u32::try_from(at).unwrap_or(u32::MAX),
-                    1,
-                    std::slice::from_ref(row),
-                );
-                changed = true;
-            }
+        let changed: Vec<usize> = (0..next.len())
+            .filter(|at| !drawn[*at].matches(&next[*at]))
+            .collect();
+        if changed.is_empty() {
+            return false;
         }
-        return changed;
+        for (from, upto) in runs(&changed, SPLICE_GAP) {
+            let count = upto - from + 1;
+            crate::perf::marked("splice:run", || {
+                model.splice(
+                    u32::try_from(from).unwrap_or(u32::MAX),
+                    u32::try_from(count).unwrap_or(u32::MAX),
+                    &next[from..=upto],
+                );
+            });
+        }
+        return true;
     }
 
     let shared = drawn.len().min(next.len());
@@ -6193,6 +6211,29 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
         );
     });
     true
+}
+
+/// How many unchanged rows a run may swallow before it is cheaper to
+/// start another one.
+///
+/// A `splice` call costs far more than a row bind -- tens of
+/// milliseconds against six -- so the break-even is well above one. Eight
+/// is deliberately short of that: it keeps the arithmetic obviously on
+/// the right side of the trade without turning a scattered handful of
+/// changes into a rewrite of the whole channel.
+const SPLICE_GAP: usize = 8;
+
+/// Group sorted indices into `(first, last)` runs, merging any two that
+/// are separated by at most `gap` positions.
+fn runs(sorted: &[usize], gap: usize) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for &at in sorted {
+        match out.last_mut() {
+            Some((_, last)) if at <= *last + gap + 1 => *last = at,
+            _ => out.push((at, at)),
+        }
+    }
+    out
 }
 
 fn build_post_list(
@@ -9392,5 +9433,43 @@ impl Ui {
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SPLICE_GAP, runs};
+
+    /// The grouping that decides how many `splice` calls a redraw costs.
+    ///
+    /// Measured on a real account, one call per changed row cost 1.17
+    /// seconds across six refreshes; a `splice` is expensive per call and
+    /// nearly free per row, so the arithmetic that matters is how many
+    /// calls this produces.
+    #[test]
+    fn changed_rows_group_into_as_few_runs_as_the_gaps_allow() {
+        assert_eq!(runs(&[], SPLICE_GAP), Vec::new());
+        assert_eq!(runs(&[4], SPLICE_GAP), vec![(4, 4)]);
+
+        // Adjacent rows are one run.
+        assert_eq!(runs(&[0, 1, 2], SPLICE_GAP), vec![(0, 2)]);
+
+        // A gap the run may swallow: 3 to 11 is eight unchanged rows
+        // between them, which is the limit.
+        assert_eq!(runs(&[3, 12], SPLICE_GAP), vec![(3, 12)]);
+
+        // One further apart, and it is cheaper to make a second call.
+        assert_eq!(runs(&[3, 13], SPLICE_GAP), vec![(3, 3), (13, 13)]);
+
+        // The shape this exists for: one person's avatar arrives and
+        // every row they wrote changes, scattered down the channel.
+        assert_eq!(
+            runs(&[0, 1, 9, 20, 21, 22, 60], SPLICE_GAP),
+            vec![(0, 9), (20, 22), (60, 60)],
+            "seven changed rows become three calls, not seven"
+        );
+
+        // A gap of zero never merges anything but true neighbours.
+        assert_eq!(runs(&[1, 2, 4], 0), vec![(1, 2), (4, 4)]);
     }
 }
