@@ -1104,6 +1104,7 @@ fn build(
     let reopen = (!channel.is_empty()).then(|| ChannelId::new(channel.as_str()));
     let emoji = Emoji::new(&store, commands);
     let rows = RowContext::new(commands, &store, &server, &emoji);
+    install_mention_cards(&store, &rows.avatars, &emoji);
     let (posts, post_view, scroller) = build_post_list(&rows, false);
     // The page shown before any channel is open, and the one every
     // channel's own list is added beside.
@@ -3363,6 +3364,7 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
     // a thread without reaching for the mouse. Only from the channel
     // box: the thread box is already in one.
     attach_reply_last(ui, composer);
+    attach_react_last(ui, composer);
     attach_edit_last(ui, thread_composer, |ui| {
         let root = ui.thread_root.borrow().clone()?;
         let store = ui.store.borrow();
@@ -3551,6 +3553,52 @@ fn attach_reply_last(ui: &Ui, view: &gtk::TextView) {
             return glib::Propagation::Proceed;
         };
         ui.commands.send(Command::OpenThread(post)).ok();
+        glib::Propagation::Stop
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    view.add_controller(keys);
+}
+
+/// Ctrl+Shift+\ opens the emoji picker on the last message in the
+/// channel, whoever wrote it: Mattermost's own binding for reacting
+/// without reaching for the mouse. Any state of the box, since it is
+/// not a typing key; the picker is the one the hover toolbar opens.
+fn attach_react_last(ui: &Ui, view: &gtk::TextView) {
+    let keys = gtk::EventControllerKey::new();
+    let ui = ui.clone();
+    let box_ = view.clone();
+    let picking = Rc::new(std::cell::Cell::new(false));
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if (key != gdk::Key::backslash && key != gdk::Key::bar)
+            || state != gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+        {
+            return glib::Propagation::Proceed;
+        }
+        let last = {
+            let channel = ui.selected.borrow().clone();
+            let store = ui.store.borrow();
+            channel.and_then(|channel| store.last_post(&channel).map(|post| post.id.clone()))
+        };
+        let Some(post) = last else {
+            return glib::Propagation::Proceed;
+        };
+        let (store, commands) = (Rc::clone(&ui.store), ui.commands.clone());
+        picking.set(true);
+        open_emoji_picker(
+            box_.upcast_ref::<gtk::Widget>(),
+            &picking,
+            &ui.emoji,
+            move |shortcode| {
+                let add = !store.borrow().reacted(&post, shortcode);
+                commands
+                    .send(Command::React {
+                        post: post.clone(),
+                        emoji: shortcode.to_owned(),
+                        add,
+                    })
+                    .ok();
+            },
+        );
         glib::Propagation::Stop
     });
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -4067,6 +4115,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("<Shift>Return", "New line"),
             ("Up", "Edit your last message, in an empty box"),
             ("<Shift>Up", "Reply to the last message"),
+            ("<Control><Shift>backslash", "React to the last message"),
             ("at", "Offer the people in this channel"),
             ("colon", "Offer emoji, the server's own first"),
             ("Tab", "Accept what is offered"),
@@ -5375,13 +5424,68 @@ fn iter_under(view: &gtk::TextView, x: f64, y: f64) -> Option<gtk::TextIter> {
     view.iter_at_location(bx, by)
 }
 
+/// See `ON_MENTION`: the view the name is in, where in it, and the name.
+type MentionHandler = Rc<dyn Fn(&gtk::TextView, gdk::Rectangle, &str)>;
+
+thread_local! {
+    /// What a click on an `@name` in a message does, installed once the
+    /// window exists and knows people. A thread-local because the
+    /// `TextView` it is wired into is built four layers below anything
+    /// that holds the store or the faces, on every bind of a recycled
+    /// row, and threading a context down for one click handler was the
+    /// wrong trade. GTK is one thread.
+    static ON_MENTION: RefCell<Option<MentionHandler>> = RefCell::new(None);
+}
+
+/// The mention tag under an iter, if it is on one.
+fn mention_tag_at(at: &gtk::TextIter) -> Option<gtk::TextTag> {
+    at.tags().into_iter().find(|tag| {
+        tag.name()
+            .is_some_and(|n| n == "mention" || n == "mention-me")
+    })
+}
+
+/// Whether a buffer holds any `@name` at all, so a paragraph without
+/// one gets no click handler.
+fn has_mention(buffer: &gtk::TextBuffer) -> bool {
+    ["mention", "mention-me"].iter().any(|name| {
+        buffer.tag_table().lookup(name).is_some_and(|tag| {
+            let mut it = buffer.start_iter();
+            it.forward_to_tag_toggle(Some(&tag))
+        })
+    })
+}
+
+/// Open the profile card for the `@name` under a click, where it was
+/// clicked. Nothing happens for a name the store does not know.
+fn card_for_mention(text: &gtk::TextView, at: &gtk::TextIter, tag: &gtk::TextTag) {
+    let mut start = *at;
+    if !start.starts_tag(Some(tag)) {
+        start.backward_to_tag_toggle(Some(tag));
+    }
+    let mut end = *at;
+    end.forward_to_tag_toggle(Some(tag));
+    let word = text.buffer().text(&start, &end, false);
+    let name = word.trim_start_matches('@').to_owned();
+    let spot = text.iter_location(at);
+    let (x, y) = text.buffer_to_window_coords(gtk::TextWindowType::Widget, spot.x(), spot.y());
+    let rect = gdk::Rectangle::new(x, y, spot.width().max(1), spot.height().max(1));
+    ON_MENTION.with(|handler| {
+        if let Some(handler) = &*handler.borrow() {
+            handler(text, rect, &name);
+        }
+    });
+}
+
 /// Open a link in a `TextView`, which has no `activate-link` of its own.
 ///
 /// Released rather than pressed, and only when the press and the release
 /// are on the same link: a drag that starts on a link and ends in the
 /// text beside it is somebody selecting, not somebody clicking.
 fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
-    if hrefs.borrow().is_empty() {
+    // And the same for an `@name`: the card, where the name is.
+    let mentions = has_mention(&view.buffer());
+    if hrefs.borrow().is_empty() && !mentions {
         return;
     }
     let click = gtk::GestureClick::new();
@@ -5409,6 +5513,9 @@ fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
                 |_| {},
             );
             gesture.set_state(gtk::EventSequenceState::Claimed);
+        } else if let Some(tag) = mention_tag_at(&at) {
+            card_for_mention(&text, &at, &tag);
+            gesture.set_state(gtk::EventSequenceState::Claimed);
         }
     });
     view.add_controller(click);
@@ -5418,9 +5525,11 @@ fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
     let text = view.clone();
     motion.connect_motion(move |_, x, y| {
         let over = iter_under(&text, x, y).is_some_and(|at| {
-            at.tags()
-                .iter()
-                .any(|t| t.name().is_some_and(|n| n.starts_with("link-")))
+            mention_tag_at(&at).is_some()
+                || at
+                    .tags()
+                    .iter()
+                    .any(|t| t.name().is_some_and(|n| n.starts_with("link-")))
         });
         text.set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
     });
@@ -6238,6 +6347,32 @@ impl RowWidgets {
             reactions,
         })
     }
+}
+
+/// Make a click on an `@name` in a message open that person's card,
+/// pointing at the name. See `ON_MENTION` for why this is installed
+/// rather than wired.
+fn install_mention_cards(store: &Rc<RefCell<Store>>, avatars: &Avatars, emoji: &Emoji) {
+    let store = Rc::clone(store);
+    let avatars = Rc::clone(avatars);
+    let emoji = emoji.clone();
+    let handler: MentionHandler = Rc::new(move |view, rect, name| {
+        let who = store
+            .borrow()
+            .users
+            .values()
+            .find(|user| user.username.eq_ignore_ascii_case(name))
+            .cloned();
+        let Some(user) = who else {
+            return;
+        };
+        let card = profile_card(&store, &avatars, &user, &emoji);
+        card.set_parent(view);
+        card.set_pointing_to(Some(&rect));
+        card.connect_closed(gtk::Popover::unparent);
+        card.popup();
+    });
+    ON_MENTION.with(|slot| *slot.borrow_mut() = Some(handler));
 }
 
 /// The author's face, assigned only when it is a different one.

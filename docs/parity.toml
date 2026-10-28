@@ -809,8 +809,11 @@ message's does, so one of the server's own draws as a picture. Verified on \
 a live account: a colleague whose status has no expiry shows their emoji \
 and their words, and the two dozen expired ones show nothing.
 
-NOT built: setting your own, and the card over a `@mention` in message \
-text rather than over the author's name."""
+The card opens over an `@mention` in message text too, pointing at the \
+name, for anybody the store knows; the click is told from a drag the \
+way a link's is. NOT verified in the lab, which cannot deliver a click \
+into a `TextView` -- the handler is the link handler's twin and the card \
+is the author-name one. NOT built: setting your own."""
 
 [[feature]]
 id       = "sidebar.drag_between_categories"
@@ -1411,5 +1414,8 @@ that described half of them accurately would be worse than one plainly \
 maintained by hand. Verified on a live account: Ctrl+/ drew both groups \
 with the right keys on them.
 
-NOT built: Alt+Shift+Up/Down across teams, and reacting to the last \
-message from the keyboard."""
+**Ctrl+Shift+\ reacts to the last message**, Mattermost's own binding: \
+it opens the emoji picker on the newest message in the channel, whoever \
+wrote it, and picking one toggles the reaction the way the quick \
+buttons do. NOT verified in the lab, whose driver cannot press chords \
+into a text view. NOT built: Alt+Shift+Up/Down across teams."""
