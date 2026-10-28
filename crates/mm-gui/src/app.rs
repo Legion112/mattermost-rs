@@ -270,7 +270,20 @@ struct Ui {
     asked: Rc<RefCell<HashSet<UserId>>>,
     /// The same, for attached images.
     asked_files: Rc<RefCell<HashSet<mm_types::FileId>>>,
-    posts: gio::ListStore,
+    /// The model the view is showing: the open channel's own.
+    ///
+    /// Swappable, because there is one per channel. Switching used to
+    /// splice one channel's rows out and another's in, which on a real
+    /// account was 633ms of `ListStore::splice` for a conversation the
+    /// reader had already looked at once. Now the view is handed the
+    /// model that channel already has.
+    posts: Rc<RefCell<gio::ListStore>>,
+    /// A model per channel, most recently opened last.
+    ///
+    /// Bounded: a reader who visits forty channels should not be holding
+    /// forty channels' worth of built rows, and the ones they have not
+    /// looked at for a while are the cheapest to rebuild.
+    models: Rc<RefCell<Vec<(ChannelId, gio::ListStore)>>>,
     post_view: gtk::ListView,
     scroller: gtk::ScrolledWindow,
     /// Whether the view should follow new messages.
@@ -1136,7 +1149,8 @@ fn build(
         viewer: Rc::clone(&rows.viewer),
         asked: Rc::new(RefCell::new(HashSet::new())),
         asked_files: Rc::new(RefCell::new(HashSet::new())),
-        posts,
+        posts: Rc::new(RefCell::new(posts)),
+        models: Rc::new(RefCell::new(Vec::new())),
         post_view,
         scroller,
         stick_to_bottom: Rc::new(std::cell::Cell::new(true)),
@@ -5901,6 +5915,14 @@ fn restate_members(list: &gtk::ListBox, heading: &gtk::Label) {
     heading.set_label(&members_heading(count));
 }
 
+/// How many channels keep their built rows for next time.
+///
+/// Enough to cover the handful somebody moves between all day, few
+/// enough that it is not forty channels' worth of widgets. The ones
+/// evicted are the ones not looked at for longest, and rebuilding one
+/// costs what opening it cost the first time.
+const CHANNELS_KEPT_DRAWN: usize = 12;
+
 /// How many of a channel's posts the model holds at once.
 ///
 /// The official client caps a channel at fifty rows around an anchor
@@ -6294,14 +6316,14 @@ fn older_asker(
     loading: &Rc<std::cell::Cell<bool>>,
     restore: &Rc<RefCell<Option<PostId>>>,
     selected: &Rc<RefCell<Option<ChannelId>>>,
-    posts: &gio::ListStore,
+    posts: &Rc<RefCell<gio::ListStore>>,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
 ) -> Rc<dyn Fn()> {
     let ui = ui.clone();
     let loading = Rc::clone(loading);
     let restore = Rc::clone(restore);
     let selected = Rc::clone(selected);
-    let posts = posts.clone();
+    let posts = Rc::clone(posts);
     let commands = commands.clone();
     Rc::new(move || {
         let Some(channel) = selected.borrow().clone() else {
@@ -6318,8 +6340,10 @@ fn older_asker(
         // is a date separator and carries no id, so this walks to
         // the first real message -- reading row 0 would find an
         // empty id and never backfill at all.
-        let Some(oldest) = (0..posts.n_items())
-            .filter_map(|i| posts.item(i).and_downcast::<PostRow>())
+        // The model the view is showing now, which is this channel's.
+        let drawn = posts.borrow().clone();
+        let Some(oldest) = (0..drawn.n_items())
+            .filter_map(|i| drawn.item(i).and_downcast::<PostRow>())
             .map(|row| PostId::new(row.id()))
             .find(|id| !id.as_str().is_empty())
         else {
@@ -7945,6 +7969,39 @@ impl Ui {
         }
     }
 
+    /// Hand the view this channel's own model.
+    ///
+    /// Each channel keeps the rows it was last drawn with, so opening one
+    /// again is `set_model` and a reconcile rather than splicing one
+    /// conversation out and another in. The reconcile is the ordinary
+    /// `refresh_posts` that follows: where nothing has changed it finds
+    /// nothing to splice, which is the whole point.
+    fn show_model_for(&self, channel: &ChannelId) {
+        let model = {
+            let mut models = self.models.borrow_mut();
+            if let Some(at) = models.iter().position(|(id, _)| id == channel) {
+                // Most recently opened goes last, so the eviction below
+                // always takes the one nobody has looked at for longest.
+                let held = models.remove(at);
+                models.push(held.clone());
+                held.1
+            } else {
+                let fresh = gio::ListStore::new::<PostRow>();
+                models.push((channel.clone(), fresh.clone()));
+                if models.len() > CHANNELS_KEPT_DRAWN {
+                    models.remove(0);
+                }
+                fresh
+            }
+        };
+        if self.posts.borrow().as_ptr() == model.as_ptr() {
+            return;
+        }
+        *self.posts.borrow_mut() = model.clone();
+        self.post_view
+            .set_model(Some(&gtk::NoSelection::new(Some(model))));
+    }
+
     /// Go somewhere readable after the open channel has gone.
     ///
     /// Leaving a channel, or being removed from one, leaves the window
@@ -8290,6 +8347,7 @@ impl Ui {
         // which is what makes opening one cost the same whether it was
         // read for the first time or scrolled through all morning.
         self.shown_window.set(CHANNEL_WINDOW);
+        self.show_model_for(id);
         self.restore_draft(id);
         self.show_pane(&Pane::Channel);
         // Draw what is already held, before asking for anything. A
@@ -9463,7 +9521,8 @@ impl Ui {
         // model, not of the scroll adjustment: `upper` is an estimate GTK
         // revises as rows are realized, and it was observed moving 20% in both
         // directions inside one run. See docs/gtk-notes.md.
-        let was_at_end = self.posts.n_items() == 0 || self.stick_to_bottom.get();
+        let model = self.posts.borrow().clone();
+        let was_at_end = model.n_items() == 0 || self.stick_to_bottom.get();
 
         let store = self.store.borrow();
         // Date separators and author grouping are computed in mm-core, where
@@ -9517,7 +9576,7 @@ impl Ui {
         // rows are built first and handed over together; and because
         // `ListView` realizes everything it is handed, only the run that
         // actually differs is handed over at all. See docs/gtk-notes.md.
-        crate::perf::marked("splice", || splice_changed(&self.posts, &rows));
+        crate::perf::marked("splice", || splice_changed(&model, &rows));
         self.composer_pane.set_sensitive(true);
 
         // No bottom alignment. Resting a short channel's messages on the
@@ -9534,16 +9593,25 @@ impl Ui {
         // and the two cannot both apply -- reaching the top edge means they
         // had already scrolled away from the bottom.
         if let Some(anchor) = self.restore_to.borrow_mut().take() {
-            let at = (0..self.posts.n_items())
-                .filter_map(|i| self.posts.item(i).and_downcast::<PostRow>().map(|r| (i, r)))
+            let at = (0..model.n_items())
+                .filter_map(|i| model.item(i).and_downcast::<PostRow>().map(|r| (i, r)))
                 .find(|(_, row)| row.id() == anchor.as_str())
                 .map(|(i, _)| i);
             if let Some(at) = at {
                 let view = self.post_view.clone();
+                let posts = model.clone();
                 // The same timer as the initial scroll, for the same reason:
                 // ListView has not measured the rows it was just handed.
                 glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
-                    view.scroll_to(at, gtk::ListScrollFlags::empty(), None);
+                    // Checked again here, not only when the index was
+                    // taken. The model can be respliced inside those
+                    // 120ms -- a channel opening resets the window to
+                    // sixty rows, and an index into three hundred is
+                    // then past the end. `scroll_to` answers that with a
+                    // GTK assertion rather than doing nothing.
+                    if at < posts.n_items() {
+                        view.scroll_to(at, gtk::ListScrollFlags::empty(), None);
+                    }
                 });
                 return;
             }
@@ -9551,8 +9619,7 @@ impl Ui {
 
         if was_at_end {
             self.stick_to_bottom.set(true);
-            let n = self.posts.n_items();
-            if n > 0 {
+            if model.n_items() > 0 {
                 // A timer, not an idle, and not adjustment arithmetic.
                 //
                 // Both of those were tried and neither worked: ListView has
@@ -9567,8 +9634,15 @@ impl Ui {
                 // they follow messages arriving *later*, when the list is
                 // already measured.
                 let view = self.post_view.clone();
+                let posts = model.clone();
                 glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
-                    view.scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
+                    // The row count is read again for the same reason as
+                    // above: what was last is not last once the model has
+                    // been respliced.
+                    let last = posts.n_items();
+                    if last > 0 {
+                        view.scroll_to(last - 1, gtk::ListScrollFlags::empty(), None);
+                    }
                 });
             }
         }
