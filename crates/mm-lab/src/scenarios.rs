@@ -519,8 +519,18 @@ pub async fn contained(shots: &Path, keep_data: bool, perf: Option<&str>) -> Res
     }
     crate::stack::up().await?;
     // Measuring a scroll needs something to scroll through, and six
-    // messages measure nothing.
-    crate::seed::seed_with(0, if perf.is_some() { PERF_MESSAGES } else { 0 }).await?;
+    // messages measure nothing; measuring a switch needs channels to
+    // wander through, more than the client keeps drawn.
+    let switching = std::env::var("MMRS_PERF_MODE").is_ok_and(|mode| mode == "switch");
+    crate::seed::seed_with(
+        if perf.is_some() && switching {
+            TOURED
+        } else {
+            0
+        },
+        if perf.is_some() { PERF_MESSAGES } else { 0 },
+    )
+    .await?;
 
     build_image()?;
     std::fs::create_dir_all(shots)
@@ -646,11 +656,15 @@ pub async fn measure(channel: &str, guest: bool) -> Result<()> {
         // one. Back and forth, slowly enough that each has settled
         // before the next click.
         println!("switching between {channel} and Engineering; the client traces each click");
-        for _ in 0..SWITCHES {
+        for round in 0..SWITCHES {
             for name in [&"Engineering", &channel] {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 screen.open_channel(name).await?;
             }
+            // Somebody's status moves while the channel is open, the
+            // way it does all day on a real server. The trace says
+            // what that cost the rows on screen.
+            crate::seed::set_status("ada", if round % 2 == 0 { "away" } else { "online" }).await?;
         }
 
         // And then a tour, because the client keeps a whole drawn list

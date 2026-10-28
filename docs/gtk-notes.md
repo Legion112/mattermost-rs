@@ -480,3 +480,22 @@ a scenario that looks for a message has to be looking at one that is
 on screen. And a tree walk can meet a row that left between being
 listed and being read; the driver treats that as "no children", which
 it is.
+
+## Presence is not part of a row
+
+A `PostRow` carried the author's presence, so a status batch -- which
+on a real server is a steady drip all day -- changed 23 of 50 rows at
+a time, and each was a row rebuilt and measured again for a
+seven-pixel dot.
+
+The row carries the author now and the dot is read from the store at
+bind time. Between binds, `refresh_dots` recolours the dots on the
+widgets that exist: `RowContext::dots` holds one `(ListItem, dot)` per
+row widget built -- not per bind -- and the item says which row its
+widget is showing now. Items whose widget is gone are dropped on the
+way past. A status change costs 0.15ms in the lab and no splice at
+all; the trace that used to say `23 of 50 rows differ … by presence`
+says nothing.
+
+The same shape would serve avatars, which still replace a row per
+author when the picture lands, once per author per channel.

@@ -145,7 +145,6 @@ mod imp {
         /// Webhook attachments, already rendered.
         pub cards: RefCell<Vec<super::AttachmentView>>,
         pub previews: RefCell<Vec<mm_types::LinkPreview>>,
-        pub presence: std::cell::Cell<mm_types::Presence>,
         /// Which build of this row it is.
         ///
         /// A `PostRow` is never changed after it is made: a redraw makes
@@ -198,8 +197,6 @@ pub struct PostRowFields<'a> {
     pub cards: Vec<AttachmentView>,
     /// What the server found behind the links in the message.
     pub previews: Vec<mm_types::LinkPreview>,
-    /// Where the author is, for the dot on their face.
-    pub presence: mm_types::Presence,
     pub quick_reactions: Vec<String>,
     pub plain_body: String,
 }
@@ -255,7 +252,6 @@ impl PostRow {
         inner.plain_body.replace(fields.plain_body);
         inner.cards.replace(fields.cards);
         inner.previews.replace(fields.previews);
-        inner.presence.set(fields.presence);
         this
     }
 
@@ -314,7 +310,6 @@ impl PostRow {
             ("blocks", *a.blocks.borrow() == *b.blocks.borrow()),
             ("cards", *a.cards.borrow() == *b.cards.borrow()),
             ("previews", *a.previews.borrow() == *b.previews.borrow()),
-            ("presence", a.presence.get() == b.presence.get()),
             ("images", *a.images.borrow() == *b.images.borrow()),
             ("reactions", *a.reactions.borrow() == *b.reactions.borrow()),
             (
@@ -345,11 +340,6 @@ impl PostRow {
     #[must_use]
     pub fn previews(&self) -> Vec<mm_types::LinkPreview> {
         self.imp().previews.borrow().clone()
-    }
-
-    #[must_use]
-    pub fn presence(&self) -> mm_types::Presence {
-        self.imp().presence.get()
     }
 
     #[must_use]

@@ -719,7 +719,16 @@ struct RowContext {
     links: LinkImages,
     avatars: Avatars,
     emoji: Emoji,
+    /// Every row widget's presence dot, with the list item it belongs
+    /// to, so a status change can recolour the dots on screen without
+    /// rebuilding a row. One entry per widget built, not per bind: the
+    /// item outlives every row that passes through its widget, and
+    /// says which row that is now.
+    dots: Dots,
 }
+
+/// See `RowContext::dots`.
+type Dots = Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, gtk::Box)>>>;
 
 impl RowContext {
     /// Everything the rows share, made once. The caches start empty and
@@ -739,6 +748,7 @@ impl RowContext {
             links: Rc::new(RefCell::new(HashMap::new())),
             avatars: Rc::new(RefCell::new(HashMap::new())),
             emoji: emoji.clone(),
+            dots: Rc::new(RefCell::new(Vec::new())),
         }
     }
 }
@@ -4445,7 +4455,8 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     // face, so grouped messages line up under the one that named them.
     // `adw::Avatar` draws initials when there is no picture, which means a
     // row never has to wait on the network to look finished.
-    let (gutter, _, _) = face_with_dot(32);
+    let (gutter, _, dot) = face_with_dot(32);
+    ctx.dots.borrow_mut().push((item.downgrade(), dot));
     let main = gtk::Box::new(gtk::Orientation::Vertical, 2);
     main.set_hexpand(true);
     // Attached images, above the file line that names them. Rebuilt on each
@@ -5893,7 +5904,9 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     // hidden with opacity still claims its 32 pixels of height, which pushed
     // every line of a block a row apart and undid the grouping entirely.
     face.set_visible(!grouped);
-    set_presence(&dot, data.presence(), !grouped, false);
+    // From the store, not the row: see `refresh_dots`.
+    let presence = ctx.store.borrow().presence(&data.author_id());
+    set_presence(&dot, presence, !grouped, false);
     main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
     bind_face(&face, &data);
 
@@ -8344,6 +8357,33 @@ impl Ui {
     /// conversation out and another in. The reconcile is the ordinary
     /// `refresh_posts` that follows: where nothing has changed it finds
     /// nothing to splice, which is the whole point.
+    /// Recolour the presence dots on screen from the store.
+    ///
+    /// In place, on the widgets that exist, rather than through a
+    /// redraw: a status batch changed presence on 23 of 50 rows on a
+    /// real account, and each of those was a row rebuilt and measured
+    /// again for a seven-pixel dot. Items whose widget is gone are let
+    /// go of on the way past.
+    fn refresh_dots(&self) {
+        crate::perf::marked("dots", || {
+            let store = self.store.borrow();
+            self.row_ctx.dots.borrow_mut().retain(|(item, dot)| {
+                let Some(item) = item.upgrade() else {
+                    return false;
+                };
+                if let Some(row) = item.item().and_downcast::<PostRow>() {
+                    set_presence(
+                        dot,
+                        store.presence(&row.author_id()),
+                        !row.is_grouped(),
+                        false,
+                    );
+                }
+                true
+            });
+        });
+    }
+
     /// The reader reached the bottom of a window that stops short of
     /// the newest message: show the next of what is newer.
     ///
@@ -9395,7 +9435,6 @@ impl Ui {
                 .map(|a| render_card(a, store, &self.emoji))
                 .collect(),
             previews: post.link_previews(),
-            presence: store.presence(&post.user_id),
             // A reply never opens a thread of its own: in Mattermost the
             // whole conversation hangs off the root, and offering "2
             // replies" on a reply would open its parent under a different
@@ -9645,6 +9684,7 @@ impl Ui {
             Event::Statuses(statuses) => {
                 if !self.store.borrow_mut().apply_statuses(&statuses).is_empty() {
                     self.refresh_presence();
+                    self.refresh_dots();
                     self.redraw_soon();
                 }
             }

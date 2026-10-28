@@ -522,6 +522,22 @@ fn post(channel: &str, message: &str, root: Option<&str>) -> HttpRequest {
     HttpRequest::new(Method::Post, "/api/v4/posts").json(&body)
 }
 
+/// Set a seeded account's status, as that account: what makes the
+/// server send everybody a `status_change`.
+///
+/// For measuring what a status change costs the window, which on a
+/// real account is a steady drip of them all day.
+pub async fn set_status(username: &str, status: &str) -> Result<()> {
+    let them = Api::as_token(&token_for(username).await?)?;
+    let me = id_of(&them.call(&HttpRequest::get("/api/v4/users/me")).await?)?;
+    them.call(
+        &HttpRequest::new(Method::Put, format!("/api/v4/users/{me}/status"))
+            .json(&json!({ "user_id": me, "status": status })),
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Log in as a seeded account and hand back the token.
 ///
 /// For the lab's own tools, which need to be somebody to watch a socket.
