@@ -1288,6 +1288,23 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
                     .await;
             }
         }
+        Command::PatchProfile {
+            first_name,
+            last_name,
+            nickname,
+            position,
+        } => {
+            // Nothing applied here: the server tells everybody, this
+            // reader included, with a user_updated.
+            let request = rest::patch_user(
+                &UserId::new(&a.session.user_id),
+                first_name.as_deref(),
+                last_name.as_deref(),
+                nickname.as_deref(),
+                position.as_deref(),
+            );
+            best_effort(a, &request, events).await;
+        }
         Command::ClearCustomStatus => {
             best_effort(a, &rest::clear_custom_status(), events).await;
         }

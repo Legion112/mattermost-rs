@@ -225,6 +225,14 @@ pub enum Command {
     },
     /// Take the custom status back.
     ClearCustomStatus,
+    /// Change what the reader is called, and their position: only what
+    /// is given changes.
+    PatchProfile {
+        first_name: Option<String>,
+        last_name: Option<String>,
+        nickname: Option<String>,
+        position: Option<String>,
+    },
     /// Leave a channel.
     ///
     /// The server has no "leave": it is removing yourself, and it posts a

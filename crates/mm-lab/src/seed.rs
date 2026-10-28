@@ -995,6 +995,28 @@ impl Admin {
             .await
     }
 
+    /// The ids of the admin's saved posts, as the server holds them.
+    pub async fn my_saved_ids(&self) -> Result<Vec<String>> {
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/posts/flagged?per_page=60",
+                self.me
+            )))
+            .await?;
+        Ok(page["posts"]
+            .as_object()
+            .map(|posts| posts.keys().cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// The admin's own record, as the server holds it.
+    pub async fn my_record(&self) -> Result<Value> {
+        self.api
+            .call(&HttpRequest::get(format!("/api/v4/users/{}", self.me)))
+            .await
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self

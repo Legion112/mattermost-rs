@@ -49,7 +49,9 @@ for a frame replayed after a reconnect. Verified in the lab: a colleague's \
 channel took it off here and left the server counting none. The "New messages" line \
 never sits above the reader's own message either -- they were there when \
 they wrote it, whatever the server's view time says -- which the lab's \
-own sent message showed it doing."""
+own sent message showed it doing. "Mark as unread" from the message menu \
+is lab-verified: the server counted the channel unread from that message \
+on, and coming back to the channel read it again."""
 
 [[feature]]
 id       = "calls"
@@ -859,7 +861,13 @@ label (`mention:name`) so the label itself reports the click, and the \
 same card opens from a `TextView` body through its link handler. \
 Verified in the lab: a faked click on the first word of "@legion \
 something new in Design." opened a card saying Legion Admin and \
-@legion, and Escape closed it. NOT built: setting your own."""
+@legion, and Escape closed it. **Setting your own**: "Edit profile…" in the status menu opens the \
+names and the position, and sends only what changed; the server tells \
+everyone, this window included, with a `user_updated`. The username is \
+not offered -- an administrator may forbid changing it, and it is the \
+one thing other people type to reach you. Verified in the lab: a \
+position typed into the dialog was the server's. NOT built: the \
+picture, which needs a file picker the lab cannot drive either."""
 
 [[feature]]
 id       = "sidebar.drag_between_categories"
@@ -1007,7 +1015,9 @@ pinned list and the button emptied it again. NOT built: paging.
 
 The hover toolbar's overflow menu is lab-verified too: resting the pointer \
 on a message brought the toolbar up, "Pin to channel" left the server \
-holding the post pinned, and "Unpin from channel" took it off."""
+holding the post pinned, and "Unpin from channel" took it off. Saving from the message \
+menu is lab-verified too: "Save message" put the post on the server's \
+saved list and "Remove from saved" took it off."""
 
 [[feature]]
 id       = "channels.info_and_members"

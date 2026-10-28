@@ -1344,6 +1344,7 @@ fn wire_presence(ui: &Ui) {
             let name = row.widget_name();
             match name.as_str() {
                 "custom:set" => open_custom_status_dialog(&ui, near.upcast_ref()),
+                "profile:edit" => open_profile_editor(&ui),
                 "custom:clear" => {
                     ui.commands.send(Command::ClearCustomStatus).ok();
                 }
@@ -1471,6 +1472,7 @@ fn custom_status_rows(list: &gtk::ListBox, ui: &Ui) {
     let offered = [
         ("Set a custom status…", "custom:set", true),
         ("Clear custom status", "custom:clear", mine.is_some()),
+        ("Edit profile…", "profile:edit", true),
     ];
     for (label, name, shown) in offered {
         if !shown {
@@ -1796,6 +1798,95 @@ fn open_channel_editor(ui: &Ui, channel: &ChannelId) {
                     display_name,
                     header,
                     purpose,
+                })
+                .ok();
+        });
+    }
+    window.present();
+}
+
+/// The dialog behind "Edit profile…": the names and the position, each
+/// sent only if it changed. The username is not here: Mattermost lets
+/// an administrator forbid changing it, and it is the one thing other
+/// people type to reach you.
+fn open_profile_editor(ui: &Ui) {
+    let was = {
+        let store = ui.store.borrow();
+        store.users.get(&store.me).cloned().unwrap_or_default()
+    };
+    let field = |label: &str, text: &str| {
+        let entry = gtk::Entry::builder().text(text).hexpand(true).build();
+        name_widget(&entry, label);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let caption = gtk::Label::new(Some(label));
+        caption.set_width_chars(10);
+        caption.set_xalign(0.0);
+        line.append(&caption);
+        line.append(&entry);
+        (line, entry)
+    };
+    let (first_line, first) = field("First name", &was.first_name);
+    let (last_line, last) = field("Last name", &was.last_name);
+    let (nick_line, nick) = field("Nickname", &was.nickname);
+    let (position_line, position) = field("Position", &was.position);
+
+    let save = gtk::Button::with_label("Save");
+    save.add_css_class("suggested-action");
+    let cancel = gtk::Button::with_label("Cancel");
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_top(6);
+    buttons.append(&cancel);
+    buttons.append(&save);
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    column.set_margin_start(18);
+    column.set_margin_end(18);
+    column.set_margin_bottom(18);
+    for line in [&first_line, &last_line, &nick_line, &position_line] {
+        column.append(line);
+    }
+    column.append(&buttons);
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    layout.append(&adw::HeaderBar::new());
+    layout.append(&column);
+    let window = adw::Window::builder()
+        .title("Edit profile")
+        .modal(true)
+        .default_width(CUSTOM_STATUS_WIDTH)
+        .content(&layout)
+        .transient_for(&ui.window)
+        .build();
+    window.set_default_widget(Some(&save));
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| window.close());
+    }
+    {
+        let commands = ui.commands.clone();
+        let window = window.clone();
+        save.connect_clicked(move |_| {
+            let changed = |entry: &gtk::Entry, before: &str| {
+                let now = entry.text().trim().to_owned();
+                (now != before).then_some(now)
+            };
+            let first_name = changed(&first, &was.first_name);
+            let last_name = changed(&last, &was.last_name);
+            let nickname = changed(&nick, &was.nickname);
+            let position = changed(&position, &was.position);
+            window.close();
+            if [&first_name, &last_name, &nickname, &position]
+                .iter()
+                .all(|c| c.is_none())
+            {
+                return;
+            }
+            commands
+                .send(Command::PatchProfile {
+                    first_name,
+                    last_name,
+                    nickname,
+                    position,
                 })
                 .ok();
         });

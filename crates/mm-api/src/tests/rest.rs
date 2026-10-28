@@ -1395,3 +1395,21 @@ fn a_channel_is_patched_with_what_changed_and_archived_with_a_delete() {
     assert_eq!(gone.method, Method::Delete);
     assert_eq!(gone.path, "/api/v4/channels/c1");
 }
+
+/// The reader's record is patched with only what changed.
+#[test]
+fn the_readers_record_is_patched_with_what_changed() {
+    let me = UserId::new("u1");
+    let req = patch_user(&me, None, None, None, Some("Lab technician"));
+    assert_eq!(req.method, Method::Put);
+    assert_eq!(req.path, "/api/v4/users/u1/patch");
+    assert_eq!(
+        req.body,
+        Body::Json(r#"{"position":"Lab technician"}"#.to_owned())
+    );
+    let req = patch_user(&me, Some("Ada"), Some("Lovelace"), Some(""), None);
+    assert_eq!(
+        req.body,
+        Body::Json(r#"{"first_name":"Ada","last_name":"Lovelace","nickname":""}"#.to_owned())
+    );
+}

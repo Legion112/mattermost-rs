@@ -27,6 +27,7 @@ pub const SCENARIOS: &[&str] = &[
     "signs-in",
     "sets-a-custom-status",
     "goes-quiet-for-an-hour",
+    "edits-the-profile",
     "shows-a-post-saved-elsewhere",
     "shows-a-thread-reply-count",
     "shows-a-new-reply-in-threads",
@@ -44,6 +45,8 @@ pub const SCENARIOS: &[&str] = &[
     "searches-messages",
     "opens-a-card-from-a-mention",
     "pins-from-the-hover-toolbar",
+    "saves-from-the-menu",
+    "marks-unread-from-the-menu",
     "replies-in-the-thread-box",
     "jumps-with-the-switcher",
     "adds-and-removes-somebody",
@@ -133,6 +136,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "signs-in" => signs_in(screen).await,
         "sets-a-custom-status" => custom_status(screen, admin).await,
         "goes-quiet-for-an-hour" => quiet_for_an_hour(screen, admin).await,
+        "edits-the-profile" => edits_profile(screen, admin).await,
         "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
         "shows-a-thread-reply-count" => reply_count(screen).await,
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
@@ -150,6 +154,8 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "searches-messages" => searches(screen).await,
         "opens-a-card-from-a-mention" => card_from_mention(screen).await,
         "pins-from-the-hover-toolbar" => pins_from_toolbar(screen, admin).await,
+        "saves-from-the-menu" => saves_from_menu(screen, admin).await,
+        "marks-unread-from-the-menu" => marks_unread_from_menu(screen, admin).await,
         "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
@@ -988,6 +994,104 @@ async fn archives_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
         })
         .await?;
     screen.open_channel("Engineering").await
+}
+
+/// The overflow menu of a message, brought up the way a person does it.
+async fn message_menu(screen: &Screen, text: &str) -> Result<()> {
+    let body = screen.text_holding(text).await?;
+    screen.scroll_into_view(&body).await?;
+    screen.hover(&body).await?;
+    screen.click_button_near("More actions", &body).await
+}
+
+/// Save and unsave from the message menu, with the server's saved list
+/// as the witness.
+async fn saves_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    for (entry, expected) in [("Save message", true), ("Remove from saved", false)] {
+        message_menu(screen, ROOT).await?;
+        screen.press(entry).await?;
+        let mut saved = false;
+        for _ in 0..25 {
+            saved = admin.my_saved_ids().await?.contains(&post);
+            if saved == expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        if saved != expected {
+            return Err(Error(format!(
+                "after {entry:?} the server holds the post saved = {saved}, not {expected}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Mark as unread from the message menu puts the channel unread on the
+/// server from that message on; coming back to it reads it again.
+async fn marks_unread_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    message_menu(screen, ROOT).await?;
+    screen.press("Mark as unread").await?;
+    let mut unread = 0;
+    for _ in 0..25 {
+        unread = admin.my_unread("engineering").await?;
+        if unread > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if unread == 0 {
+        return Err(Error(
+            "the server counts nothing unread after Mark as unread".to_owned(),
+        ));
+    }
+    screen.open_channel("Design").await?;
+    screen.open_channel("Engineering").await?;
+    for _ in 0..25 {
+        if admin.my_unread("engineering").await? == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "coming back to the channel did not read it".to_owned(),
+    ))
+}
+
+/// The profile editor behind the status menu changes the position on
+/// the server.
+async fn edits_profile(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.press("Set your status").await?;
+    screen.press("Edit profile…").await?;
+    let dialog = screen
+        .until("the profile editor is up", |tree| {
+            tree.has("text box", "Position")
+        })
+        .await?;
+    let position = format!("Lab technician since {}", crate::seed::stamp());
+    screen
+        .type_into(dialog.find("text box", "Position")?, &position)
+        .await?;
+    screen.press("Save").await?;
+    let mut last = String::new();
+    for _ in 0..25 {
+        admin.my_record().await?["position"]
+            .as_str()
+            .unwrap_or_default()
+            .clone_into(&mut last);
+        if last == position {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server holds position {last:?}, not {position:?}"
+    )))
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

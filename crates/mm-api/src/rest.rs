@@ -110,6 +110,31 @@ pub fn parse_user(resp: &HttpResponse) -> Result<User, ApiError> {
     parse_json(resp, "GET /users/me")
 }
 
+/// Change what the reader is called: whichever of the four are given,
+/// the rest left as they are. The server answers the whole record and
+/// tells everybody with a `user_updated`.
+#[must_use]
+pub fn patch_user(
+    user: &UserId,
+    first_name: Option<&str>,
+    last_name: Option<&str>,
+    nickname: Option<&str>,
+    position: Option<&str>,
+) -> HttpRequest {
+    let mut body = serde_json::Map::new();
+    for (key, value) in [
+        ("first_name", first_name),
+        ("last_name", last_name),
+        ("nickname", nickname),
+        ("position", position),
+    ] {
+        if let Some(value) = value {
+            body.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+        }
+    }
+    HttpRequest::put(format!("{API}/users/{user}/patch")).json(&serde_json::Value::Object(body))
+}
+
 // ---------------------------------------------------------------- system
 
 #[must_use]
