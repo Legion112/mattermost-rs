@@ -262,12 +262,20 @@ fn no_line_when_there_is_nothing_above_it_to_separate() {
     let caught_up = project(&[&a, &b], 0, Some(Timestamp(NEW_YEAR_2021 + 2 * MINUTE)));
     assert!(!caught_up.contains(&Row::NewMessages));
 
-    // Never read: the first message is already unread, so there is nothing
-    // above the line to separate it from.
+    // Never read: nothing was ever seen, so there is nothing to separate
+    // the new from, and a line would only say "all of it".
     let brand_new = project(&[&a, &b], 0, Some(Timestamp::ZERO));
+    assert!(!brand_new.contains(&Row::NewMessages));
+
+    // But a window that starts inside the unread -- the reader opened a
+    // channel with more new messages than fit -- gets the line at its
+    // top. By time, not by position: a line kept off the first row would
+    // land under the first message of whatever is shown, and move every
+    // time the window did.
+    let from_inside = project(&[&a, &b], 0, Some(Timestamp(NEW_YEAR_2021 - MINUTE)));
     assert_eq!(
-        ids(&brand_new),
-        ["--- 2021-01-01", "p1", "--- new messages", "p2"]
+        ids(&from_inside),
+        ["--- 2021-01-01", "--- new messages", "p1", "p2 (grouped)"]
     );
 
     // And no last-viewed time at all means no line.

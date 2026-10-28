@@ -424,3 +424,59 @@ What to do instead, in order of preference:
 The rule: nothing that runs per row per bind may call
 `set_tooltip_text`. `MMRS_PERF=switch` prints the per-part breakdown
 that catches it -- `bind:one-chip` was the mark that named it.
+
+## The list is a window, with two ends
+
+`ListView` keeps about two hundred rows built around the viewport and
+re-binds every one of them when rows are put in ahead of them. So a
+list that only ever grows as the reader scrolls back costs more with
+every page: 204 binds to show fifteen new rows, measured, and a
+`build_rows` that walked a thousand `PostRow`s to diff them.
+
+The channel's list is now `Window { skip, count }` over the posts held:
+`count` rows ending `skip` short of the newest, capped at
+`WINDOW_MAX`. Reaching the top moves it older; reaching the bottom
+of a window that stops short of the newest moves it newer again
+(`reach_newer`); both let go of the far end. The webapp does the same
+with `MAXIMUM_POSTS_FOR_SLICING`.
+
+Two things had to be true for that to be cheap:
+
+- **The splice has to see a move as a move.** The same rows shifted by
+  fifteen, diffed row by row, differ in every position, and the result
+  was ninety rows rebuilt to show fifteen (a 317ms frame). `shift_between`
+  finds the first message both have and treats the rows before it as
+  the heads to swap; the per-row pass then handles what changed in
+  place.
+- **Nothing in a row may depend on where the window starts.** The "New
+  messages" line was kept off the first row of whatever was shown, so
+  it sat under the first message of every window and moved with it,
+  and every move looked like a rebuild. It is placed by time now.
+
+What the frame costs after that is mostly GTK measuring the rows put
+in -- about 3ms a row of wrapped text, outside anything of ours -- so
+the insert size is the knob. Measured on the 2000-message fixture,
+scrolling 120px a frame for 900 frames:
+
+| step | cap | p95 | p99 | max |
+|---|---|---|---|---|
+| 60 | none | 83 | 167 | 217 |
+| 15 | none | 100 | 117 | 117 |
+| 15 | 90 | 83 | 83 | 83 |
+| 15 | 45 | 67 | 67 | 67 |
+| 8 | 45 | 50 | 50 | 67 |
+| **5** | **45** | **33** | **33** | 67 |
+
+The one 67ms frame left is the first frame of the sweep, before any
+insert, and nothing of ours is in it.
+
+A channel opens on `OPENING_WINDOW` rows and grows to `CHANNEL_WINDOW`
+a step at a time on a timer, so the opening click pays for a screenful
+and the rest lands between frames.
+
+Two consequences for the lab. The accessibility tree holds only the
+rows GTK has realized, which is the viewport and a little around it, so
+a scenario that looks for a message has to be looking at one that is
+on screen. And a tree walk can meet a row that left between being
+listed and being read; the driver treats that as "no children", which
+it is.

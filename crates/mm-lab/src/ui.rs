@@ -187,19 +187,35 @@ impl Screen {
     }
 
     async fn name_of(&self, node: &Node) -> Result<String> {
-        self.proxy(node, ACCESSIBLE)
+        match self
+            .proxy(node, ACCESSIBLE)
             .await?
             .get_property("Name")
             .await
-            .map_err(|e| Error(format!("reading a name: {e}")))
+        {
+            Ok(name) => Ok(name),
+            Err(e) if gone(&e) => Ok(String::new()),
+            Err(e) => Err(Error(format!("reading a name: {e}"))),
+        }
     }
 
     async fn children(&self, node: &Node) -> Result<Vec<(String, OwnedObjectPath)>> {
-        self.proxy(node, ACCESSIBLE)
+        match self
+            .proxy(node, ACCESSIBLE)
             .await?
             .call("GetChildren", &())
             .await
-            .map_err(|e| Error(format!("reading children of {}: {e}", node.name)))
+        {
+            Ok(children) => Ok(children),
+            // The widget left the tree between being listed and being
+            // read. A live window does that: a channel's list grows in
+            // steps after it opens and lets go of rows as it moves, and
+            // a walk that happens to be passing through one of them is
+            // not a failure of the thing being tested. It has no
+            // children any more, which is the truth.
+            Err(e) if gone(&e) => Ok(Vec::new()),
+            Err(e) => Err(Error(format!("reading children of {}: {e}", node.name))),
+        }
     }
 
     /// Every widget under the window, depth first, in the order they are laid
@@ -543,6 +559,19 @@ impl Find for Vec<Node> {
 
 /// A failure that says what *was* there, because "not found" on its own
 /// sends you back to dumping the tree by hand every time.
+/// Whether a D-Bus error says the object is no longer there -- as
+/// opposed to the bus being down or the interface being wrong, which
+/// are failures worth reporting.
+fn gone(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, _, _) => matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.UnknownMethod" | "org.freedesktop.DBus.Error.UnknownObject"
+        ),
+        _ => false,
+    }
+}
+
 fn missing(tree: &[Node], role: &str, text: &str) -> Error {
     let same_role: Vec<&str> = tree
         .iter()

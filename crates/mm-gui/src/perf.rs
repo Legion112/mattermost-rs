@@ -58,8 +58,15 @@ struct Run {
     /// in total. Named rather than a field each, so adding a probe is one
     /// line at the place being measured.
     marks: std::collections::BTreeMap<&'static str, (u32, Duration)>,
+    /// The marks as they stood at the last tick, so a slow frame can
+    /// be charged to what moved during it.
+    seen: std::collections::BTreeMap<&'static str, (u32, Duration)>,
     last: Option<i64>,
 }
+
+/// A frame worth explaining. Well over budget, because explaining every
+/// 17ms frame would drown the report in the ordinary.
+const ATTRIBUTE_OVER: Duration = Duration::from_millis(60);
 
 /// Whether to measure at all.
 pub(crate) fn watching() -> bool {
@@ -168,9 +175,40 @@ pub(crate) fn sweep(scroller: &gtk::ScrolledWindow) {
                 Run::default()
             });
             if let Some(before) = run.last {
-                run.frames.push(Duration::from_micros(
-                    now.saturating_sub(before).unsigned_abs(),
-                ));
+                let frame = Duration::from_micros(now.saturating_sub(before).unsigned_abs());
+                run.frames.push(frame);
+                // What a slow frame had in it, named from the marks that
+                // moved since the last tick. A percentile says how bad;
+                // this says what, which is the question a fix needs.
+                if frame > ATTRIBUTE_OVER {
+                    let moved: Vec<String> = run
+                        .marks
+                        .iter()
+                        .filter_map(|(what, (times, took))| {
+                            let (seen_times, seen_took) =
+                                run.seen.get(what).copied().unwrap_or_default();
+                            let more = took.saturating_sub(seen_took);
+                            (times > &seen_times && more > Duration::from_millis(1)).then(|| {
+                                format!(
+                                    "{what} {}x {:.0}ms",
+                                    times - seen_times,
+                                    more.as_secs_f64() * 1000.0
+                                )
+                            })
+                        })
+                        .collect();
+                    eprintln!(
+                        "  frame {} took {:.0}ms: {}",
+                        run.frames.len(),
+                        frame.as_secs_f64() * 1000.0,
+                        if moved.is_empty() {
+                            "nothing marked (layout, draw, or something unmeasured)".to_owned()
+                        } else {
+                            moved.join(", ")
+                        }
+                    );
+                }
+                run.seen.clone_from(&run.marks);
             }
             run.last = Some(now);
             run.frames.len() >= FRAMES

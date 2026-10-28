@@ -57,11 +57,21 @@ pub fn project(posts: &[&Post], utc_offset_secs: i32, unread_after: Option<Times
     let mut marked = false;
 
     for post in posts {
-        // Where the reader left off. Not above the very first message held:
-        // a line saying "new" above everything says nothing, since the whole
-        // list is plainly new.
+        // Where the reader left off, by time alone. This used to be kept
+        // off the very first row on the grounds that "new" above
+        // everything says nothing -- but `posts` is a window onto the
+        // channel, not the channel, and a line that is forbidden from
+        // the top of the window lands under the first message of
+        // whatever the window happens to show, and moves every time the
+        // window does. A line at the top is honest: everything below it
+        // is new, and scrolling back finds the message it belongs
+        // above.
+        //
+        // A reader who has never read the channel at all has no line:
+        // nothing was ever seen, so there is nothing to separate the new
+        // from.
         let starts_unread =
-            !marked && previous.is_some() && unread_after.is_some_and(|at| post.create_at > at);
+            !marked && unread_after.is_some_and(|at| !at.is_zero() && post.create_at > at);
 
         let date = civil_date(post.create_at, utc_offset_secs);
         let same_day = previous.is_some_and(|(_, d)| d == date);

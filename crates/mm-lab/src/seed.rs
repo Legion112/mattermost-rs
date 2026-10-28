@@ -704,6 +704,10 @@ async fn long_channel(
         "{dump}",
         "- first of {n}\n- second\n- third",
         "**Bold {n}**, _italic_, `code`, and a [link](https://example.com/{n}).",
+        // Mentions are drawn as chips, not text, and a real channel is
+        // full of them.
+        "@ada could you look at {n}? cc @grace @margaret -- and @here if nobody else",
+        "> somebody said {n}\n\nand this is the answer to it, with a :lab: in it",
     ];
 
     println!("filling {LONG} to {how_many} messages (from {already})");
@@ -734,6 +738,21 @@ async fn long_channel(
             post(&channel, &text, None)
         };
         let posted = who.call(&body).await?;
+
+        // A thread under every eighth message: with collapsed threads
+        // the replies are not in the channel, but the root grows a
+        // "2 replies" button, and a real channel has one every few rows.
+        if n % 8 == 0 {
+            for (k, other) in voices.iter().enumerate().take(2) {
+                other
+                    .call(&post(
+                        &channel,
+                        &format!("reply {k} to {n}"),
+                        Some(&id_of(&posted)?),
+                    ))
+                    .await?;
+            }
+        }
 
         // And most of them carry reactions, which are rebuilt on every
         // bind and so are part of what a bind costs.

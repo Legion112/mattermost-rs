@@ -219,7 +219,7 @@ struct Ui {
     /// Grows a page at a time when the reader reaches the top, which is
     /// free when the posts are already held, and resets when a channel
     /// opens.
-    shown_window: Rc<std::cell::Cell<usize>>,
+    shown: Rc<std::cell::Cell<Window>>,
     /// After a page of history is prepended, the post the view was resting
     /// on. The list is rebuilt rather than spliced, so without this the
     /// reader would be thrown to the top of sixty newly loaded messages.
@@ -1155,7 +1155,7 @@ fn build(
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
         settling: Rc::new(std::cell::Cell::new(false)),
-        shown_window: Rc::new(std::cell::Cell::new(CHANNEL_WINDOW)),
+        shown: Rc::new(std::cell::Cell::new(Window::newest(CHANNEL_WINDOW))),
         restore_to: Rc::new(RefCell::new(None)),
         reopen: Rc::new(RefCell::new(reopen)),
         provisional: Rc::new(std::cell::Cell::new(false)),
@@ -6029,7 +6029,79 @@ const CHANNELS_KEPT_DRAWN: usize = 12;
 /// idea with one number, because our list has no anchor but the bottom.
 /// Large enough that a tall window is full without reaching for more,
 /// small enough that a `splice` is cheap.
-const CHANNEL_WINDOW: usize = 60;
+const CHANNEL_WINDOW: usize = 45;
+
+/// The most rows the list holds at once, however far back the reader
+/// has gone.
+///
+/// `ListView` keeps about two hundred rows built around the viewport
+/// and re-binds every one of them when rows are put in ahead of them,
+/// so a list that only ever grows costs more with every page: 204
+/// binds to show fifteen new rows, measured. Capped, the far end is
+/// dropped as the near end grows, and the work stays the size of the
+/// window rather than the size of the history.
+///
+/// The same size a channel settles at when opened: a few screens,
+/// enough that a reader skimming back and forth stays inside it, and
+/// the posts beyond it are still in the store, a redraw away. Halving
+/// it from ninety took the widen frame from 83ms to 67ms, so the rows
+/// held do cost something each time; the rest of that frame is the
+/// rows put in, which `WINDOW_STEP` sets.
+const WINDOW_MAX: usize = CHANNEL_WINDOW;
+
+/// Which rows of a channel the list holds: `count` of them, ending
+/// `skip` short of the newest.
+///
+/// Two numbers rather than one so the window can be anywhere in the
+/// channel, not only at its end: scrolling back moves it older and
+/// reaching the bottom moves it newer again, and both keep it under
+/// `WINDOW_MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Window {
+    skip: usize,
+    count: usize,
+}
+
+impl Window {
+    /// The newest `count` rows.
+    const fn newest(count: usize) -> Self {
+        Self { skip: 0, count }
+    }
+
+    /// `more` older rows, letting go of the newest past the cap.
+    fn back(self, more: usize) -> Self {
+        let count = self.count + more;
+        let over = count.saturating_sub(WINDOW_MAX);
+        Self {
+            skip: self.skip + over,
+            count: count - over,
+        }
+    }
+
+    /// `more` newer rows, letting go of the oldest past the cap. Stops
+    /// at the newest message, where there is nothing newer to show.
+    fn forward(self, more: usize) -> Self {
+        let more = more.min(self.skip);
+        let count = self.count + more;
+        let over = count.saturating_sub(WINDOW_MAX);
+        Self {
+            skip: self.skip - more,
+            count: count - over,
+        }
+    }
+
+    /// How far back from the newest message the window reaches.
+    const fn reach(self) -> usize {
+        self.skip + self.count
+    }
+
+    /// The rows of `held`, oldest first, that this window shows.
+    fn of<T>(self, held: &[T]) -> &[T] {
+        let end = held.len().saturating_sub(self.skip);
+        let start = end.saturating_sub(self.count);
+        &held[start..end]
+    }
+}
 
 /// How many rows a channel opens with, before it grows to
 /// `CHANNEL_WINDOW`.
@@ -6039,15 +6111,25 @@ const CHANNEL_WINDOW: usize = 60;
 /// waits.
 const OPENING_WINDOW: usize = 20;
 
-/// How soon after opening the rest of the window arrives. After the
-/// scroll to the newest message, so the two do not fight over where the
-/// list is resting.
-const WINDOW_GROWS_IN: std::time::Duration = std::time::Duration::from_millis(200);
+/// How soon after opening the rest of the window starts arriving, and
+/// how far apart its steps are. After the scroll to the newest message,
+/// so the two do not fight over where the list is resting; and a few
+/// frames apart, so each step has been drawn before the next lands.
+const WINDOW_GROWS_IN: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// How much further back to show when the reader reaches the top and
-/// the posts are already held. A page, so it matches what a fetch would
-/// have added.
-const WINDOW_STEP: usize = 60;
+/// the posts are already held.
+///
+/// A screenful, not a page. `ListView` builds and measures every row it
+/// is handed before the next frame can draw, and measuring is the
+/// bigger half: inserting sixty rows was an 83ms frame of binding
+/// followed by a 200ms frame of GTK laying out their text, with nothing
+/// of ours in it. Fifteen rows is the same work in quarters, and a
+/// quarter of 283ms is a frame the eye forgives.
+///
+/// A fetched page is still sixty -- that is a round trip, and it is
+/// cheaper to make fewer -- but it is shown at this rate too.
+const WINDOW_STEP: usize = 5;
 
 /// How many candidates "add people" offers. Fewer than the mention
 /// popup: this list sits inside the channel menu, under everything
@@ -6360,11 +6442,70 @@ fn reaction_chip(post: &str, summary: &mm_core::ReactionSummary, emoji: &Emoji) 
 ///
 /// Returns whether anything moved.
 fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
-    let drawn: Vec<PostRow> = crate::perf::marked("splice:read_model", || {
+    let mut drawn: Vec<PostRow> = crate::perf::marked("splice:read_model", || {
         (0..model.n_items())
             .filter_map(|i| model.item(i).and_downcast::<PostRow>())
             .collect()
     });
+
+    // The window moved along the channel: the same rows, shifted, with
+    // some put in at one end and some let go of at the other. Done as
+    // exactly that -- an insert and a removal -- rather than as the
+    // replacement of everything the per-row pass below would see, which
+    // hands `ListView` ninety rows to build and measure in place of
+    // fifteen. What is left is aligned, and the per-row pass takes it
+    // from there.
+    let mut moved = false;
+    let shift = shift_between(&drawn, next);
+    if crate::perf::watching() && drawn.len() == next.len() && shift.is_none() {
+        let ids = |rows: &[PostRow]| -> Vec<String> {
+            rows.iter()
+                .take(3)
+                .map(|r| r.id().chars().take(6).collect())
+                .collect()
+        };
+        eprintln!(
+            "  splice: same length {} and no shift; drawn starts {:?}, next starts {:?}",
+            drawn.len(),
+            ids(&drawn),
+            ids(next)
+        );
+    }
+    if let Some((drawn_at, next_at)) = shift {
+        crate::perf::marked("splice:shift", || {
+            // The heads: everything before the first message they share.
+            // Older rows put in, or the oldest let go of -- and the day
+            // separator that stood above the first message, which is
+            // gone once an older message of the same day sits there.
+            model.splice(
+                0,
+                u32::try_from(drawn_at).unwrap_or(u32::MAX),
+                &next[..next_at],
+            );
+            // And the far end: whatever the shift left over or short.
+            // The model is now `next`'s head followed by the drawn tail,
+            // aligned with `next` from the front.
+            let aligned = next_at + (drawn.len() - drawn_at);
+            if next.len() > aligned {
+                model.splice(
+                    u32::try_from(aligned).unwrap_or(u32::MAX),
+                    0,
+                    &next[aligned..],
+                );
+            } else {
+                let none: &[PostRow] = &[];
+                model.splice(
+                    u32::try_from(next.len()).unwrap_or(u32::MAX),
+                    u32::try_from(aligned - next.len()).unwrap_or(u32::MAX),
+                    none,
+                );
+            }
+        });
+        drawn = (0..model.n_items())
+            .filter_map(|i| model.item(i).and_downcast::<PostRow>())
+            .collect();
+        moved = true;
+    }
 
     // The same rows, some of them redrawn. This is the common case: an
     // avatar arriving changes every row that person wrote, scattered down
@@ -6389,7 +6530,7 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
             .filter(|at| !drawn[*at].matches(&next[*at]))
             .collect();
         if changed.is_empty() {
-            return false;
+            return moved;
         }
         if crate::perf::watching_switch() {
             let first = changed[0];
@@ -6431,6 +6572,39 @@ fn splice_changed(model: &gio::ListStore, next: &[PostRow]) -> bool {
         );
     });
     true
+}
+
+/// Where `drawn` and `next` are the same rows moved along the channel:
+/// the position, in each, of the first message they share.
+///
+/// Decided by message ids, which is what a row *is*; everything else
+/// about it can change and still be the same row. Anchored on the first
+/// *message* rather than the first row, because the row above it is a
+/// day separator that comes and goes with what is above it. `None`
+/// when the two do not line up at all -- a different channel, or a
+/// rebuild -- and when nothing moved, which the per-row pass handles on
+/// its own.
+fn shift_between(drawn: &[PostRow], next: &[PostRow]) -> Option<(usize, usize)> {
+    // The first message that is in both: a message `drawn` starts with
+    // may have been let go of when the window moved forward, so this
+    // walks `drawn` for one `next` still has.
+    let (drawn_at, next_at) = drawn.iter().enumerate().find_map(|(at, row)| {
+        let id = row.id();
+        if id.is_empty() {
+            return None;
+        }
+        next.iter()
+            .position(|other| other.id() == id)
+            .map(|found| (at, found))
+    })?;
+    if drawn_at == next_at {
+        return None;
+    }
+    // From there on the two have to be the same rows in the same order,
+    // or this is not a move but a coincidence of one id.
+    let overlap = (drawn.len() - drawn_at).min(next.len() - next_at);
+    let same = (0..overlap).all(|i| drawn[drawn_at + i].id() == next[next_at + i].id());
+    same.then_some((drawn_at, next_at))
 }
 
 /// How many unchanged rows a run may swallow before it is cheaper to
@@ -6509,10 +6683,9 @@ fn older_asker(
                 store.older_complete(&channel),
             )
         };
-        if held > ui.shown_window.get() {
+        if held > ui.shown.get().reach() {
             *restore.borrow_mut() = Some(oldest);
-            ui.shown_window
-                .set(ui.shown_window.get().saturating_add(WINDOW_STEP));
+            ui.shown.set(ui.shown.get().back(WINDOW_STEP));
             ui.refresh_posts(&channel);
             return;
         }
@@ -8123,6 +8296,35 @@ impl Ui {
     /// conversation out and another in. The reconcile is the ordinary
     /// `refresh_posts` that follows: where nothing has changed it finds
     /// nothing to splice, which is the whole point.
+    /// The reader reached the bottom of a window that stops short of
+    /// the newest message: show the next of what is newer.
+    ///
+    /// Says whether it did. When the window already ends at the newest
+    /// message there is nothing to show, and the bottom edge means what
+    /// it always meant -- the reader is following the conversation.
+    fn reach_newer(&self) -> bool {
+        let shown = self.shown.get();
+        if shown.skip == 0 {
+            return false;
+        }
+        let Some(channel) = self.selected.borrow().clone() else {
+            return false;
+        };
+        // The newest row drawn is what to come back to: the rows let go
+        // of at the top were screens above it, and `scroll_to` keeps it
+        // in view across the change.
+        let drawn = self.posts.borrow().clone();
+        let newest = (0..drawn.n_items())
+            .rev()
+            .filter_map(|i| drawn.item(i).and_downcast::<PostRow>())
+            .map(|row| row.id())
+            .find(|id| !id.is_empty());
+        *self.restore_to.borrow_mut() = newest.map(|id| PostId::new(&id));
+        self.shown.set(shown.forward(WINDOW_STEP));
+        self.refresh_posts(&channel);
+        true
+    }
+
     /// A list of its own for a channel being opened for the first time,
     /// at the cost of the oldest one if too many are being kept.
     fn draw_channel(&self, channel: &ChannelId) -> Drawn {
@@ -8531,11 +8733,11 @@ impl Ui {
         // still has its list has its rows already and nothing to
         // rebuild, and narrowing it would throw them away.
         let fresh = !self.drawn.borrow().iter().any(|d| &d.channel == id);
-        self.shown_window.set(if fresh {
+        self.shown.set(Window::newest(if fresh {
             OPENING_WINDOW
         } else {
             CHANNEL_WINDOW
-        });
+        }));
         crate::perf::marked("open:model", || self.show_model_for(id));
         crate::perf::marked("open:draft", || self.restore_draft(id));
         crate::perf::marked("open:pane", || self.show_pane(&Pane::Channel));
@@ -8548,16 +8750,25 @@ impl Ui {
         if fresh {
             let ui = self.clone();
             let grown = id.clone();
-            glib::timeout_add_local_once(WINDOW_GROWS_IN, move || {
-                // Unless the reader has moved on, or has already
-                // widened it themselves by scrolling back.
-                if ui.selected.borrow().as_ref() != Some(&grown)
-                    || ui.shown_window.get() >= CHANNEL_WINDOW
-                {
-                    return;
+            // A step at a time, for the reason on `WINDOW_STEP`: the
+            // whole rest of the window in one go was a 67ms frame, and
+            // nobody asked for it to be there in one go.
+            glib::timeout_add_local(WINDOW_GROWS_IN, move || {
+                // Unless the reader has moved on. Not "unless the window
+                // moved": a reach for the top in the meantime widens it
+                // in the same direction, and stopping for that left a
+                // channel at twenty-five rows with the message a test
+                // was waiting for just past them.
+                if ui.selected.borrow().as_ref() != Some(&grown) {
+                    return glib::ControlFlow::Break;
                 }
-                ui.shown_window.set(CHANNEL_WINDOW);
+                let shown = ui.shown.get();
+                if shown.count >= CHANNEL_WINDOW {
+                    return glib::ControlFlow::Break;
+                }
+                ui.shown.set(shown.back(WINDOW_STEP));
                 ui.refresh_posts(&grown);
+                glib::ControlFlow::Continue
             });
         }
         // The caret belongs in the composer the moment a channel opens,
@@ -9469,9 +9680,11 @@ impl Ui {
         // changes on screen -- which reads as a fetch that did nothing,
         // and leaves the reader at an edge with no reason to scroll
         // again.
-        let arrived = page.posts.len().max(1);
-        self.shown_window
-            .set(self.shown_window.get().saturating_add(arrived));
+        // But only a screenful of it at once, for the reason on
+        // `WINDOW_STEP`; the rest is in the store, and the next reach
+        // for the top shows it without a request.
+        let arrived = page.posts.len().clamp(1, WINDOW_STEP);
+        self.shown.set(self.shown.get().back(arrived));
         self.refresh_posts(channel);
     }
 
@@ -9778,9 +9991,9 @@ impl Ui {
         // they are covered: they are calendar arithmetic and identity
         // comparisons, and both are wrong in ways only a test notices.
         let held = store.channel_posts(channel);
-        // The newest `window` of them. The rest stay in the store, which
-        // is where scrolling back finds them.
-        let visible = &held[held.len().saturating_sub(self.shown_window.get())..];
+        // The window of them. The rest stay in the store, which is where
+        // scrolling finds them.
+        let visible = self.shown.get().of(&held);
         let offset = local_utc_offset_secs();
         let unread_from = *self.unread_from.borrow();
         let quick = store.favourite_emoji(QUICK_REACTIONS);
@@ -9961,8 +10174,16 @@ fn wire_scroller(ui: &Ui, scroller: &gtk::ScrolledWindow) {
     // the splice ever stops being the expensive part.
     let ask = Rc::clone(&ask_for_older);
     let settling = Rc::clone(&ui.settling);
+    let ui = ui.clone();
     scroller.connect_edge_reached(move |_, edge| match edge {
-        gtk::PositionType::Bottom => stick.set(true),
+        // The bottom of the window is the newest message only when the
+        // window ends there; otherwise it is where more of the channel
+        // is, and reaching it shows the next of what is newer.
+        gtk::PositionType::Bottom => {
+            if !ui.reach_newer() {
+                stick.set(true);
+            }
+        }
         // Only when the reader put themselves there.
         //
         // A list that has just been handed a channel's rows is at

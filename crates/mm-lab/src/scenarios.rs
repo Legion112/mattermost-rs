@@ -529,7 +529,7 @@ const IMAGE: &str = "mmrs-ui:latest";
 
 /// How much history the scroll measurement needs. Enough to page through
 /// several times, which is what makes the splice show up at all.
-const PERF_MESSAGES: usize = 800;
+const PERF_MESSAGES: usize = 2000;
 
 /// How many times to go back and forth between two channels. Enough
 /// that the second visit to each is in the trace, which is the visit
