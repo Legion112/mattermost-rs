@@ -5544,16 +5544,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
         let item = item.clone();
         let ctx = ctx.clone();
         first_hover.connect_enter(move |_, _, _| {
-            // The overlay's last child is the toolbar once there is one;
-            // before that it is the message itself.
-            let tools = match floating.last_child().and_downcast::<gtk::Box>() {
-                Some(tools) if tools.has_css_class("mmrs-tools") => tools,
-                _ => {
-                    let tools = build_message_tools(&row, &item, &ctx);
-                    floating.add_overlay(&tools);
-                    tools
-                }
-            };
+            let tools = tools_of(&floating, &row, &item, &ctx);
             // A day separator has nothing to act on, and the row under
             // the pointer may have been recycled since its toolbar was
             // made.
@@ -5568,6 +5559,8 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
         });
     }
     row.add_controller(first_hover);
+
+    wire_right_click(&row, &floating, item, ctx);
 
     // A name and a face are the two places Mattermost opens a person's
     // card from, so both get the gesture and the hand cursor that says
@@ -5585,6 +5578,66 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     }
 
     item.set_child(Some(&row));
+}
+
+/// The right button opens the same menu the "…" does, at once: the
+/// toolbar is shown and its menu popped up, which is what every other
+/// client does with a right-click on a message. In the capture phase
+/// and claimed, so the text view underneath does not put up its own
+/// copy-and-paste menu over it.
+fn wire_right_click(
+    row: &gtk::Box,
+    floating: &gtk::Overlay,
+    item: &gtk::ListItem,
+    ctx: &RowContext,
+) {
+    let right = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let (on, floating, item, ctx) = (row.clone(), floating.clone(), item.clone(), ctx.clone());
+    right.connect_pressed(move |gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        let Some(data) = item.item().and_downcast::<PostRow>() else {
+            return;
+        };
+        if data.is_separator() {
+            return;
+        }
+        let tools = tools_of(&floating, &on, &item, &ctx);
+        label_quick_reactions(&tools, &data, &ctx.emoji);
+        tools.set_visible(true);
+        show_only(&ctx.shown, &tools);
+        let mut child = tools.first_child();
+        while let Some(widget) = child {
+            if let Some(more) = widget.downcast_ref::<gtk::MenuButton>() {
+                more.popup();
+                break;
+            }
+            child = widget.next_sibling();
+        }
+    });
+    row.add_controller(right);
+}
+
+/// The row's toolbar, made the first time it is asked for.
+///
+/// The overlay's last child is the toolbar once there is one; before
+/// that it is the message itself.
+fn tools_of(
+    floating: &gtk::Overlay,
+    row: &gtk::Box,
+    item: &gtk::ListItem,
+    ctx: &RowContext,
+) -> gtk::Box {
+    match floating.last_child().and_downcast::<gtk::Box>() {
+        Some(tools) if tools.has_css_class("mmrs-tools") => tools,
+        _ => {
+            let tools = build_message_tools(row, item, ctx);
+            floating.add_overlay(&tools);
+            tools
+        }
+    }
 }
 
 /// Make this the only toolbar on screen.

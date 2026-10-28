@@ -1072,7 +1072,13 @@ The hover toolbar's overflow menu is lab-verified too: resting the pointer \
 on a message brought the toolbar up, "Pin to channel" left the server \
 holding the post pinned, and "Unpin from channel" took it off. Saving from the message \
 menu is lab-verified too: "Save message" put the post on the server's \
-saved list and "Remove from saved" took it off."""
+saved list and "Remove from saved" took it off. **The right button opens \
+the same menu** straight away, the way every other client does, with the \
+toolbar shown beside it; the gesture is taken in the capture phase so the \
+text underneath does not put up its own copy-and-paste menu over it. \
+Lab-verified by `opens-the-menu-with-a-right-click`: a right-click on the \
+seeded root brought the menu up, and the entry pressed in it moved the \
+post on and off the server's saved list."""
 
 [[feature]]
 id       = "channels.info_and_members"

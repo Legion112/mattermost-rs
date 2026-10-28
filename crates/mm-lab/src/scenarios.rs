@@ -53,6 +53,7 @@ pub const SCENARIOS: &[&str] = &[
     "opens-a-card-from-a-mention",
     "pins-from-the-hover-toolbar",
     "saves-from-the-menu",
+    "opens-the-menu-with-a-right-click",
     "marks-unread-from-the-menu",
     "replies-in-the-thread-box",
     "jumps-with-the-switcher",
@@ -171,6 +172,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "opens-a-card-from-a-mention" => card_from_mention(screen).await,
         "pins-from-the-hover-toolbar" => pins_from_toolbar(screen, admin).await,
         "saves-from-the-menu" => saves_from_menu(screen, admin).await,
+        "opens-the-menu-with-a-right-click" => right_click_menu(screen, admin).await,
         "marks-unread-from-the-menu" => marks_unread_from_menu(screen, admin).await,
         "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
@@ -1122,6 +1124,59 @@ async fn message_menu(screen: &Screen, text: &str) -> Result<()> {
     screen.scroll_into_view(&body).await?;
     screen.hover(&body).await?;
     screen.click_button_near("More actions", &body).await
+}
+
+/// The right button on a message opens the same menu the "…" does.
+async fn right_click_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    screen.right_click_into(&body).await?;
+    screen
+        .until("the message menu is up", |tree| {
+            tree.has("button", "Copy text")
+        })
+        .await?;
+    // Something the menu does, to prove it is the real one: saving the
+    // message, which the server then holds.
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    let was = admin.my_saved_ids().await?.contains(&post);
+    screen
+        .press(if was {
+            "Remove from saved"
+        } else {
+            "Save message"
+        })
+        .await?;
+    let mut now = was;
+    for _ in 0..25 {
+        now = admin.my_saved_ids().await?.contains(&post);
+        if now != was {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if now == was {
+        return Err(Error(
+            "the menu entry was pressed but the server's saved list did not change".to_owned(),
+        ));
+    }
+    // And back, so the lab is left as it was found.
+    screen.right_click_into(&body).await?;
+    screen
+        .until("the message menu is up again", |tree| {
+            tree.has("button", "Copy text")
+        })
+        .await?;
+    screen
+        .press(if was {
+            "Save message"
+        } else {
+            "Remove from saved"
+        })
+        .await?;
+    Ok(())
 }
 
 /// Save and unsave from the message menu, with the server's saved list

@@ -143,6 +143,15 @@ pub fn move_to(x: i32, y: i32) -> Result<()> {
 
 /// Click the left button somewhere on the screen.
 pub fn click_at(x: i32, y: i32) -> Result<()> {
+    click_with(1, x, y)
+}
+
+/// The right button, for a context menu.
+pub fn right_click_at(x: i32, y: i32) -> Result<()> {
+    click_with(3, x, y)
+}
+
+fn click_with(button: u8, x: i32, y: i32) -> Result<()> {
     // One connection for the whole gesture, the way xdotool does it:
     // the move, the press, a finger's pause, the release, one flush.
     let (conn, root) = connect()?;
@@ -164,11 +173,11 @@ pub fn click_at(x: i32, y: i32) -> Result<()> {
     // box and GTK handed focus back to the last widget when the window
     // was next activated.
     focus_under_pointer(&conn, root)?;
-    fake(xproto::BUTTON_PRESS_EVENT, 1, 0, 0)?;
+    fake(xproto::BUTTON_PRESS_EVENT, button, 0, 0)?;
     conn.flush()
         .map_err(|e| Error(format!("flushing the display: {e}")))?;
     std::thread::sleep(std::time::Duration::from_millis(12));
-    fake(xproto::BUTTON_RELEASE_EVENT, 1, 0, 0)?;
+    fake(xproto::BUTTON_RELEASE_EVENT, button, 0, 0)?;
     conn.flush()
         .map_err(|e| Error(format!("flushing the display: {e}")))?;
     // Let the server deliver before the connection goes away.

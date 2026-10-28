@@ -560,6 +560,14 @@ impl Screen {
         crate::input::click_at(x + w / 2, y + h / 2)
     }
 
+    /// The right button in the middle of a widget: what opens a context
+    /// menu, where there is one.
+    pub async fn right_click_into(&self, node: &Node) -> Result<()> {
+        let (x, y, w, h) = self.extents(node).await?;
+        eprintln!("  right-click into {:?} at ({x}, {y}) {w}x{h}", node.name);
+        crate::input::right_click_at(x + w / 2, y + h / 2)
+    }
+
     /// Click just inside a widget's top-left corner: the first word of a
     /// label, which a label cannot place any more finely -- GTK answers
     /// `GetRangeExtents` on one with `NotSupported`.
