@@ -54,9 +54,11 @@ pub const SCENARIOS: &[&str] = &[
     "pins-from-the-hover-toolbar",
     "saves-from-the-menu",
     "opens-the-menu-with-a-right-click",
+    "forwards-from-the-menu",
     "marks-unread-from-the-menu",
     "replies-in-the-thread-box",
     "jumps-with-the-switcher",
+    "focuses-the-box-with-the-keys",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "edits-the-channel-header",
@@ -173,9 +175,11 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "pins-from-the-hover-toolbar" => pins_from_toolbar(screen, admin).await,
         "saves-from-the-menu" => saves_from_menu(screen, admin).await,
         "opens-the-menu-with-a-right-click" => right_click_menu(screen, admin).await,
+        "forwards-from-the-menu" => forwards_from_menu(screen, admin).await,
         "marks-unread-from-the-menu" => marks_unread_from_menu(screen, admin).await,
         "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
+        "focuses-the-box-with-the-keys" => focuses_box_with_keys(screen).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
@@ -835,6 +839,38 @@ async fn replies_in_thread(screen: &Screen, admin: &Admin) -> Result<()> {
     Ok(())
 }
 
+/// Ctrl+Shift+L puts the caret back in the message box from wherever
+/// the reader has clicked, which is Mattermost's own binding for it.
+async fn focuses_box_with_keys(screen: &Screen) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    // Somewhere else first: the text of a message, which takes the focus
+    // when clicked the way any text view does.
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    screen.click_into(&body).await?;
+    let composer = screen
+        .tree()
+        .await?
+        .find("text box", "Write a message…")?
+        .clone();
+    if screen.focused(&composer).await? {
+        return Err(Error(
+            "the message box kept the focus after a click on a message".to_owned(),
+        ));
+    }
+    screen.press_key(0x4c, &[key::CONTROL, key::SHIFT])?;
+    for _ in 0..25 {
+        if screen.focused(&composer).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    Err(Error(
+        "Ctrl+Shift+L did not put the focus in the message box".to_owned(),
+    ))
+}
+
 /// Ctrl+K, a few letters and Return open the channel named.
 async fn jumps_with_switcher(screen: &Screen) -> Result<()> {
     screen.open_channel("Engineering").await?;
@@ -850,12 +886,16 @@ async fn jumps_with_switcher(screen: &Screen) -> Result<()> {
     screen.type_into(&entry, "Design").await?;
     // The list fills a moment after the text changes; Return before
     // that acts on whatever was selected before.
+    // The unfiltered list has a Design in it too, so the filtered one is
+    // told by Town Square having gone from it.
     screen
-        .until("the switcher offers Design", |tree| {
-            tree.iter()
-                .filter(|n| n.role == "label" && n.name == "Design")
-                .count()
-                >= 2
+        .until("the switcher offers Design and nothing else", |tree| {
+            let count = |name: &str| {
+                tree.iter()
+                    .filter(|n| n.role == "label" && n.name == name)
+                    .count()
+            };
+            count("Design") >= 2 && count("Town Square") == 1
         })
         .await?;
     // What the finder holds at the moment of Return, for the log: on
@@ -881,7 +921,7 @@ async fn jumps_with_switcher(screen: &Screen) -> Result<()> {
 /// Last of all, the lab's own traces go, so a kept lab is next run's
 /// seed and not a pile of every run so far. Not a test of the window.
 async fn tidies(admin: &Admin) -> Result<()> {
-    for channel in ["engineering", "design"] {
+    for channel in ["engineering", "design", "random-lab", "town-square"] {
         admin.sweep_traces(channel).await?;
     }
     Ok(())
@@ -1176,6 +1216,57 @@ async fn right_click_menu(screen: &Screen, admin: &Admin) -> Result<()> {
             "Remove from saved"
         })
         .await?;
+    Ok(())
+}
+
+/// Forward from the message menu: the picker takes a channel name, and
+/// the server then holds the message's permalink in that channel.
+async fn forwards_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    let link = format!("{}/{}/pl/{post}", crate::stack::URL, crate::seed::TEAM);
+    message_menu(screen, ROOT).await?;
+    screen.press("Forward").await?;
+    let picker = screen
+        .until("the forward picker is up", |tree| {
+            tree.has("search box", "Forward to…")
+        })
+        .await?;
+    // Clicked into first: a key goes to the window under the pointer,
+    // and the pointer is still on the menu entry in the main window.
+    let entry = picker.find("search box", "Forward to…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "Design").await?;
+    // The sidebar has a Design of its own: the picker's row is the
+    // second one, and Return before it is there acts on whatever the
+    // picker selected first.
+    // And not just any list: the unfiltered one has a Design in it too,
+    // with Archive Practice above it, which is where Return went once.
+    screen
+        .until("the picker offers Design and nothing above it", |tree| {
+            let count = |name: &str| {
+                tree.iter()
+                    .filter(|n| n.role == "label" && n.name == name)
+                    .count()
+            };
+            count("Design") >= 2 && count("Town Square") == 1
+        })
+        .await?;
+    screen.press_key(key::RETURN, &[])?;
+    let mut said = false;
+    for _ in 0..25 {
+        said = admin.channel_says("design", &link).await?;
+        if said {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !said {
+        return Err(Error(format!(
+            "Forward to Design was chosen but Design does not hold {link}"
+        )));
+    }
     Ok(())
 }
 

@@ -247,8 +247,11 @@ Verified on this machine with `dbus-monitor`: the \
 `Notify` call carries the `default` action, the right icon name, \
 `desktop-entry`, `category` `im.received` and `sound-name`. NOT \
 verified: the click itself, which needs somebody to send a mention. \
-UNVERIFIED: whether muting alone should silence notifications; see \
-NotifySettings::muted_is_silent."""
+Muting silences notifications outright, mentions included: Mattermost's own \
+documentation says that once a channel is muted "all notifications for that \
+channel are disabled, including email, desktop, incoming call ring tones, \
+and push notifications", with a direct mention only bolding the row in the \
+sidebar. `NotifySettings::muted_is_silent` is that rule, on by default."""
 
 [[feature]]
 id       = "posts.timeline_gaps"
@@ -947,6 +950,26 @@ sidebar exactly. NOT built: dragging a category heading to reorder the \
 categories themselves, and dragging a channel out of the sidebar."""
 
 [[feature]]
+id       = "posts.forward"
+area     = "posts"
+upstream = "webapp"
+status   = "done"
+endpoints = ["POST /api/v4/posts"]
+verified_against = "12.0.1"
+notes = """
+Forward, in the message menu: Mattermost forwards a message by posting its \
+permalink to the channel chosen, and the receiving client draws the message \
+from the link, so that is what this does -- the same `POST /posts` as any \
+message, with the link as its text. The channel is picked in the switcher's \
+own window under another title, which is why the two share one picker; a \
+find that is not a channel the reader is in -- one to join, somebody with \
+no conversation yet, an archived one -- is turned down with a word rather \
+than joined or opened on the way. NOT built: the comment the webapp lets \
+you add above the forwarded message. Lab-verified by `forwards-from-the-menu`: \
+Forward on the seeded root, "Design" typed into the picker and Return, and \
+the server holding the permalink in Design."""
+
+[[feature]]
 id       = "posts.search"
 area     = "posts"
 upstream = "server-api"
@@ -1564,4 +1587,11 @@ wrote it, and picking one toggles the reaction the way the quick \
 buttons do. Verified in the lab, by keys faked on its display: the chord \
 opened the picker over the box, "tada" typed into its search narrowed \
 it, and the server's copy of the newest message carried the reaction. \
-NOT built: Alt+Shift+Up/Down across teams."""
+**Ctrl+Shift+L puts the caret in the message box and Ctrl+Shift+U opens the \
+file picker for it**, Mattermost's own bindings, for a reader who has been \
+reading and wants to answer without reaching for the mouse. The first is \
+lab-verified by `focuses-the-box-with-the-keys`, which clicks into a \
+message, sees the box without the focus, presses the chord and sees it \
+with; the second opens the portal's file dialog, which the lab cannot \
+drive. NOT built: Alt+Shift+Up/Down across teams, since this client shows \
+one team."""

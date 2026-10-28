@@ -1273,6 +1273,7 @@ fn wire_everything(ui: &Ui, composer: &Composer, thread_composer: &Composer) {
     wire_presence(ui);
     watch_presence(ui);
     remember_geometry(ui);
+    install_forwarding(ui);
 }
 
 /// Ask again, now and then, where the people on screen are.
@@ -2987,9 +2988,14 @@ impl Composer {
 
     fn wire_attach(&self, button: &gtk::Button) {
         let composer = self.clone();
-        button.connect_clicked(move |button| {
-            let window = button.root().and_downcast::<gtk::Window>();
-            let picked = composer.clone();
+        button.connect_clicked(move |_| composer.pick_files());
+    }
+
+    /// Ask for files to attach: the paperclip, and Ctrl+Shift+U.
+    fn pick_files(&self) {
+        {
+            let window = self.view.root().and_downcast::<gtk::Window>();
+            let picked = self.clone();
             gtk::FileDialog::builder()
                 .title("Attach to this message")
                 .modal(true)
@@ -3004,7 +3010,7 @@ impl Composer {
                         }
                     }
                 });
-        });
+        }
     }
 
     /// Draw a chip per attached file, each with a way to take it off.
@@ -4632,6 +4638,24 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
             ui.open_search();
             return glib::Propagation::Stop;
         }
+        // Ctrl+Shift+L puts the caret in the message box, and Ctrl+Shift+U
+        // opens the file picker for it -- both Mattermost's own bindings,
+        // for a reader who has been reading and wants to answer without
+        // reaching for the mouse.
+        if key == gdk::Key::L
+            && state.contains(gdk::ModifierType::CONTROL_MASK)
+            && state.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            ui.composer.view.grab_focus();
+            return glib::Propagation::Stop;
+        }
+        if key == gdk::Key::U
+            && state.contains(gdk::ModifierType::CONTROL_MASK)
+            && state.contains(gdk::ModifierType::SHIFT_MASK)
+        {
+            ui.composer.pick_files();
+            return glib::Propagation::Stop;
+        }
         // Ctrl+Shift+M: the reader's recent mentions, as the webapp binds it.
         if key == gdk::Key::M
             && state.contains(gdk::ModifierType::CONTROL_MASK)
@@ -4692,6 +4716,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("<Control>k", "Jump to a channel or a person"),
             ("<Control><Shift>f", "Search this team's messages"),
             ("<Control><Shift>m", "Your recent mentions"),
+            ("<Control><Shift>l", "Put the caret in the message box"),
+            ("<Control><Shift>u", "Attach a file"),
             ("<Alt>Up", "Previous channel"),
             ("<Alt>Down", "Next channel"),
             ("<Alt><Shift>Up", "Previous unread channel"),
@@ -6077,6 +6103,39 @@ fn iter_under(view: &gtk::TextView, x: f64, y: f64) -> Option<gtk::TextIter> {
     view.iter_at_location(bx, by)
 }
 
+/// The Forward entry hands the message and its permalink to whatever the
+/// window installed in `ON_FORWARD`, once the menu is out of the way.
+fn wire_forward_entry(
+    button: &gtk::Button,
+    popover: &gtk::Popover,
+    post: &PostId,
+    address: String,
+) {
+    let popover = popover.clone();
+    let post = post.clone();
+    button.connect_clicked(move |_| {
+        popover.popdown();
+        ON_FORWARD.with(|handler| {
+            if let Some(handler) = handler.borrow().as_ref() {
+                handler(&post, &address);
+            }
+        });
+    });
+}
+
+/// What a picker does with the row chosen: see `Ui::open_picker`.
+type Chooser = Rc<dyn Fn(&Ui, &str)>;
+
+/// See `ON_FORWARD`: the message being forwarded, and its permalink.
+type ForwardHandler = Rc<dyn Fn(&PostId, &str)>;
+
+thread_local! {
+    /// How a message menu opens the forward picker, which is a window
+    /// the menu cannot reach from where it is built: installed once by
+    /// the window, for the same reason as `ON_MENTION`.
+    static ON_FORWARD: RefCell<Option<ForwardHandler>> = const { RefCell::new(None) };
+}
+
 /// See `ON_MENTION`: the view the name is in, where in it, and the name.
 type MentionHandler = Rc<dyn Fn(&gtk::Widget, Option<gdk::Rectangle>, &str)>;
 
@@ -6807,19 +6866,11 @@ fn fill_message_menu(
     );
     // Both read "undo what is already true" when it is: there is no
     // separate unsave or unpin anywhere in Mattermost.
-    let saving = if saved {
-        "Remove from saved"
-    } else {
-        "Save message"
-    };
+    let saving = ["Save message", "Remove from saved"][usize::from(saved)];
     let button = entry("bookmark-new-symbolic", saving);
     wire_save_entry(&button, popover, store, commands, &post, !saved);
     actions.append(&button);
-    let pinning = if pinned {
-        "Unpin from channel"
-    } else {
-        "Pin to channel"
-    };
+    let pinning = ["Pin to channel", "Unpin from channel"][usize::from(pinned)];
     add(
         &entry("view-pin-symbolic", pinning),
         Command::Pin {
@@ -6832,7 +6883,12 @@ fn fill_message_menu(
     // through the engine. Mattermost groups the two of them apart.
     actions.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     if let Some(address) = store.borrow().permalink(&server.borrow(), &post) {
-        copies(&entry("insert-link-symbolic", "Copy link"), address);
+        copies(&entry("insert-link-symbolic", "Copy link"), address.clone());
+        // Forwarding is the permalink said again somewhere else, which is
+        // what Mattermost posts for it. The window picks the somewhere.
+        let forward = entry("mail-forward-symbolic", "Forward");
+        wire_forward_entry(&forward, popover, &post, address);
+        actions.append(&forward);
     }
     copies(&entry("edit-copy-symbolic", "Copy text"), data.plain_body());
 
@@ -7081,6 +7137,14 @@ impl RowWidgets {
 /// Make a click on an `@name` in a message open that person's card,
 /// pointing at the name. See `ON_MENTION` for why this is installed
 /// rather than wired.
+/// Let a message menu open the forward picker: see `ON_FORWARD`.
+fn install_forwarding(ui: &Ui) {
+    let ui = ui.clone();
+    let handler: ForwardHandler =
+        Rc::new(move |_post, address| ui.open_forward(address.to_owned()));
+    ON_FORWARD.with(|slot| *slot.borrow_mut() = Some(handler));
+}
+
 fn install_mention_cards(store: &Rc<RefCell<Store>>, avatars: &Avatars, emoji: &Emoji) {
     let store = Rc::clone(store);
     let avatars = Rc::clone(avatars);
@@ -8557,13 +8621,52 @@ impl Ui {
     }
 
     fn open_switcher(&self) {
+        self.open_picker("Find channel", "Find channel…", Rc::new(Ui::switcher_chose));
+    }
+
+    /// Forward a message: the same picker as the switcher, and the
+    /// permalink posted to the channel chosen -- which is what
+    /// Mattermost's own Forward does, the receiving client drawing the
+    /// message from the link. Only a channel the reader is in: a channel
+    /// to join first, or somebody with no conversation yet, is turned
+    /// down with a word rather than joined or opened on the way.
+    fn open_forward(&self, address: String) {
+        self.open_picker(
+            "Forward to",
+            "Forward to…",
+            Rc::new(move |ui, name| {
+                if name.is_empty() {
+                    return;
+                }
+                if name.contains(':') {
+                    ui.set_status("forward to a channel you are in");
+                    return;
+                }
+                ui.commands
+                    .send(Command::Send {
+                        channel: ChannelId::new(name),
+                        text: address.clone(),
+                        root: None,
+                        attach: Vec::new(),
+                    })
+                    .ok();
+                ui.set_status("forwarded");
+            }),
+        );
+    }
+
+    /// The channel list with a search box over it that the switcher and
+    /// the forward picker share. `chose` gets the row's name: a channel
+    /// id, or one of the switcher's prefixed finds -- `join:`, `dm:`,
+    /// `archived:` -- for a thing not in the sidebar.
+    fn open_picker(&self, title: &str, placeholder: &str, chose: Chooser) {
         let entry = gtk::SearchEntry::builder()
-            .placeholder_text("Find channel…")
+            .placeholder_text(placeholder)
             .margin_start(12)
             .margin_end(12)
             .margin_top(12)
             .build();
-        name_widget(&entry, "Find channel…");
+        name_widget(&entry, placeholder);
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Browse)
             .css_classes(["navigation-sidebar"])
@@ -8575,7 +8678,7 @@ impl Ui {
             .build();
 
         let window = adw::Window::builder()
-            .title("Find channel")
+            .title(title)
             .modal(true)
             .default_width(SWITCHER_WIDTH)
             .default_height(SWITCHER_HEIGHT)
@@ -8654,7 +8757,7 @@ impl Ui {
             move |row: &gtk::ListBoxRow| {
                 let name = row.widget_name();
                 window.close();
-                ui.switcher_chose(name.as_str());
+                chose(&ui, name.as_str());
             }
         };
         {

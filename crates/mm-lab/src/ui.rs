@@ -39,6 +39,8 @@ const AROUND: i32 = 80;
 /// a compiler can check -- so it is asserted against a widget known to be
 /// insensitive rather than trusted.
 const STATE_SENSITIVE: u32 = 24;
+/// `ATSPI_STATE_FOCUSED`.
+const STATE_FOCUSED: u32 = 12;
 const STATE_SELECTED: u32 = 23;
 
 /// How deep to walk before deciding the tree is a loop. A GTK window is a
@@ -350,6 +352,19 @@ impl Screen {
             .call::<_, _, Vec<u32>>("GetState", &())
             .await
             .unwrap_or_default()
+    }
+
+    /// Whether a widget has the keyboard focus.
+    pub async fn focused(&self, node: &Node) -> Result<bool> {
+        let states: Vec<u32> = self
+            .proxy(node, ACCESSIBLE)
+            .await?
+            .call("GetState", &())
+            .await
+            .map_err(|e| Error(format!("reading the state of {:?}: {e}", node.name)))?;
+        Ok(states
+            .first()
+            .is_some_and(|word| word & (1 << STATE_FOCUSED) != 0))
     }
 
     /// Whether a widget can be used, which is what a greyed-out button is not.

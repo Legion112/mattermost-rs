@@ -5,7 +5,8 @@
 //! bus — and CI has no session bus at all.
 //!
 //! The rules are ordered so the cheapest and most certain come first. The one
-//! that is *not* certain is marked: see [`NotifySettings::muted_is_silent`].
+//! that was not certain is now settled by the documentation: see
+//! [`NotifySettings::muted_is_silent`].
 
 use mm_types::{ChannelId, Post, UserId};
 
@@ -59,12 +60,14 @@ pub struct NotifySettings {
     pub muted: bool,
     /// Whether muting should also silence notifications.
     ///
-    /// **Not confirmed against a live server.** Muting is defined on the wire
-    /// as `mark_unread: "mention"`, which is about the unread marker; the web
-    /// app happens to set `desktop: "mention"` at the same time, so the two
-    /// are hard to tell apart from the outside. Defaulting to `true` matches
-    /// what people expect from a mute, and the flag exists so the behaviour is
-    /// a visible decision rather than an accident. See `docs/parity.toml`.
+    /// Confirmed against Mattermost's own documentation: once a channel is
+    /// muted, "all notifications for that channel are disabled, including
+    /// email, desktop, incoming call ring tones, and push notifications" --
+    /// a direct mention still bolds the row in the sidebar, but it does not
+    /// notify. On the wire muting is `mark_unread: "mention"`, which is about
+    /// the unread marker, and the webapp sets `desktop: "mention"` beside it;
+    /// this flag is what makes the documented behaviour a decision of this
+    /// client rather than a side effect of that second field. Default `true`.
     pub muted_is_silent: bool,
     /// Notify even when the window already shows this channel.
     pub notify_when_focused: bool,

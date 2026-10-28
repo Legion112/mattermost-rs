@@ -1493,6 +1493,8 @@ fn dump(n: usize) -> String {
 
 /// How every message the lab writes begins, so a sweep knows its own.
 pub const LAB_TRACES: &[&str] = &[
+    // A forwarded message is its permalink said again.
+    "http://localhost:8065/lab/pl/",
     "Sent from the lab",
     "Edited from the lab",
     "Replied from the lab",
