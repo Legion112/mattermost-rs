@@ -158,6 +158,66 @@ paragraph (the overwhelmingly common shape) took the worst frame from 433ms to
 prepending into the model at all. That is a real piece of work and nobody
 should start it without re-running the table above first.
 
+## What the original does, and what we do instead
+
+Measured against a real account, ours spends its time in two places and
+the official client has designed both of them away.
+
+| | mattermost-webapp | this client |
+|---|---|---|
+| rows that exist at once | ~61, capped | every post loaded, hundreds |
+| channel switch | new `postListIds` prop, ~visible rows render | rebuild all rows, diff, splice |
+| a page of history | prepend to a virtualised window | `splice` into a model of hundreds |
+
+From `webapp/channels/src/components/post_view/post_list_virtualized`:
+
+```
+const OVERSCAN_COUNT_BACKWARD = 80;
+const OVERSCAN_COUNT_FORWARD = 80;
+const HEIGHT_TRIGGER_FOR_MORE_POSTS = 1000;
+const MAXIMUM_POSTS_FOR_SLICING = { channel: 50, permalink: 100 };
+```
+
+The initial render window is about thirty entries either side of an
+anchor -- the focused post, or the new-messages line -- and **capped at
+fifty for a channel**. Everything outside that window is an id in a
+Redux store, not a row. Scrolling moves the window; it does not grow it.
+
+What that buys them is the thing we do not have: the cost of opening a
+channel is the cost of the rows you can see, and it does not grow with
+how much history is loaded.
+
+Our numbers on a real account, for comparison:
+
+```
+splice:model     2 x  835.47ms each   one call, a model of hundreds
+bind:reactions 183 x    7.41ms each   84% of all bind time
+refresh_posts   10 x  251.57ms each
+open_channel     6 x  175.97ms each
+```
+
+`splice:model` at 835ms is a model that is too big to be spliced at all,
+and `bind:reactions` at 7.41ms is a row that is too expensive to build
+-- against 0.26ms for the same code in a seeded channel, which is why
+the lab has been no help on that one.
+
+### The plan this points at
+
+1. **Bound the model.** Keep a window of rows, the way they cap at
+   fifty, instead of every post ever paged in. This is the one that
+   attacks both numbers at once: fewer rows to splice and fewer rows to
+   bind. It is also the one that changes how the timeline and the
+   scroll anchor work, so it is a real change rather than a tweak.
+2. **A model per channel, swapped on switch.** `ListView::set_model`
+   instead of splicing one channel's rows out and another's in. A switch
+   then costs the visible rows and nothing else.
+3. **Make a row cheap.** 7.41ms is not widget construction; something in
+   that path is doing work proportional to something we have not found.
+   It needs a per-chip measurement on an account that reproduces it.
+
+Taken in that order, because the first bounds the damage the other two
+are trying to reduce.
+
 ## Still untested
 
 - Prepending while at the **very top** (offset 0), where there is no room

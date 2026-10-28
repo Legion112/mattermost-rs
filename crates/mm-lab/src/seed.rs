@@ -730,7 +730,11 @@ async fn long_channel(
         // And most of them carry reactions, which are rebuilt on every
         // bind and so are part of what a bind costs.
         if n % 3 != 0 {
-            for emoji in ["eyes", "+1", "tada"].iter().take(1 + n % 3) {
+            // `lab` is the server's own custom emoji, and a chip for one
+            // is a picture rather than a glyph -- a different and much
+            // more expensive path. A fixture of standard emoji only
+            // measured the cheap half.
+            for emoji in ["eyes", "lab", "+1", "tada", "lab"].iter().take(2 + n % 4) {
                 admin
                     .create(
                         &HttpRequest::new(Method::Post, "/api/v4/reactions").json(&json!({
