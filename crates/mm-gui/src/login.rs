@@ -140,6 +140,14 @@ impl LoginPage {
         self.message.add_css_class("dim-label");
     }
 
+    /// Two of the three fields, when the form comes back after a session
+    /// ended: the password is the only thing the reader has to type again.
+    pub(crate) fn prefill(&self, server: &str, login_id: &str) {
+        self.server.set_text(server);
+        self.login_id.set_text(login_id);
+        self.password.grab_focus();
+    }
+
     /// Reveal the two-factor row and put the cursor in it.
     pub(crate) fn ask_for_mfa(&self) {
         self.mfa.set_visible(true);

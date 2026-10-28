@@ -349,6 +349,13 @@ pub enum Command {
 pub enum Event {
     /// There is no stored session, so the window should ask for one.
     NeedLogin,
+    /// The server stopped honouring the session -- revoked, expired, or the
+    /// password changed -- so the stored token is gone and the form is up
+    /// again, with the server and the name it was signed in as.
+    SessionEnded {
+        server: String,
+        login_id: String,
+    },
     /// Signing in did not work.
     ///
     /// `needs_mfa` is separate from the message because it is not an error in

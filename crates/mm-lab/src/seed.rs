@@ -114,27 +114,40 @@ fn swatch_png() -> Vec<u8> {
 
 /// A client bound to the lab, optionally carrying somebody's token.
 #[derive(Debug)]
-struct Api(mm_http::Client);
+/// Behind a lock so that a session the lab revokes on purpose can be
+/// replaced without every `Admin` method taking `&mut self`.
+struct Api(tokio::sync::RwLock<mm_http::Client>);
 
 impl Api {
     fn anonymous() -> Result<Self> {
         mm_http::Client::new(crate::stack::URL)
-            .map(Self)
+            .map(|client| Self(tokio::sync::RwLock::new(client)))
             .map_err(|e| Error(e.to_string()))
     }
 
+    fn with_token(token: &str) -> Result<mm_http::Client> {
+        Ok(mm_http::Client::new(crate::stack::URL)
+            .map_err(|e| Error(e.to_string()))?
+            .with_token(token))
+    }
+
     fn as_token(token: &str) -> Result<Self> {
-        Ok(Self(
-            mm_http::Client::new(crate::stack::URL)
-                .map_err(|e| Error(e.to_string()))?
-                .with_token(token),
-        ))
+        Ok(Self(tokio::sync::RwLock::new(Self::with_token(token)?)))
+    }
+
+    /// Sign in again and carry on with the new token.
+    async fn relogin(&self, username: &str) -> Result<()> {
+        let (token, _) = Self::anonymous()?.login(username).await?;
+        *self.0.write().await = Self::with_token(&token)?;
+        Ok(())
     }
 
     /// Send, and fail with the server's own message rather than a status code.
     async fn call(&self, req: &HttpRequest) -> Result<Value> {
         let resp = self
             .0
+            .read()
+            .await
             .send(req)
             .await
             .map_err(|e| Error(format!("{} {}: {e}", req.method, req.path)))?;
@@ -204,6 +217,8 @@ impl Api {
         });
         let resp = self
             .0
+            .read()
+            .await
             .send(&req)
             .await
             .map_err(|e| Error(format!("login {username}: {e}")))?;
@@ -622,6 +637,19 @@ impl Admin {
             )))
             .await?;
         id_of(&found)
+    }
+
+    /// End every session the signed-in user has, the lab's own included,
+    /// and sign the lab back in. The client under test is the same user,
+    /// so this is what a revoked session looks like from its side.
+    pub async fn revoke_my_sessions(&self) -> Result<()> {
+        self.api
+            .call(&HttpRequest::new(
+                Method::Post,
+                format!("/api/v4/users/{}/sessions/revoke/all", self.me),
+            ))
+            .await?;
+        self.api.relogin(ADMIN).await
     }
 
     /// How many people the server has in a channel.

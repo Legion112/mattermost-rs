@@ -7893,6 +7893,29 @@ fn build_post_list(
 }
 
 impl Ui {
+    /// Put the sign-in form up: at the start, or again when the server
+    /// has stopped honouring the session, with `ended` naming the server
+    /// and the account it was signed in as.
+    fn show_login(&self, ended: Option<(String, String)>) {
+        self.stack.set_visible_child_name("login");
+        self.login.set_busy(false);
+        match ended {
+            None => self
+                .login
+                .show_hint("Your password is sent to your server and never stored."),
+            Some((server, login_id)) => {
+                self.login.prefill(&server, &login_id);
+                self.login
+                    .show_error("Your session ended on the server. Sign in again to carry on.");
+                self.set_status("session ended");
+            }
+        }
+        self.identity.set_text("not signed in");
+        // The title bar still said "connecting…" over a sign-in form,
+        // which is a window telling the user something that is not true.
+        self.title.set_subtitle("");
+    }
+
     /// Apply one engine event.
     ///
     /// `borrow_mut` on the store happens here and nowhere else, which is the
@@ -7900,17 +7923,8 @@ impl Ui {
     /// truth.
     fn on_event(&self, event: Event) {
         match event {
-            Event::NeedLogin => {
-                self.stack.set_visible_child_name("login");
-                self.login.set_busy(false);
-                self.login
-                    .show_hint("Your password is sent to your server and never stored.");
-                self.identity.set_text("not signed in");
-                // The title bar still said "connecting…" over a sign-in
-                // form, which is a window telling the user something that is
-                // not true.
-                self.title.set_subtitle("");
-            }
+            Event::NeedLogin => self.show_login(None),
+            Event::SessionEnded { server, login_id } => self.show_login(Some((server, login_id))),
             Event::LoginFailed { message, needs_mfa } => {
                 self.login.set_busy(false);
                 if needs_mfa {

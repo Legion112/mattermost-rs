@@ -139,6 +139,28 @@ MFA field is named `token`, not `mfa_token`. A personal access token is used \
 identically via Authorization: Bearer."""
 
 [[feature]]
+id       = "auth.session_revoked"
+area     = "auth"
+upstream = "webapp"
+status   = "done"
+endpoints = ["GET /api/v4/users/me"]
+verified_against = "12.0.1"
+notes = """
+A session the server stops honouring -- revoked from another client, expired, \
+or ended by a password change -- puts the sign-in form back up instead of a \
+client that quietly reconnects forever. Two signals, because they arrive at \
+different times: any request answered 401 while signed in, and the socket \
+handshake being refused. The handshake alone is not trusted, since a network \
+that is down looks the same from the client; one `GET /users/me` tells them \
+apart and only a 401 counts. On either, the socket task is stopped, the \
+stored token is removed (a client started tomorrow with it would only find \
+out again), and the form comes back with the server and the name filled in \
+and the password field focused. Verified in the lab: `signs-in-again-when-revoked` \
+revokes every session of the signed-in user, opens a channel to provoke a \
+request, waits for the form and its message, checks the token file is gone, \
+and signs back in with the password alone."""
+
+[[feature]]
 id       = "auth.sso_desktop_token"
 area     = "auth"
 upstream = "server-api"

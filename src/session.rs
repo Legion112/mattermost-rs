@@ -97,3 +97,14 @@ pub(crate) fn clear() -> Result<(), String> {
         Err(e) => Err(format!("could not remove {}: {e}", file.display())),
     }
 }
+
+/// Remove the stored session without a word: for a token the server has
+/// already stopped honouring, where there is nothing to report.
+pub(crate) fn forget() -> Result<(), String> {
+    let file = path()?;
+    match std::fs::remove_file(&file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("could not remove {}: {e}", file.display())),
+    }
+}

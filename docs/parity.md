@@ -19,11 +19,18 @@ real server yet.
 | feature | status | verified | notes |
 |---|---|---|---|
 | `auth.password_and_pat` | done | 12.0.1 | The session token arrives in the Token response header, 26 characters, with the body carrying only the sanitized user -- confirmed on a live server. The MFA field is named `token`, not `mfa_token`. A personal access token is used identically via Authorization: Bearer. |
+| `auth.session_revoked` | done | 12.0.1 | A session the server stops honouring -- revoked from another client, expired, or ended by a password change -- puts the sign-in form back up instead of a client that quietly reconnects forever. Two signals, because they arrive at different times: any request answered 401 while signed in, and the socket handshake being refused. The handshake alone is not trusted, since a network that is down looks the same from the client; one `GET /users/me` tells them apart and only a 401 counts. On either, the socket task is stopped, the stored token is removed (a client started tomorrow with it would only find out again), and the form comes back with the server and the name filled in and the password field focused. Verified in the lab: `signs-in-again-when-revoked` revokes every session of the signed-in user, opens a channel to provoke a request, waits for the form and its message, checks the token file is gone, and signs back in with the password alone. |
 | `auth.sso_desktop_token` | planned | — | The server side of the desktop-token flow is confirmed from source, including the 3-minute TTL. What is NOT confirmed is how the /login/desktop page hands server_token to a native process. Until that is answered, SSO users use a personal access token, and the login dialog should say so rather than failing at the password field. |
 
 <details><summary><code>auth.password_and_pat</code> wire</summary>
 
 - `POST /api/v4/users/login`
+- `GET /api/v4/users/me`
+
+</details>
+
+<details><summary><code>auth.session_revoked</code> wire</summary>
+
 - `GET /api/v4/users/me`
 
 </details>

@@ -27,11 +27,59 @@ use std::sync::Arc;
 
 use crate::session::Session;
 
+/// Why the socket task stopped on its own, when it did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocketEnd {
+    /// The window has gone, or the socket URL could not be built: nothing
+    /// to do about the session either way.
+    Gone,
+    /// The server no longer knows the token -- the session was revoked,
+    /// expired, or the password was changed. Reconnecting cannot help.
+    Unauthorized,
+}
+
+/// Where a request answered 401 says so, to wake the command loop.
+///
+/// A static rather than a field because `fetch` has only a client and is
+/// called from everywhere, often on a task of its own -- so a flag read
+/// after each command would miss a refusal that landed a moment later.
+/// Each message carries the serial of the session the request was made
+/// under; the loop ignores one for a session it has already put away,
+/// so a slow download begun under a revoked token cannot sign out the
+/// session that replaced it.
+static REJECTED: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<u64>>> =
+    std::sync::Mutex::new(None);
+
+/// Counts sessions up, so a refusal can say which one it was for.
+static SESSION_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn session_serial() -> u64 {
+    SESSION_SERIAL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// `serial` is the session the request was begun under, read before it
+/// was sent.
+fn note_status(status: u16, serial: u64) {
+    if status != 401 {
+        return;
+    }
+    let Ok(rejected) = REJECTED.lock() else {
+        return;
+    };
+    if let Some(sender) = rejected.as_ref() {
+        let _ = sender.send(serial);
+    }
+}
+
 /// A signed-in connection.
 struct Active {
     client: Client,
     session: Session,
-    socket: tokio::task::JoinHandle<()>,
+    /// `None` once the task has ended and its reason has been read.
+    socket: Option<tokio::task::JoinHandle<SocketEnd>>,
+    /// Which session this is, for telling a late refusal of the last one
+    /// from a refusal of this one.
+    serial: u64,
     /// Refuse every command that would change something on the server.
     read_only: bool,
     /// Whether collapsed reply threads are in effect, which decides whether
@@ -1003,8 +1051,10 @@ async fn best_effort(
     request: &mm_api::http::HttpRequest,
     events: &async_channel::Sender<Event>,
 ) {
+    let serial = session_serial();
     match a.client.send(request).await {
         Ok(response) if response.status >= 400 => {
+            note_status(response.status, serial);
             let _ = events
                 .send(Event::Failed(format!(
                     "the server refused that ({})",
@@ -1353,6 +1403,10 @@ async fn run(
     mut commands: tokio::sync::mpsc::UnboundedReceiver<Command>,
     events: async_channel::Sender<Event>,
 ) {
+    let (rejected, mut rejections) = tokio::sync::mpsc::unbounded_channel();
+    if let Ok(mut slot) = REJECTED.lock() {
+        *slot = Some(rejected);
+    }
     let mut active = match session {
         Some(saved) => activate(saved, &events).await,
         None => None,
@@ -1367,7 +1421,35 @@ async fn run(
         spawn_sync(a, &events);
     }
 
-    while let Some(command) = commands.recv().await {
+    loop {
+        // Either the next thing the window asks for, or the socket task
+        // giving up: a revoked session shows up there first when the
+        // window is idle, and in a refused request when it is not.
+        let ended = async {
+            match active.as_mut().and_then(|a| a.socket.as_mut()) {
+                Some(socket) => socket.await,
+                None => std::future::pending().await,
+            }
+        };
+        let command = tokio::select! {
+            command = commands.recv() => command,
+            ended = ended => {
+                if let Some(a) = active.as_mut() {
+                    a.socket = None;
+                }
+                if matches!(ended, Ok(SocketEnd::Unauthorized)) {
+                    sign_out(&mut active, &events).await;
+                }
+                continue;
+            }
+            Some(serial) = rejections.recv() => {
+                if active.as_ref().is_some_and(|a| a.serial == serial) {
+                    sign_out(&mut active, &events).await;
+                }
+                continue;
+            }
+        };
+        let Some(command) = command else { break };
         // Signing in is the only thing that works without a session, and it is
         // ignored once there is one: a second sign-in while connected would
         // leave two sockets running.
@@ -1402,8 +1484,10 @@ async fn run(
 
         handle(a, command, &events).await;
     }
-    if let Some(a) = active {
-        a.socket.abort();
+    if let Some(mut a) = active
+        && let Some(socket) = a.socket.take()
+    {
+        socket.abort();
     }
 }
 
@@ -1513,6 +1597,39 @@ pub(crate) fn explain(error: &ApiError) -> String {
     }
 }
 
+/// Whether the server has stopped honouring the token.
+///
+/// Asked with the plainest request there is, so that a socket handshake
+/// failing for network reasons is not mistaken for a revoked session:
+/// only an answer of 401 counts, and no answer at all is the network.
+async fn token_rejected(client: &Client) -> bool {
+    match client.send(&rest::me()).await {
+        Ok(response) => response.status == 401,
+        Err(_) => false,
+    }
+}
+
+/// Put the session away and tell the window to ask for a password again.
+///
+/// The stored token is removed as well: it is dead, and a client started
+/// tomorrow with it would only find that out again. The server and the
+/// name go to the window so the form has two of its three fields filled.
+async fn sign_out(active: &mut Option<Active>, events: &async_channel::Sender<Event>) {
+    let Some(mut a) = active.take() else { return };
+    if let Some(socket) = a.socket.take() {
+        socket.abort();
+    }
+    if let Err(e) = crate::session::forget() {
+        let _ = events.send(Event::Status(e)).await;
+    }
+    let _ = events
+        .send(Event::SessionEnded {
+            server: a.session.server.clone(),
+            login_id: a.session.username.clone(),
+        })
+        .await;
+}
+
 /// Build a client from a session and start its socket.
 async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Option<Active> {
     let client = match Client::new(&session.server) {
@@ -1550,12 +1667,14 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         typing_rx,
         Some((Arc::clone(&held), Arc::clone(&dirty))),
     ));
+    let socket = Some(socket);
 
     let tray = spawn_tray(events).await;
     Some(Active {
         client,
         session,
         socket,
+        serial: SESSION_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
         read_only: is_read_only(),
         collapsed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         downloads: Arc::new(tokio::sync::Semaphore::new(6)),
@@ -2209,7 +2328,7 @@ async fn socket_loop(
         Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
-) {
+) -> SocketEnd {
     let mut protocol = WsProtocol::new();
     let mut attempt: u32 = 0;
 
@@ -2218,7 +2337,7 @@ async fn socket_loop(
             Ok(u) => u,
             Err(e) => {
                 let _ = events.send(Event::Failed(e.to_string())).await;
-                return;
+                return SocketEnd::Gone;
             }
         };
 
@@ -2236,7 +2355,7 @@ async fn socket_loop(
                             if !handle_frame(&mut protocol, &text, &events, keeping.as_ref())
                                 .await
                             {
-                                return;
+                                return SocketEnd::Gone;
                             }
                             None
                         }
@@ -2254,6 +2373,12 @@ async fn socket_loop(
             }
             Err(e) => {
                 let _ = events.send(Event::Status(format!("websocket: {e}"))).await;
+                // A handshake the server turns away looks the same as a
+                // network that is down, from here. One plain request tells
+                // them apart, and only the first is worth retrying.
+                if token_rejected(&client).await {
+                    return SocketEnd::Unauthorized;
+                }
             }
         }
         // Full-jitter backoff, with the jitter supplied as a number so the
@@ -2335,9 +2460,11 @@ async fn fetch<T>(
     request: &HttpRequest,
     parse: impl Fn(&HttpResponse) -> Result<T, ApiError>,
 ) -> Result<T, String> {
+    let serial = session_serial();
     let response = client
         .send(request)
         .await
         .map_err(|e| format!("{}: {e}", request.route_key()))?;
+    note_status(response.status, serial);
     parse(&response).map_err(|e| format!("{}: {e}", request.route_key()))
 }

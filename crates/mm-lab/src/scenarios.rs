@@ -63,6 +63,7 @@ pub const SCENARIOS: &[&str] = &[
     "opens-an-archived-channel",
     "leaves-a-channel",
     "joins-from-the-switcher",
+    "signs-in-again-when-revoked",
     "tidies-the-lab",
 ];
 
@@ -179,6 +180,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "archives-from-the-menu" => archives_from_menu(screen, admin).await,
         "makes-a-channel-private" => makes_private(screen, admin).await,
         "joins-from-the-switcher" => joins_from_switcher(screen, admin).await,
+        "signs-in-again-when-revoked" => signs_in_again(screen, admin).await,
         "tidies-the-lab" => tidies(admin).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
     }
@@ -1403,6 +1405,44 @@ async fn follows_permalink(screen: &Screen, admin: &Admin) -> Result<()> {
     }
     screen.press_key(key::ESCAPE, &[])?;
     Ok(())
+}
+
+/// A session revoked on the server puts the sign-in form back up, with
+/// the server and the name already filled in and the dead token gone
+/// from disk, and the password alone signs the reader back in.
+///
+/// Every session of the user is ended, the lab's own included; the
+/// `Admin` signs itself back in on the way. Opening a channel afterwards
+/// is what makes the client notice quickly: the server turns that
+/// request away, which is a faster signal than waiting for the socket
+/// to be closed from the other end.
+async fn signs_in_again(screen: &Screen, admin: &Admin) -> Result<()> {
+    admin.revoke_my_sessions().await?;
+    // A row other than the one already open: a click on the open channel
+    // is not a request, and `select_row` stays honest about that.
+    screen.select_row("Design").await?;
+    screen
+        .until("the form is back, saying why", |tree| {
+            tree.has("button", "Log in") && tree.has("label", "Your session ended")
+        })
+        .await?;
+    let token = lab_home().join("state/mattermost-rs/session.json");
+    if token.exists() {
+        return Err(Error(format!(
+            "the form is back but the dead token is still at {}",
+            token.display()
+        )));
+    }
+    // Only the password: the other two fields are the form's to remember.
+    let form = screen.tree().await?;
+    screen
+        .type_into(form.find("text box", "Password")?, crate::seed::PASSWORD)
+        .await?;
+    screen.press("Log in").await?;
+    screen
+        .until("the sidebar is back", |tree| tree.has("label", "CHANNELS"))
+        .await
+        .map(|_| ())
 }
 
 /// Putting somebody into a channel and taking them out again, checked
