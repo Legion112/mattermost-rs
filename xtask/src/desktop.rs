@@ -10,15 +10,11 @@
 //! which is what lets a dock draw an unread badge on it, and
 //! `mattermost://` links start resolving to this client.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Where the icon and the entry go, relative to the data home.
 const ICON_DIR: &str = "icons/hicolor/scalable/apps";
-/// The same directory as `ICON_DIR`, named the way an `index.theme`
-/// names it: relative to the theme rather than to the data directory.
-const ICON_LEAF: &str = "scalable/apps";
 const ENTRY_DIR: &str = "applications";
 
 pub(crate) fn install(args: &[String]) -> Result<(), String> {
@@ -43,7 +39,6 @@ pub(crate) fn install(args: &[String]) -> Result<(), String> {
     }
 
     println!("installed:");
-    write_theme_index()?;
     println!("  {}", entry.display());
     println!("  {}", icon.display());
     if autostart {
@@ -59,7 +54,13 @@ pub(crate) fn install(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Exactly what an older `install-desktop` wrote into the shared icon
+/// theme. Matched byte for byte so that `uninstall` can take back that
+/// mistake and can never delete a file somebody else put there.
+const OLD_THEME_INDEX: &[u8] = b"[Icon Theme]\nName=Hicolor\nComment=Fallback icon theme\nDirectories=scalable/apps\n\n          [scalable/apps]\nSize=48\nMinSize=8\nMaxSize=512\nType=Scalable\nContext=Applications\n";
+
 pub(crate) fn uninstall() -> Result<(), String> {
+    remove_old_theme_index()?;
     for path in [entry_path()?, icon_path()?, autostart_path()?] {
         match std::fs::remove_file(&path) {
             Ok(()) => println!("removed {}", path.display()),
@@ -114,109 +115,6 @@ fn entry_path() -> Result<PathBuf, String> {
         .join(format!("{id}.desktop", id = mm_desktop::APP_ID)))
 }
 
-/// Give `~/.local/share/icons/hicolor` an `index.theme` if it has none.
-///
-/// Without one the directory is not a theme, `gtk-update-icon-cache`
-/// refuses it, and **nothing looks the icon up by name** -- which is
-/// invisible until something asks for it by name rather than by path.
-/// The tray does exactly that, so the icon registered fine and then
-/// drew as nothing.
-///
-/// **`Directories` is built from what is actually there, never from what
-/// this application needs.** That distinction is the whole of this
-/// function. An earlier version wrote `Directories=scalable/apps` and
-/// nothing else, and `~/.local/share/icons/hicolor` is not ours: it is
-/// the shared per-user fallback theme, and on a real desktop it already
-/// held eleven directories of other applications' icons -- Steam,
-/// Telegram, a pile of `JetBrains` tools. Naming one directory in the
-/// index told every icon lookup that the other ten did not exist, and
-/// those applications lost their icons the next time anything rebuilt
-/// the cache. Writing a theme definition that is narrower than the
-/// theme is how you break somebody else's desktop from an installer
-/// that only meant to add one file.
-///
-/// Never overwritten either: an index already there belongs to
-/// something else, very likely the distribution.
-fn write_theme_index() -> Result<(), String> {
-    let hicolor = data_home()?.join("icons/hicolor");
-    let path = hicolor.join("index.theme");
-    if path.exists() {
-        return Ok(());
-    }
-    let found = icon_directories(&hicolor);
-    let mut body = String::from("[Icon Theme]\nName=Hicolor\nComment=Fallback icon theme\n");
-    let _ = writeln!(body, "Directories={}\n", found.join(","));
-    for directory in &found {
-        body.push_str(&stanza(directory));
-    }
-    write(&path, body.as_bytes())?;
-    println!(
-        "  {} (created: the directory was not a theme; {} directories listed)",
-        path.display(),
-        found.len()
-    );
-    Ok(())
-}
-
-/// Every `<size>/<context>` directory under a hicolor tree, plus the one
-/// this installer is about to write into.
-///
-/// Sorted and deduplicated so the file is stable from run to run, which
-/// matters only because a file that changes for no reason invites
-/// somebody to wonder what changed.
-fn icon_directories(hicolor: &Path) -> Vec<String> {
-    let mut found = vec![ICON_LEAF.to_owned()];
-    if let Ok(sizes) = std::fs::read_dir(hicolor) {
-        for size in sizes.filter_map(Result::ok) {
-            if !size.path().is_dir() {
-                continue;
-            }
-            let Ok(contexts) = std::fs::read_dir(size.path()) else {
-                continue;
-            };
-            for context in contexts.filter_map(Result::ok) {
-                if !context.path().is_dir() {
-                    continue;
-                }
-                if let (Some(a), Some(b)) = (
-                    size.file_name().to_str().map(str::to_owned),
-                    context.file_name().to_str().map(str::to_owned),
-                ) {
-                    found.push(format!("{a}/{b}"));
-                }
-            }
-        }
-    }
-    found.sort();
-    found.dedup();
-    found
-}
-
-/// The `[<size>/<context>]` section for one directory.
-///
-/// `scalable` and `symbolic` hold SVGs and are typed accordingly;
-/// everything else is named after the pixel size it holds, and anything
-/// whose name does not start with a number is treated as scalable rather
-/// than guessed at.
-fn stanza(directory: &str) -> String {
-    let (size, context) = directory.split_once('/').unwrap_or((directory, "apps"));
-    let context = match context {
-        "apps" => "Applications",
-        other => other,
-    };
-    let pixels: Option<u32> = size.split(['x', '@']).next().and_then(|n| n.parse().ok());
-    if let Some(n) = pixels {
-        return format!("[{directory}]\nSize={n}\nType=Threshold\nContext={context}\n\n");
-    }
-    // A symbolic icon is nominally 16px even though it scales, which is
-    // what every other theme on the system says about it.
-    let nominal = if size == "symbolic" { 16 } else { 48 };
-    format!(
-        "[{directory}]\nSize={nominal}\nMinSize=8\nMaxSize=512\nType=Scalable\n\
-         Context={context}\n\n"
-    )
-}
-
 /// Where the desktop looks for things to start at login.
 ///
 /// Under config rather than data: it is a choice the reader made, not
@@ -255,13 +153,15 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// short wait.
 fn refresh_caches() {
     let Ok(data) = data_home() else { return };
-    let tools: [(&str, Vec<PathBuf>); 2] = [
-        ("update-desktop-database", vec![data.join(ENTRY_DIR)]),
-        (
-            "gtk-update-icon-cache",
-            vec![PathBuf::from("-f"), data.join("icons/hicolor")],
-        ),
-    ];
+    // Only the applications directory, which is ours to speak for.
+    //
+    // There used to be a `gtk-update-icon-cache` on
+    // `~/.local/share/icons/hicolor` here as well, and it is gone for the
+    // same reason the `index.theme` it went with is gone: that tree is
+    // the shared per-user fallback theme, and a cache written into it
+    // describes *everybody's* icons, not just ours.
+    let tools: [(&str, Vec<PathBuf>); 1] =
+        [("update-desktop-database", vec![data.join(ENTRY_DIR)])];
     for (tool, args) in tools {
         let ran = Command::new(tool).args(&args).status();
         match ran {
@@ -276,4 +176,33 @@ fn refresh_caches() {
             ),
         }
     }
+}
+
+/// Take back the `index.theme` an older version wrote.
+///
+/// It declared the shared per-user fallback theme to contain one
+/// directory -- ours -- and GTK takes the first `index.theme` it finds
+/// as *the* definition of a theme rather than merging it with the
+/// system's. Every icon in every other directory of that tree stopped
+/// resolving: on the machine where this was found, Steam, Telegram, a
+/// docker tool and a row of `JetBrains` applications lost their icons,
+/// and so did parts of GNOME's own interface.
+///
+/// Only when the file is byte-for-byte what that version wrote. A
+/// hicolor index is shared ground, and an uninstaller that guesses at
+/// which files are its own does the same kind of damage in reverse.
+fn remove_old_theme_index() -> Result<(), String> {
+    let path = data_home()?.join("icons/hicolor/index.theme");
+    let Ok(found) = std::fs::read(&path) else {
+        return Ok(());
+    };
+    if found != OLD_THEME_INDEX {
+        return Ok(());
+    }
+    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+    println!(
+        "removed {} (an older version wrote it, and it hid other applications' icons)",
+        path.display()
+    );
+    Ok(())
 }
