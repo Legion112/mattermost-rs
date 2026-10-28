@@ -986,6 +986,15 @@ impl Admin {
             .unwrap_or_default())
     }
 
+    /// A channel's record as the server holds it: name, header, purpose,
+    /// and whether it is archived.
+    pub async fn channel_record(&self, channel: &str) -> Result<Value> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(&HttpRequest::get(format!("/api/v4/channels/{id}")))
+            .await
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self
@@ -1057,7 +1066,13 @@ impl Admin {
                     .filter(|p| {
                         matches!(
                             p["type"].as_str(),
-                            Some("system_add_to_channel" | "system_remove_from_channel")
+                            Some(
+                                "system_add_to_channel"
+                                    | "system_remove_from_channel"
+                                    | "system_header_change"
+                                    | "system_purpose_change"
+                                    | "system_displayname_change"
+                            )
                         ) || LAB_TRACES
                             .iter()
                             .any(|t| p["message"].as_str().unwrap_or_default().starts_with(t))

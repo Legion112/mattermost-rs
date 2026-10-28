@@ -548,3 +548,11 @@ mention at the start of a message is clicked at the label's top-left.
 And a `GtkLabel`'s accessible name is its text, a `GtkTextView`'s is
 nothing unless it is given one -- every text box the lab types into
 carries an accessible label, because a placeholder is not a name.
+
+**Insensitivity does not reach the accessible state of a child.** A
+box greyed through its pane is drawn greyed, and the pane's own
+accessible state says so; the box inside it still reports itself
+sensitive, because the state reflects the widget's own flag, not the
+effective one. A test that wants to know whether something is usable
+asks the widget that was actually set, or looks at what the window
+says about it.

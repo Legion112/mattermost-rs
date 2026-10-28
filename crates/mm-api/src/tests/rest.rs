@@ -1373,3 +1373,25 @@ fn a_files_record_is_fetched_by_id() {
     assert_eq!(info.name, "notes.txt");
     assert!(parse_file_info(&HttpResponse::new(404, r#"{"id":"x","message":"gone"}"#)).is_err());
 }
+
+/// A channel is renamed or re-headed with only what changed, and
+/// archived with a DELETE that keeps everything.
+#[test]
+fn a_channel_is_patched_with_what_changed_and_archived_with_a_delete() {
+    let c = ChannelId::new("c1");
+    let req = patch_channel(&c, None, Some("Mockups here"), None);
+    assert_eq!(req.method, Method::Put);
+    assert_eq!(req.path, "/api/v4/channels/c1/patch");
+    assert_eq!(
+        req.body,
+        Body::Json(r#"{"header":"Mockups here"}"#.to_owned())
+    );
+    let req = patch_channel(&c, Some("Design"), Some(""), Some("Pictures"));
+    assert_eq!(
+        req.body,
+        Body::Json(r#"{"display_name":"Design","header":"","purpose":"Pictures"}"#.to_owned())
+    );
+    let gone = archive_channel(&c);
+    assert_eq!(gone.method, Method::Delete);
+    assert_eq!(gone.path, "/api/v4/channels/c1");
+}

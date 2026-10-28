@@ -239,3 +239,35 @@ pub fn origin_of_window_sized(width: i32, height: i32) -> Result<(i32, i32)> {
     }
     found.map_or_else(toplevel_origin, Ok)
 }
+
+/// Turn the wheel over a spot: `ticks` notches, up or down. Buttons 4
+/// and 5 are what a wheel is to X.
+pub fn scroll_at(x: i32, y: i32, up: bool, ticks: u32) -> Result<()> {
+    let (conn, root) = connect()?;
+    let (sx, sy) = (
+        i16::try_from(x).unwrap_or(i16::MAX),
+        i16::try_from(y).unwrap_or(i16::MAX),
+    );
+    conn.xtest_fake_input(
+        xproto::MOTION_NOTIFY_EVENT,
+        0,
+        x11rb::CURRENT_TIME,
+        root,
+        sx,
+        sy,
+        0,
+    )
+    .map_err(|e| Error(format!("moving the pointer: {e}")))?;
+    let button = if up { 4 } else { 5 };
+    for _ in 0..ticks {
+        for type_ in [xproto::BUTTON_PRESS_EVENT, xproto::BUTTON_RELEASE_EVENT] {
+            conn.xtest_fake_input(type_, button, x11rb::CURRENT_TIME, root, 0, 0, 0)
+                .map_err(|e| Error(format!("turning the wheel: {e}")))?;
+        }
+        conn.flush()
+            .map_err(|e| Error(format!("flushing the display: {e}")))?;
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    Ok(())
+}

@@ -774,3 +774,26 @@ fn a_channel_event_falls_back_to_the_broadcast_channel() {
         })
     );
 }
+
+/// A channel changed carries the whole record, nested the way a post is.
+#[test]
+fn a_channel_updated_is_decoded_from_the_nested_record() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(
+        r#"{"event":"channel_updated","data":{"channel":
+            "{\"id\":\"c1\",\"display_name\":\"Design (new)\",\"header\":\"Mockups here\",\"type\":\"O\"}"},
+            "broadcast":{"team_id":"t1"},"seq":1}"#,
+    );
+    match &out[0] {
+        WsOutcome::Event(WsEvent::ChannelUpdated(channel)) => {
+            assert_eq!(channel.display_name, "Design (new)");
+            assert_eq!(channel.header, "Mockups here");
+        }
+        other => panic!("expected ChannelUpdated, got {other:?}"),
+    }
+    let out = p.on_frame(r#"{"event":"channel_updated","data":{},"seq":2}"#);
+    assert!(
+        !matches!(&out[0], WsOutcome::Event(WsEvent::ChannelUpdated(_))),
+        "{out:?}"
+    );
+}

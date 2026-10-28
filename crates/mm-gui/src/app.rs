@@ -1713,6 +1713,96 @@ fn open_custom_status_dialog(ui: &Ui, near: &gtk::Widget) {
 /// message is not another request.
 const RESYNC_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The dialog behind "Edit channel…": the name, the header and the
+/// purpose, each sent only if it changed.
+fn open_channel_editor(ui: &Ui, channel: &ChannelId) {
+    let (was_name, was_header, was_purpose) = {
+        let store = ui.store.borrow();
+        store
+            .channels
+            .get(channel)
+            .map_or_else(Default::default, |c| {
+                (c.display_name.clone(), c.header.clone(), c.purpose.clone())
+            })
+    };
+    let field = |label: &str, was: &str| {
+        let entry = gtk::Entry::builder().text(was).hexpand(true).build();
+        name_widget(&entry, label);
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let caption = gtk::Label::new(Some(label));
+        caption.set_width_chars(8);
+        caption.set_xalign(0.0);
+        line.append(&caption);
+        line.append(&entry);
+        (line, entry)
+    };
+    let (name_line, name) = field("Name", &was_name);
+    let (header_line, header) = field("Header", &was_header);
+    let (purpose_line, purpose) = field("Purpose", &was_purpose);
+
+    let save = gtk::Button::with_label("Save");
+    save.add_css_class("suggested-action");
+    let cancel = gtk::Button::with_label("Cancel");
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    buttons.set_halign(gtk::Align::End);
+    buttons.set_margin_top(6);
+    buttons.append(&cancel);
+    buttons.append(&save);
+
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    column.set_margin_start(18);
+    column.set_margin_end(18);
+    column.set_margin_bottom(18);
+    column.append(&name_line);
+    column.append(&header_line);
+    column.append(&purpose_line);
+    column.append(&buttons);
+    let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    layout.append(&adw::HeaderBar::new());
+    layout.append(&column);
+    let window = adw::Window::builder()
+        .title("Edit channel")
+        .modal(true)
+        .default_width(CUSTOM_STATUS_WIDTH)
+        .content(&layout)
+        .transient_for(&ui.window)
+        .build();
+    window.set_default_widget(Some(&save));
+    {
+        let window = window.clone();
+        cancel.connect_clicked(move |_| window.close());
+    }
+    {
+        let commands = ui.commands.clone();
+        let channel = channel.clone();
+        let window = window.clone();
+        save.connect_clicked(move |_| {
+            // Only what changed, and a name emptied is not a change: a
+            // channel has to be called something.
+            let changed = |entry: &gtk::Entry, was: &str| {
+                let now = entry.text().trim().to_owned();
+                (now != was).then_some(now)
+            };
+            let display_name = changed(&name, &was_name).filter(|n| !n.is_empty());
+            let header = changed(&header, &was_header);
+            let purpose = changed(&purpose, &was_purpose);
+            window.close();
+            if display_name.is_none() && header.is_none() && purpose.is_none() {
+                return;
+            }
+            commands
+                .send(Command::PatchChannel {
+                    channel: channel.clone(),
+                    display_name,
+                    header,
+                    purpose,
+                })
+                .ok();
+        });
+    }
+    window.present();
+}
+
 /// How wide the custom status dialog opens.
 const CUSTOM_STATUS_WIDTH: i32 = 420;
 
@@ -8287,6 +8377,16 @@ impl Ui {
         let menu = gtk::Popover::builder().child(&column).build();
         if editable {
             column.append(&self.add_people(&channel, &list, &tally));
+            // What a channel is called and says, and the archive: not for a
+            // conversation, which is its people and has no name of its own.
+            if self.store.borrow().channels.get(&channel).is_some_and(|c| {
+                matches!(
+                    c.kind,
+                    mm_types::ChannelType::Open | mm_types::ChannelType::Private
+                )
+            }) {
+                column.append(&self.channel_edit_rows(&channel, &menu));
+            }
             column.append(&self.leave_button(&channel, &menu));
         }
         menu.set_parent(at);
@@ -8662,6 +8762,66 @@ impl Ui {
 
     /// The button that leaves the channel, and the question it asks first.
     ///
+    /// Edit and archive, under the people: the one opens a dialog on the
+    /// name, header and purpose; the other asks first, since archiving
+    /// takes the channel out of everybody's sidebar at once.
+    fn channel_edit_rows(&self, channel: &ChannelId, menu: &gtk::Popover) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_margin_top(12);
+        let edit = gtk::Button::builder()
+            .label("Edit channel…")
+            .hexpand(true)
+            .build();
+        {
+            let ui = self.clone();
+            let channel = channel.clone();
+            let menu = menu.clone();
+            edit.connect_clicked(move |_| {
+                menu.popdown();
+                open_channel_editor(&ui, &channel);
+            });
+        }
+        row.append(&edit);
+        let archive = gtk::Button::builder()
+            .label("Archive channel")
+            .css_classes(["destructive-action"])
+            .build();
+        {
+            let ui = self.clone();
+            let channel = channel.clone();
+            let menu = menu.clone();
+            archive.connect_clicked(move |_| {
+                // Down before the dialog, for the reason `leave_button` gives.
+                menu.popdown();
+                let name = ui.store.borrow().channel_heading(&channel).name;
+                let ask = adw::AlertDialog::builder()
+                    .heading(format!("Archive {name}?"))
+                    .body(
+                        "It leaves everybody's sidebar. What it holds stays readable, and an \
+                         administrator can bring it back.",
+                    )
+                    .build();
+                ask.add_response("keep", "Keep");
+                ask.add_response("archive", "Archive");
+                ask.set_response_appearance("archive", adw::ResponseAppearance::Destructive);
+                ask.set_default_response(Some("keep"));
+                ask.set_close_response("keep");
+                let ui = ui.clone();
+                let channel = channel.clone();
+                ask.connect_response(None, move |_, answer| {
+                    if answer == "archive" {
+                        ui.commands
+                            .send(Command::ArchiveChannel(channel.clone()))
+                            .ok();
+                    }
+                });
+                ask.present(Some(&ui.window));
+            });
+        }
+        row.append(&archive);
+        row
+    }
+
     /// Asked because leaving is not quiet: the server posts "x left the
     /// channel" into it, everybody still there sees it, and a private
     /// channel cannot be rejoined without being invited back. None of
@@ -10651,11 +10811,18 @@ impl Ui {
         // move them: a reaction, an avatar or an image landing used to
         // throw somebody reading half way up a long thread to the bottom
         // of it.
-        let n = self.thread_posts.n_items();
-        if changed && self.thread_stick.get() && n > 0 {
+        if changed && self.thread_stick.get() && self.thread_posts.n_items() > 0 {
             let view = self.thread_view.clone();
+            let posts = self.thread_posts.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
-                view.scroll_to(n - 1, gtk::ListScrollFlags::empty(), None);
+                // Read again when the moment comes: the thread can be
+                // respliced inside those 120ms -- closed and another
+                // opened -- and `scroll_to` past the end is a GTK
+                // assertion, not a no-op. The lab saw it.
+                let last = posts.n_items();
+                if last > 0 {
+                    view.scroll_to(last - 1, gtk::ListScrollFlags::empty(), None);
+                }
             });
         }
     }

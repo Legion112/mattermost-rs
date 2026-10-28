@@ -1039,9 +1039,14 @@ banner, and one call carrying both would mean every change to one \
 restating the other. Verified on a live account: choosing Mentions put \
 `desktop: "mention"` on the membership and choosing Default put it back.
 
-NOT built: the rest of Mattermost's channel menu -- renaming, the \
-header and purpose, converting a channel to private, archiving. \
-Membership is its own row: see `channels.membership`."""
+**Edit channel…** opens the name, header and purpose for changing, and \
+sends only what changed; the socket's `channel_updated` brings the change \
+back to every window, this one included. **Archive channel** asks first \
+and then does what the webapp does. Both lab-verified: a header typed \
+into the dialog was the server's and then the menu's; archiving from the \
+menu left the server holding the channel archived and the sidebar \
+without it. NOT built: converting a channel to private. Membership is \
+its own row: see `channels.membership`."""
 
 [[feature]]
 id       = "channels.membership"

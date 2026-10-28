@@ -1674,6 +1674,13 @@ impl Store {
                 self.mark_viewed(channel_id, now);
                 vec![Change::ReadState]
             }
+            WsEvent::ChannelUpdated(channel) => {
+                // The record, with the counters this store keeps current
+                // kept: see `apply_channel`. The name may have moved, so
+                // the sidebar is told; the heading reads the record.
+                self.apply_channel(channel.clone());
+                vec![Change::Sidebar]
+            }
             WsEvent::ChannelDeleted {
                 channel_id,
                 delete_at,

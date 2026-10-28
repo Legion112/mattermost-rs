@@ -703,6 +703,7 @@ fn describe(event: &mm_api::WsEvent) -> String {
             unread_replies,
             ..
         } => format!("thread {thread_id} read, {unread_replies} unread left"),
+        E::ChannelUpdated(c) => format!("channel {} updated", c.id),
         E::ChannelDeleted { channel_id, .. } => format!("{channel_id} archived"),
         E::ChannelRestored { channel_id } => format!("{channel_id} restored"),
         E::PreferencesChanged(prefs) => format!("{} preference(s) changed", prefs.len()),

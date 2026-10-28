@@ -160,6 +160,17 @@ pub enum Command {
         channel: ChannelId,
         desktop: String,
     },
+    /// Rename a channel, or change what it says at its top: only what
+    /// is given changes.
+    PatchChannel {
+        channel: ChannelId,
+        display_name: Option<String>,
+        header: Option<String>,
+        purpose: Option<String>,
+    },
+    /// Archive a channel. It leaves the sidebar on the server's word, and
+    /// can still be read, and brought back from another client.
+    ArchiveChannel(ChannelId),
     /// Mark every followed thread read.
     ReadAllThreads(mm_types::TeamId),
     /// Mark a followed thread read, up to its last reply.

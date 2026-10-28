@@ -588,6 +588,44 @@ impl Screen {
         Err(Error(format!("no visible button called {name:?}")))
     }
 
+    /// Where a widget's own toplevel is on the screen, and how big.
+    async fn toplevel_box(&self, node: &Node) -> Result<(i32, i32, i32, i32)> {
+        let tree = self.tree().await?;
+        let at = tree.iter().position(|n| n.path == node.path);
+        let toplevel = at.and_then(|at| tree[..=at].iter().rev().find(|n| n.depth == 1));
+        let Some(toplevel) = toplevel else {
+            let (x, y) = crate::input::toplevel_origin()?;
+            return Ok((x, y, 1040, 720));
+        };
+        let (_, _, w, h) = self.extents_in_window(toplevel).await?;
+        let (x, y) = crate::input::origin_of_window_sized(w, h)?;
+        Ok((x, y, w, h))
+    }
+
+    /// Turn the wheel until a widget is well inside its window: a hover
+    /// or a click on something half off the top lands on the row below.
+    pub async fn scroll_into_view(&self, node: &Node) -> Result<()> {
+        let (wx, wy, ww, wh) = self.toplevel_box(node).await?;
+        for _ in 0..12 {
+            let (x, y, w, h) = self.extents(node).await?;
+            let above = y < wy + 90;
+            let below = y + h > wy + wh - 120;
+            if !above && !below {
+                return Ok(());
+            }
+            // Over the widget's own column, inside the window, so the
+            // wheel turns the list it is in and not the sidebar.
+            crate::input::scroll_at(
+                wx + (x - wx + w / 2).clamp(0, ww - 1),
+                wy + wh / 2,
+                above,
+                3,
+            )?;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        Err(Error(format!("{:?} would not come into view", node.name)))
+    }
+
     /// Rest the pointer on a widget, for what shows on hover.
     pub async fn hover(&self, node: &Node) -> Result<()> {
         let (x, y, w, h) = self.extents(node).await?;
@@ -741,16 +779,46 @@ On screen: {named:#?}",
     /// finds the previous channel's. That is how this test first claimed
     /// Town Square could be left.
     pub async fn close_menu(&self, channel: &str) -> Result<()> {
+        // Escape, the way a person shuts a menu. Pressing the title again
+        // is a toggle, and with the pointer resting over the popover from
+        // an earlier click that toggle has been seen to reopen it.
+        let shut = |tree: &Vec<Node>| !tree.has("button", "Leave channel");
+        self.press_key(crate::input::key::ESCAPE, &[])?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if shut(&self.tree().await?) {
+                return Ok(());
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        // Still up: the title it hangs off toggles it.
         self.press(channel).await?;
-        self.until(&format!("{channel}'s menu is shut"), |tree| {
-            !tree.has("button", "Leave channel")
-        })
-        .await
-        .map(|_| ())
+        self.until(&format!("{channel}'s menu is shut"), shut)
+            .await
+            .map(|_| ())
     }
 
     /// Press a button by its name, once the window is showing one.
     pub async fn press(&self, name: &str) -> Result<()> {
+        // A widget can go between the snapshot and the click -- the
+        // channel menu is rebuilt when its roster lands -- and the click
+        // then says the object does not exist. A fresh snapshot finds
+        // the new one; three tries is a menu rebuilt twice.
+        let mut last = Error(String::new());
+        for attempt in 1..=3 {
+            match self.press_once(name).await {
+                Err(e) if e.0.contains("does not exist") => {
+                    eprintln!("  press {name:?} attempt {attempt}: {}", e.0);
+                    last = e;
+                    tokio::time::sleep(POLL).await;
+                }
+                other => return other,
+            }
+        }
+        Err(last)
+    }
+
+    async fn press_once(&self, name: &str) -> Result<()> {
         // A toggle and a switch press the same way: one action, the first.
         const PRESSABLE: [&str; 4] = ["button", "push button", "toggle button", "switch"];
         let tree = self
@@ -758,12 +826,31 @@ On screen: {named:#?}",
                 PRESSABLE.iter().any(|role| tree.has(role, name))
             })
             .await?;
-        // The exact name first: "Save" must not find "Saved messages".
-        let button = tree
+        // The exact name first: "Save" must not find "Saved messages". And
+        // among those, one that is drawn: a menu closed a moment ago can
+        // still be in the tree with no size, and pressing its button acts
+        // on the channel *it* was for.
+        let exact: Vec<&Node> = tree
             .iter()
-            .find(|n| PRESSABLE.contains(&n.role.as_str()) && n.name == name)
+            .filter(|n| PRESSABLE.contains(&n.role.as_str()) && n.name == name)
+            .collect();
+        for candidate in &exact {
+            let (_, _, w, h) = self.extents(candidate).await?;
+            if w > 0 && h > 0 {
+                return self.click(candidate).await;
+            }
+        }
+        let button = exact
+            .first()
+            .copied()
             .or_else(|| PRESSABLE.iter().find_map(|role| tree.find(role, name).ok()))
             .ok_or_else(|| Error(format!("no button called {name:?}")))?;
+        eprintln!(
+            "  press {name:?}: {} exact, pressing {:?} {:?}",
+            exact.len(),
+            button.role,
+            button.name
+        );
         self.click(button).await
     }
 }

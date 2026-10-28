@@ -375,6 +375,37 @@ pub fn remove_from_channel(channel: &ChannelId, user: &UserId) -> HttpRequest {
     HttpRequest::delete(format!("{API}/channels/{channel}/members/{user}"))
 }
 
+/// Change what a channel is called, or says at its top: whichever of
+/// the three are given, the rest left as they are -- `PATCH` semantics
+/// on a `PUT` route, which is how the server spells it.
+#[must_use]
+pub fn patch_channel(
+    channel: &ChannelId,
+    display_name: Option<&str>,
+    header: Option<&str>,
+    purpose: Option<&str>,
+) -> HttpRequest {
+    let mut body = serde_json::Map::new();
+    for (key, value) in [
+        ("display_name", display_name),
+        ("header", header),
+        ("purpose", purpose),
+    ] {
+        if let Some(value) = value {
+            body.insert(key.to_owned(), serde_json::Value::String(value.to_owned()));
+        }
+    }
+    HttpRequest::put(format!("{API}/channels/{channel}/patch"))
+        .json(&serde_json::Value::Object(body))
+}
+
+/// Archive a channel: a `DELETE` that keeps everything, since an
+/// archived channel can still be read and brought back.
+#[must_use]
+pub fn archive_channel(channel: &ChannelId) -> HttpRequest {
+    HttpRequest::delete(format!("{API}/channels/{channel}"))
+}
+
 /// One channel by id. **No `ETag` on this route**, unlike most of the
 /// others, so there is nothing to cache against.
 #[must_use]

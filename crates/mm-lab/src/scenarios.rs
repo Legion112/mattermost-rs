@@ -48,6 +48,8 @@ pub const SCENARIOS: &[&str] = &[
     "jumps-with-the-switcher",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
+    "edits-the-channel-header",
+    "archives-from-the-menu",
     "opens-an-archived-channel",
     "leaves-a-channel",
     "joins-from-the-switcher",
@@ -154,6 +156,8 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
         "opens-an-archived-channel" => archived_channel(screen, admin).await,
+        "edits-the-channel-header" => edits_header(screen, admin).await,
+        "archives-from-the-menu" => archives_from_menu(screen, admin).await,
         "joins-from-the-switcher" => joins_from_switcher(screen, admin).await,
         "tidies-the-lab" => tidies(admin).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
@@ -660,6 +664,7 @@ async fn pins_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
     let post = admin.post_id_of("engineering", ROOT).await?;
     for (entry, expected) in [("Pin to channel", true), ("Unpin from channel", false)] {
         let body = screen.text_holding(ROOT).await?;
+        screen.scroll_into_view(&body).await?;
         screen.hover(&body).await?;
         screen.click_button_near("More actions", &body).await?;
         screen.press(entry).await?;
@@ -898,6 +903,87 @@ async fn archived_channel(screen: &Screen, admin: &Admin) -> Result<()> {
     admin.restore(ARCHIVE).await?;
     screen
         .until("the restored channel is back in the sidebar", |tree| {
+            in_sidebar(tree, ARCHIVE_LABEL)
+        })
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// The channel menu's editor changes the header on the server, and the
+/// socket brings the change back to the menu.
+async fn edits_header(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("Engineering").await?;
+    screen.press("Edit channel…").await?;
+    let dialog = screen
+        .until("the channel editor is up", |tree| {
+            tree.has("text box", "Header")
+        })
+        .await?;
+    let header = format!("Header set by the lab at {}", crate::seed::stamp());
+    screen
+        .type_into(dialog.find("text box", "Header")?, &header)
+        .await?;
+    screen.press("Save").await?;
+    let mut last = String::new();
+    for _ in 0..25 {
+        let record = admin.channel_record("engineering").await?;
+        record["header"]
+            .as_str()
+            .unwrap_or_default()
+            .clone_into(&mut last);
+        if last == header {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if last != header {
+        return Err(Error(format!(
+            "the server holds header {last:?}, not {header:?}"
+        )));
+    }
+    // And the window heard it over the socket: the menu says the new one.
+    screen.press("Engineering").await?;
+    screen
+        .until("the menu shows the new header", |tree| {
+            tree.has("label", &header)
+        })
+        .await?;
+    screen.close_menu("Engineering").await
+}
+
+/// Archiving from the menu asks first, then the channel leaves the
+/// sidebar on the server's word; the lab restores it for next time.
+async fn archives_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ARCHIVE: &str = "archive-practice";
+    const ARCHIVE_LABEL: &str = "Archive Practice";
+    admin.restore(ARCHIVE).await.ok();
+    screen.open_channel(ARCHIVE_LABEL).await?;
+    screen.press(ARCHIVE_LABEL).await?;
+    screen.press("Archive channel").await?;
+    // A moment for the dialog to come up: asked for at once, the tree
+    // was once read before it had.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    screen
+        .until("the window asks before archiving", |tree| {
+            tree.has("label", &format!("Archive {ARCHIVE_LABEL}?"))
+        })
+        .await?;
+    screen.press("Archive").await?;
+    screen
+        .until("the archived channel leaves the sidebar", |tree| {
+            !in_sidebar(tree, ARCHIVE_LABEL)
+        })
+        .await?;
+    let record = admin.channel_record(ARCHIVE).await?;
+    if record["delete_at"].as_i64().unwrap_or(0) == 0 {
+        return Err(Error(
+            "the server does not hold the channel archived".to_owned(),
+        ));
+    }
+    admin.restore(ARCHIVE).await?;
+    screen
+        .until("the restored channel is back", |tree| {
             in_sidebar(tree, ARCHIVE_LABEL)
         })
         .await?;

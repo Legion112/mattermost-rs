@@ -3809,3 +3809,18 @@ fn a_channel_archived_over_the_socket_leaves_the_sidebar_until_restored() {
         .is_empty()
     );
 }
+
+/// A channel renamed or re-headed over the socket reads the new record.
+#[test]
+fn a_channel_updated_over_the_socket_is_read() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let mut edited = s.channels[&c1].clone();
+    edited.display_name = "Renamed".to_owned();
+    edited.header = "A new header".to_owned();
+    edited.update_at = Timestamp(edited.update_at.millis() + 1);
+    let changes = s.apply_ws(&WsEvent::ChannelUpdated(edited));
+    assert_eq!(changes, vec![Change::Sidebar]);
+    assert_eq!(s.channels[&c1].display_name, "Renamed");
+    assert_eq!(s.channels[&c1].header, "A new header");
+}

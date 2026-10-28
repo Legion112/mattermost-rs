@@ -19,7 +19,7 @@
 
 use crate::error::AppError;
 use mm_types::{
-    ChannelId, ChannelMember, Post, PostId, Preference, Reaction, Timestamp, User, UserId,
+    Channel, ChannelId, ChannelMember, Post, PostId, Preference, Reaction, Timestamp, User, UserId,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -130,6 +130,9 @@ pub enum WsEvent {
     ThreadUpdated(mm_types::UserThread),
     /// The reader caught up on a thread, here or in another client.
     /// Plain fields, not nested.
+    /// A channel renamed, or its header or purpose changed, by anybody.
+    /// The whole record, as a JSON document inside a JSON string.
+    ChannelUpdated(Channel),
     /// A channel archived, by anybody: it leaves the sidebar, and what it
     /// holds can still be read.
     ChannelDeleted {
@@ -409,6 +412,7 @@ fn decode_event(
         // Sent to the whole team, so the broadcast names no channel: the
         // channel is in the data, with the moment. The broadcast is a
         // fallback for a server that says it there instead.
+        "channel_updated" => Ok(WsEvent::ChannelUpdated(nested_json(data, "channel")?)),
         "channel_deleted" => Ok(WsEvent::ChannelDeleted {
             channel_id: ChannelId::new(channel_in(data, broadcast)),
             delete_at: Timestamp(int_field(data, "delete_at")),

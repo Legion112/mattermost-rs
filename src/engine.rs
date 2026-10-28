@@ -1175,6 +1175,23 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             let request = rest::set_channel_notify(&channel, &user, &desktop);
             best_effort(a, &request, events).await;
         }
+        Command::PatchChannel {
+            channel,
+            display_name,
+            header,
+            purpose,
+        } => {
+            let request = rest::patch_channel(
+                &channel,
+                display_name.as_deref(),
+                header.as_deref(),
+                purpose.as_deref(),
+            );
+            best_effort(a, &request, events).await;
+        }
+        Command::ArchiveChannel(channel) => {
+            best_effort(a, &rest::archive_channel(&channel), events).await;
+        }
         Command::ReadAllThreads(team) => {
             let user = UserId::new(&a.session.user_id);
             best_effort(a, &rest::read_all_threads(&user, &team), events).await;
