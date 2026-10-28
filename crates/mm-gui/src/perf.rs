@@ -398,7 +398,24 @@ pub(crate) fn switch_began(channel: &str) {
                 left.drawn,
                 left.began.elapsed().as_secs_f64()
             );
+            // And where that time went. The marks are the same ones the
+            // scroll sweep reports; here they are emptied between
+            // clicks, so each block belongs to one channel's visit
+            // rather than to the whole run.
+            STATE.with_borrow_mut(|state| {
+                if let Some(run) = state.as_mut() {
+                    report_marks(&run.marks);
+                    run.marks.clear();
+                }
+            });
         }
+        // The marks have nowhere to go until a run exists. The sweep
+        // makes one when it starts; this mode never sweeps.
+        STATE.with_borrow_mut(|state| {
+            if state.is_none() {
+                *state = Some(Run::default());
+            }
+        });
         *switch = Some(Switch {
             channel: channel.to_owned(),
             name: channel.to_owned(),
