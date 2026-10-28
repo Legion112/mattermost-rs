@@ -2734,6 +2734,48 @@ impl Composer {
     }
 
     /// Draw a chip per attached file, each with a way to take it off.
+    /// The ids of what is already on the server, for the draft.
+    fn uploaded_ids(&self) -> Vec<FileId> {
+        self.chosen
+            .borrow()
+            .iter()
+            .filter_map(|a| a.uploaded_id().cloned())
+            .collect()
+    }
+
+    /// Chips for files a draft names by id, in place of whatever was
+    /// in the tray: a restored draft is the whole of what is pending.
+    /// Named "attachment" until the record arrives (see `name_uploaded`).
+    fn set_uploaded(&self, ids: &[FileId]) {
+        *self.chosen.borrow_mut() = ids
+            .iter()
+            .map(|id| crate::bridge::Attachment::Uploaded {
+                id: id.clone(),
+                name: "attachment".to_owned(),
+            })
+            .collect();
+        self.refresh_tray();
+    }
+
+    /// A file's record has arrived: put its name on the chip that was
+    /// waiting for it. Says whether any was.
+    fn name_uploaded(&self, info: &mm_types::FileRef) -> bool {
+        let mut named = false;
+        for held in self.chosen.borrow_mut().iter_mut() {
+            if let crate::bridge::Attachment::Uploaded { id, name } = held
+                && *id == info.id
+                && !info.name.is_empty()
+            {
+                name.clone_from(&info.name);
+                named = true;
+            }
+        }
+        if named {
+            self.refresh_tray();
+        }
+        named
+    }
+
     fn refresh_tray(&self) {
         while let Some(old) = self.tray.first_child() {
             self.tray.remove(&old);
@@ -7630,6 +7672,7 @@ impl Ui {
             }
             Event::Status(text) => self.set_status(&text),
             Event::FileReady(path) => self.open_on_desktop(&path),
+            Event::FileInfo(info) => self.on_file_info(&info),
             Event::Uploading { name, sent, total } => {
                 let percent = if total == 0 {
                     100
@@ -9129,6 +9172,14 @@ impl Ui {
         );
     }
 
+    /// A file's record: whichever box has a chip waiting for the name
+    /// takes it.
+    fn on_file_info(&self, info: &mm_types::FileRef) {
+        if !self.composer.name_uploaded(info) {
+            self.thread_composer.name_uploaded(info);
+        }
+    }
+
     /// Where people are, from a sync or the once-a-minute poll.
     fn on_statuses(&self, statuses: &[mm_types::Status]) {
         if !self.store.borrow_mut().apply_statuses(statuses).is_empty() {
@@ -9431,6 +9482,9 @@ impl Ui {
             channel_id: channel.clone(),
             root_id: root.cloned().unwrap_or_default(),
             message: composer_text(&composer.view),
+            // What is already on the server travels with the text; what is
+            // still on its way up is not a file the server could name.
+            file_ids: composer.uploaded_ids(),
             // The Drafts view orders by this. The store has no clock on
             // purpose -- replaying events has to be exact -- so the
             // window stamps it.
@@ -9598,15 +9652,18 @@ impl Ui {
 
     /// Put a thread's half-typed reply back in its box.
     fn restore_thread_draft(&self, root: &PostId) {
-        let text = {
+        let (text, files) = {
             let store = self.store.borrow();
             store
                 .posts
                 .get(root)
                 .and_then(|post| store.draft_for(&post.channel_id, Some(root)))
-                .map_or_else(String::new, |draft| draft.message.clone())
+                .map_or_else(Default::default, |draft| {
+                    (draft.message.clone(), draft.file_ids.clone())
+                })
         };
         self.fill_quietly(&self.thread_composer, &text);
+        self.restore_files(&self.thread_composer, &files);
     }
 
     /// Fill the open channel's box from a draft that has just arrived.
@@ -9630,12 +9687,25 @@ impl Ui {
 
     /// Put a channel's half-typed message back in the box.
     fn restore_draft(&self, channel: &ChannelId) {
-        let text = self
+        let (text, files) = self
             .store
             .borrow()
             .draft_for(channel, None)
-            .map_or_else(String::new, |draft| draft.message.clone());
+            .map_or_else(Default::default, |draft| {
+                (draft.message.clone(), draft.file_ids.clone())
+            });
         self.fill_quietly(&self.composer, &text);
+        self.restore_files(&self.composer, &files);
+    }
+
+    /// The files a draft names, as chips, with their records asked for:
+    /// a draft carries ids and nothing else, and a chip saying
+    /// "attachment" is what the reader gets until the names come.
+    fn restore_files(&self, composer: &Composer, files: &[FileId]) {
+        composer.set_uploaded(files);
+        for file in files {
+            self.commands.send(Command::FileInfo(file.clone())).ok();
+        }
     }
 
     /// Put text in a box without it counting as typing.

@@ -909,6 +909,66 @@ impl Admin {
         }))
     }
 
+    /// Put a small file on the server for a channel, as the admin, the
+    /// way the webapp does before it writes a draft naming it.
+    pub async fn upload_note(&self, channel: &str, name: &str, bytes: &[u8]) -> Result<String> {
+        let id = self.channel(channel).await?;
+        let answer = self
+            .api
+            .call(&HttpRequest::new(Method::Post, "/api/v4/files").multipart(
+                vec![("channel_id".to_owned(), id)],
+                "files",
+                name,
+                bytes.to_vec(),
+            ))
+            .await?;
+        answer["file_infos"][0]["id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error(format!("the server named no file for {name}: {answer}")))
+    }
+
+    /// Write a draft naming a file, as another client of this account
+    /// would.
+    pub async fn draft_with_file(&self, channel: &str, text: &str, file: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(
+                &HttpRequest::new(Method::Post, "/api/v4/drafts").json(&json!({
+                    "channel_id": id,
+                    "message": text,
+                    "file_ids": [file],
+                })),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// The files on the message in a channel saying exactly this.
+    pub async fn files_on(&self, channel: &str, text: &str) -> Result<Vec<String>> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=60"
+            )))
+            .await?;
+        Ok(page["posts"]
+            .as_object()
+            .and_then(|posts| {
+                posts
+                    .values()
+                    .find(|p| p["message"].as_str().map(str::trim) == Some(text.trim()))
+            })
+            .and_then(|p| p["file_ids"].as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self
@@ -1282,6 +1342,7 @@ pub const LAB_TRACES: &[&str] = &[
     "Replied from the lab",
     "@legion something new in Design.",
     "A fresh message, ",
+    "Draft with a file",
 ];
 
 /// A moment, for a message that must differ from the last run's.

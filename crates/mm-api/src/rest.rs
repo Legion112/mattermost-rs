@@ -472,6 +472,17 @@ pub fn parse_upload(resp: &HttpResponse) -> Result<Uploaded, ApiError> {
     parse_json(resp, "POST /files")
 }
 
+/// One file's record: its name and size, for a draft that names files
+/// by id and nothing else.
+#[must_use]
+pub fn file_info(file: &mm_types::FileId) -> HttpRequest {
+    HttpRequest::get(format!("{API}/files/{file}/info"))
+}
+
+pub fn parse_file_info(resp: &HttpResponse) -> Result<FileRef, ApiError> {
+    parse_json(resp, "GET /files/{file}/info")
+}
+
 // ------------------------------------------------------ upload sessions
 
 /// Open an upload session for one file: the way a big file goes up in

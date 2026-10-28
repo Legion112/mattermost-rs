@@ -1358,3 +1358,14 @@ fn an_upload_session_is_opened_fed_and_finished() {
     let err = HttpResponse::new(413, r#"{"id":"api.too_large","message":"too large"}"#);
     assert!(parse_chunk(&err).is_err());
 }
+
+/// A draft names its files by id; the record behind one is a request away.
+#[test]
+fn a_files_record_is_fetched_by_id() {
+    let req = file_info(&mm_types::FileId::new("f1"));
+    assert_eq!(req.method, Method::Get);
+    assert_eq!(req.path, "/api/v4/files/f1/info");
+    let info = parse_file_info(&ok(r#"{"id":"f1","name":"notes.txt","size":12}"#)).unwrap();
+    assert_eq!(info.name, "notes.txt");
+    assert!(parse_file_info(&HttpResponse::new(404, r#"{"id":"x","message":"gone"}"#)).is_err());
+}

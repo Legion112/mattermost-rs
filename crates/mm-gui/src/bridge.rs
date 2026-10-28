@@ -28,6 +28,9 @@ pub enum Attachment {
     File(std::path::PathBuf),
     /// Bytes with a name, which never touched the disk.
     Pasted { name: String, data: Vec<u8> },
+    /// Already on the server: a file a draft names, or one uploaded
+    /// the moment it was attached. Sent as its id, with no bytes.
+    Uploaded { id: FileId, name: String },
 }
 
 impl Attachment {
@@ -40,7 +43,16 @@ impl Attachment {
                 .and_then(|n| n.to_str())
                 .unwrap_or("attachment")
                 .to_owned(),
-            Self::Pasted { name, .. } => name.clone(),
+            Self::Pasted { name, .. } | Self::Uploaded { name, .. } => name.clone(),
+        }
+    }
+
+    /// The server's id for it, once it has one.
+    #[must_use]
+    pub fn uploaded_id(&self) -> Option<&FileId> {
+        match self {
+            Self::Uploaded { id, .. } => Some(id),
+            _ => None,
         }
     }
 }
@@ -246,6 +258,8 @@ pub enum Command {
         file: FileId,
         name: String,
     },
+    /// One file's name and size, for a draft that names it by id.
+    FileInfo(FileId),
     /// Fetch an attachment and hand it to the desktop's own handler
     /// for its kind -- a PDF to the PDF viewer, an archive to the
     /// archiver -- rather than draw it, which this client cannot.
@@ -467,6 +481,8 @@ pub enum Event {
     /// An attachment is on disk under its own name, ready for the
     /// desktop to open.
     FileReady(std::path::PathBuf),
+    /// A file's record, asked for by id: see `Command::FileInfo`.
+    FileInfo(mm_types::FileRef),
     /// How far a big attachment has got on its way up, for the status
     /// line: a screencast takes a while, and silence reads as a hang.
     Uploading {

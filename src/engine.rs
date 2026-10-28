@@ -362,6 +362,8 @@ async fn upload_one(
             std::fs::read(path).map_err(|e| format!("cannot read {name}: {e}"))?
         }
         mm_gui::bridge::Attachment::Pasted { data, .. } => data.clone(),
+        // Already there: nothing to send but the id.
+        mm_gui::bridge::Attachment::Uploaded { id, .. } => return Ok(id.clone()),
     };
     if content.len() > UPLOAD_PIECE {
         return upload_in_pieces(a, channel, &name, content, events).await;
@@ -1132,6 +1134,16 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
         Command::OpenFile { file, name } => open_file(a, &file, &name, events).await,
+        Command::FileInfo(file) => {
+            match fetch(&a.client, &rest::file_info(&file), rest::parse_file_info).await {
+                Ok(info) => {
+                    let _ = events.send(Event::FileInfo(info)).await;
+                }
+                Err(e) => {
+                    let _ = events.send(Event::Failed(format!("file: {e}"))).await;
+                }
+            }
+        }
         Command::SetChannelNotify { channel, desktop } => {
             let user = UserId::new(&a.session.user_id);
             let request = rest::set_channel_notify(&channel, &user, &desktop);

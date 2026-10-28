@@ -37,6 +37,7 @@ pub const SCENARIOS: &[&str] = &[
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
     "keeps-a-draft-on-the-server",
+    "sends-a-draft-with-its-file",
     "sends-a-message",
     "edits-with-the-up-key",
     "reacts-with-the-keyboard",
@@ -139,6 +140,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "mutes-and-unmutes" => mutes(screen, admin).await,
         "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
         "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
+        "sends-a-draft-with-its-file" => draft_with_file(screen, admin).await,
         "sends-a-message" => sends_a_message(screen, admin).await,
         "edits-with-the-up-key" => edits_with_up(screen, admin).await,
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
@@ -787,6 +789,45 @@ async fn joins_from_switcher(screen: &Screen, admin: &Admin) -> Result<()> {
     }
     Err(Error(format!(
         "the server does not have us back in {PRACTICE}"
+    )))
+}
+
+/// A draft written elsewhere that names a file comes back with the file
+/// as a chip, and sending it sends the file: before this the text came
+/// back and the file was quietly dropped.
+async fn draft_with_file(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Design").await?;
+    let file = admin
+        .upload_note("engineering", "lab-note.txt", b"hello from the lab")
+        .await?;
+    let text = format!("Draft with a file at {}", crate::seed::stamp());
+    admin.draft_with_file("engineering", &text, &file).await?;
+    // Drafts arrive with a sync; the reload button is one.
+    screen.press("Reload channels").await?;
+    screen.open_channel("Engineering").await?;
+    let tree = screen
+        .until("the draft's file is a chip in the tray", |tree| {
+            tree.has("label", "lab-note.txt")
+        })
+        .await?;
+    let composer = tree.find("text box", "Write a message…")?.clone();
+    let held = screen.text_of(&composer).await?;
+    if held != text {
+        return Err(Error(format!(
+            "the box holds {held:?}, not the draft {text:?}"
+        )));
+    }
+    screen.click_into(&composer).await?;
+    screen.press_key(key::RETURN, &[])?;
+    for _ in 0..25 {
+        let files = admin.files_on("engineering", &text).await?;
+        if files.contains(&file) {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the sent message does not carry the draft's file {file}"
     )))
 }
 
