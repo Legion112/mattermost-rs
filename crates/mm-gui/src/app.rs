@@ -199,6 +199,20 @@ struct Ui {
     /// the user sits there, and without this each firing would start another
     /// identical request.
     loading_older: Rc<std::cell::Cell<bool>>,
+    /// How many of the open channel's posts the model is allowed to
+    /// hold.
+    ///
+    /// Not how many are *known*: the store keeps every page ever
+    /// fetched, and after an afternoon of reading back that is hundreds.
+    /// Putting all of them in the model is what makes one `splice` cost
+    /// 835ms on a real account, and it gets worse the more you read --
+    /// the official client caps a channel at fifty rows around an anchor
+    /// and moves that window rather than growing it.
+    ///
+    /// Grows a page at a time when the reader reaches the top, which is
+    /// free when the posts are already held, and resets when a channel
+    /// opens.
+    shown_window: Rc<std::cell::Cell<usize>>,
     /// After a page of history is prepended, the post the view was resting
     /// on. The list is rebuilt rather than spliced, so without this the
     /// reader would be thrown to the top of sixty newly loaded messages.
@@ -1092,6 +1106,7 @@ fn build(
         sidebar_queued: Rc::new(std::cell::Cell::new(false)),
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
+        shown_window: Rc::new(std::cell::Cell::new(CHANNEL_WINDOW)),
         restore_to: Rc::new(RefCell::new(None)),
         reopen: Rc::new(RefCell::new(reopen)),
         provisional: Rc::new(std::cell::Cell::new(false)),
@@ -3831,51 +3846,12 @@ fn wire(
         let loading = Rc::clone(&ui.loading_older);
         let restore = Rc::clone(&ui.restore_to);
         let selected = Rc::clone(&ui.selected);
-        let store = Rc::clone(&ui.store);
         let posts = ui.posts.clone();
         let commands = commands.clone();
         // Asking for the page before what is held. Shared by the edge and
         // by the watcher below, because they are the same request made at
         // two different moments.
-        let ask_for_older = {
-            let loading = Rc::clone(&loading);
-            let restore = Rc::clone(&restore);
-            let selected = Rc::clone(&selected);
-            let store = Rc::clone(&store);
-            let posts = posts.clone();
-            let commands = commands.clone();
-            Rc::new(move || {
-                let Some(channel) = selected.borrow().clone() else {
-                    return;
-                };
-                // The edge keeps firing while the reader sits at the top, so
-                // without the in-flight flag each firing starts another
-                // identical request.
-                if loading.get() || store.borrow().older_complete(&channel) {
-                    return;
-                }
-                // The oldest post held is both what to ask the server for
-                // and what to scroll back to afterwards. Row 0 is a date
-                // separator and carries no id, so this walks to the first
-                // real message -- reading row 0 would find an empty id and
-                // never backfill at all.
-                let Some(oldest) = (0..posts.n_items())
-                    .filter_map(|i| posts.item(i).and_downcast::<PostRow>())
-                    .map(|row| PostId::new(row.id()))
-                    .find(|id| !id.as_str().is_empty())
-                else {
-                    return;
-                };
-                loading.set(true);
-                *restore.borrow_mut() = Some(oldest.clone());
-                commands
-                    .send(Command::LoadOlder {
-                        channel,
-                        before: oldest,
-                    })
-                    .ok();
-            })
-        };
+        let ask_for_older = older_asker(ui, &loading, &restore, &selected, &posts, &commands);
 
         // Asking *early* -- a screenful before the top -- was tried and
         // measured worse, which is why it is not here. It does remove the
@@ -5918,6 +5894,20 @@ fn restate_members(list: &gtk::ListBox, heading: &gtk::Label) {
     heading.set_label(&members_heading(count));
 }
 
+/// How many of a channel's posts the model holds at once.
+///
+/// The official client caps a channel at fifty rows around an anchor
+/// and renders eighty either side of the viewport; this is the same
+/// idea with one number, because our list has no anchor but the bottom.
+/// Large enough that a tall window is full without reaching for more,
+/// small enough that a `splice` is cheap.
+const CHANNEL_WINDOW: usize = 60;
+
+/// How much further back to show when the reader reaches the top and
+/// the posts are already held. A page, so it matches what a fetch would
+/// have added.
+const WINDOW_STEP: usize = 60;
+
 /// How many candidates "add people" offers. Fewer than the mention
 /// popup: this list sits inside the channel menu, under everything
 /// else in it, and a long one pushes the roster off the screen.
@@ -6287,6 +6277,79 @@ fn runs(sorted: &[usize], gap: usize) -> Vec<(usize, usize)> {
         }
     }
     out
+}
+
+/// The request for the page of history before what is drawn, as one
+/// callable thing: the top edge and anything else that wants it share
+/// this rather than each knowing how to ask.
+fn older_asker(
+    ui: &Ui,
+    loading: &Rc<std::cell::Cell<bool>>,
+    restore: &Rc<RefCell<Option<PostId>>>,
+    selected: &Rc<RefCell<Option<ChannelId>>>,
+    posts: &gio::ListStore,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+) -> Rc<dyn Fn()> {
+    let ui = ui.clone();
+    let loading = Rc::clone(loading);
+    let restore = Rc::clone(restore);
+    let selected = Rc::clone(selected);
+    let posts = posts.clone();
+    let commands = commands.clone();
+    Rc::new(move || {
+        let Some(channel) = selected.borrow().clone() else {
+            return;
+        };
+        // The edge keeps firing while the reader sits at the top, so
+        // without the in-flight flag each firing starts another
+        // identical request.
+        if loading.get() {
+            return;
+        }
+        // The oldest row drawn is what to scroll back to once more
+        // appears above it, and what to ask the server for. Row 0
+        // is a date separator and carries no id, so this walks to
+        // the first real message -- reading row 0 would find an
+        // empty id and never backfill at all.
+        let Some(oldest) = (0..posts.n_items())
+            .filter_map(|i| posts.item(i).and_downcast::<PostRow>())
+            .map(|row| PostId::new(row.id()))
+            .find(|id| !id.as_str().is_empty())
+        else {
+            return;
+        };
+
+        // Widen before fetching. The model holds a window of the
+        // channel, not all of it, so the page before this one is
+        // usually already in the store -- showing it is a redraw
+        // with no request, no round trip and nothing to wait for.
+        let (held, complete) = {
+            let store = ui.store.borrow();
+            (
+                store.channel_posts(&channel).len(),
+                store.older_complete(&channel),
+            )
+        };
+        if held > ui.shown_window.get() {
+            *restore.borrow_mut() = Some(oldest);
+            ui.shown_window
+                .set(ui.shown_window.get().saturating_add(WINDOW_STEP));
+            ui.refresh_posts(&channel);
+            return;
+        }
+        if complete {
+            return;
+        }
+
+        loading.set(true);
+        *restore.borrow_mut() = Some(oldest.clone());
+        commands
+            .send(Command::LoadOlder {
+                channel,
+                before: oldest,
+            })
+            .ok();
+    })
 }
 
 fn build_post_list(
@@ -8216,6 +8279,10 @@ impl Ui {
         self.thread_posts.remove_all();
         self.thread_pane.set_visible(false);
         *self.selected.borrow_mut() = Some(id.clone());
+        // A channel opens at its newest page however much of it is held,
+        // which is what makes opening one cost the same whether it was
+        // read for the first time or scrolled through all morning.
+        self.shown_window.set(CHANNEL_WINDOW);
         self.restore_draft(id);
         self.show_pane(&Pane::Channel);
         // Draw what is already held, before asking for anything. A
@@ -9125,9 +9192,18 @@ impl Ui {
         self.store
             .borrow_mut()
             .apply_post_list(channel, page, PageAnchor::OlderThanHeld);
-        if self.selected.borrow().as_ref() == Some(channel) {
-            self.refresh_posts(channel);
+        if self.selected.borrow().as_ref() != Some(channel) {
+            return;
         }
+        // The window has to take in what was just asked for, or the page
+        // lands in the store behind the rows being shown and nothing
+        // changes on screen -- which reads as a fetch that did nothing,
+        // and leaves the reader at an edge with no reason to scroll
+        // again.
+        let arrived = page.posts.len().max(1);
+        self.shown_window
+            .set(self.shown_window.get().saturating_add(arrived));
+        self.refresh_posts(channel);
     }
 
     /// An attached image arrived: decode it over whatever placeholder the
@@ -9386,13 +9462,16 @@ impl Ui {
         // Date separators and author grouping are computed in mm-core, where
         // they are covered: they are calendar arithmetic and identity
         // comparisons, and both are wrong in ways only a test notices.
-        let visible = store.channel_posts(channel);
+        let held = store.channel_posts(channel);
+        // The newest `window` of them. The rest stay in the store, which
+        // is where scrolling back finds them.
+        let visible = &held[held.len().saturating_sub(self.shown_window.get())..];
         let offset = local_utc_offset_secs();
         let unread_from = *self.unread_from.borrow();
         let quick = store.favourite_emoji(QUICK_REACTIONS);
         let mut rows: Vec<PostRow> = Vec::with_capacity(visible.len());
         let projected = crate::perf::marked("project_rows", || {
-            mm_core::rows::project(&visible, offset, unread_from)
+            mm_core::rows::project(visible, offset, unread_from)
         });
         let started_rows = std::time::Instant::now();
         for row in projected {
