@@ -638,6 +638,45 @@ impl Admin {
             .map(str::to_owned))
     }
 
+    /// Save a root post, or unsave it, as the admin -- through the
+    /// preference the webapp writes, which is what another client of
+    /// this account would do, and what the window hears over the socket.
+    pub async fn save_post(
+        &self,
+        channel: &str,
+        root_starts_with: &str,
+        saved: bool,
+    ) -> Result<()> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=200"
+            )))
+            .await?;
+        let root_id = id_of(&find_root(&page, root_starts_with)?)?;
+        let pref = json!([{
+            "user_id": self.me,
+            "category": "flagged_post",
+            "name": root_id,
+            "value": "true",
+        }]);
+        let request = if saved {
+            HttpRequest::new(
+                Method::Put,
+                format!("/api/v4/users/{}/preferences", self.me),
+            )
+            .json(&pref)
+        } else {
+            HttpRequest::new(
+                Method::Post,
+                format!("/api/v4/users/{}/preferences/delete", self.me),
+            )
+            .json(&pref)
+        };
+        self.api.call(&request).await.map(|_| ())
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self
@@ -673,19 +712,7 @@ impl Admin {
                 "/api/v4/channels/{id}/posts?per_page=200"
             )))
             .await?;
-        let root = page["posts"]
-            .as_object()
-            .and_then(|posts| {
-                posts.values().find(|p| {
-                    p["root_id"].as_str().unwrap_or_default().is_empty()
-                        && p["message"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .starts_with(root_starts_with)
-                })
-            })
-            .cloned()
-            .ok_or_else(|| Error(format!("no root starting with {root_starts_with:?}")))?;
+        let root = find_root(&page, root_starts_with)?;
         // Counted, not read: the page carries `reply_count` only when
         // asked for with collapsed threads, and this is not.
         let root_id = id_of(&root)?;
@@ -973,4 +1000,21 @@ fn dump(n: usize) -> String {
     }
     out.push_str("```");
     out
+}
+
+/// The root post in a channel page whose text starts a given way.
+fn find_root(page: &Value, starts_with: &str) -> Result<Value> {
+    page["posts"]
+        .as_object()
+        .and_then(|posts| {
+            posts.values().find(|p| {
+                p["root_id"].as_str().unwrap_or_default().is_empty()
+                    && p["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .starts_with(starts_with)
+            })
+        })
+        .cloned()
+        .ok_or_else(|| Error(format!("no root starting with {starts_with:?}")))
 }

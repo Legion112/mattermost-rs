@@ -18,7 +18,7 @@
 //!   resync over REST.
 
 use crate::error::AppError;
-use mm_types::{ChannelId, ChannelMember, Post, PostId, Reaction, User, UserId};
+use mm_types::{ChannelId, ChannelMember, Post, PostId, Preference, Reaction, User, UserId};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -128,6 +128,12 @@ pub enum WsEvent {
     ThreadUpdated(mm_types::UserThread),
     /// The reader caught up on a thread, here or in another client.
     /// Plain fields, not nested.
+    /// Preferences written from another client of this account. Saving
+    /// a post is one: `flagged_post`, keyed by post id, `"true"`.
+    PreferencesChanged(Vec<Preference>),
+    /// Preferences removed from another client, which is how a post is
+    /// unsaved.
+    PreferencesDeleted(Vec<Preference>),
     ThreadReadChanged {
         thread_id: PostId,
         /// The moment read up to.
@@ -388,6 +394,15 @@ fn decode_event(
         "reaction_added" => Ok(WsEvent::ReactionAdded(nested_json(data, "reaction")?)),
         "reaction_removed" => Ok(WsEvent::ReactionRemoved(nested_json(data, "reaction")?)),
         "thread_updated" => Ok(WsEvent::ThreadUpdated(nested_json(data, "thread")?)),
+        // Like `post`: a JSON array inside a JSON string.
+        "preferences_changed" => Ok(WsEvent::PreferencesChanged(nested_json(
+            data,
+            "preferences",
+        )?)),
+        "preferences_deleted" => Ok(WsEvent::PreferencesDeleted(nested_json(
+            data,
+            "preferences",
+        )?)),
         "thread_read_changed" => Ok(WsEvent::ThreadReadChanged {
             thread_id: PostId::new(str_field(data, "thread_id")),
             timestamp: mm_types::Timestamp(int_field(data, "timestamp")),

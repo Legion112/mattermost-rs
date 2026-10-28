@@ -3635,3 +3635,46 @@ fn an_own_post_may_be_edited_within_the_servers_limit() {
     assert!(store.may_edit(&PostId::new("p-mine"), Timestamp(10_000 + 60_000)));
     assert!(!store.may_edit(&PostId::new("p-mine"), much_later));
 }
+
+/// Saving is a preference on the wire, and another client of this
+/// account changing it arrives over the socket: the menu and the saved
+/// list have to follow without waiting for a sync.
+#[test]
+fn a_preference_changed_elsewhere_saves_and_unsaves() {
+    let mut store = store();
+    let pref = |value: &str| mm_types::Preference {
+        user_id: UserId::new(ME),
+        category: "flagged_post".to_owned(),
+        name: "p1".to_owned(),
+        value: value.to_owned(),
+    };
+    let changes = store.apply_ws(&WsEvent::PreferencesChanged(vec![pref("true")]));
+    assert_eq!(changes, vec![Change::Found]);
+    assert!(store.is_saved(&PostId::new("p1")));
+    assert_eq!(store.saved, vec![PostId::new("p1")]);
+    // Said twice is still once.
+    store.apply_ws(&WsEvent::PreferencesChanged(vec![pref("true")]));
+    assert_eq!(store.saved.len(), 1);
+
+    store.apply_ws(&WsEvent::PreferencesChanged(vec![pref("false")]));
+    assert!(!store.is_saved(&PostId::new("p1")));
+    assert!(store.saved.is_empty());
+
+    store.apply_ws(&WsEvent::PreferencesChanged(vec![pref("true")]));
+    let changes = store.apply_ws(&WsEvent::PreferencesDeleted(vec![pref("true")]));
+    assert_eq!(changes, vec![Change::Found]);
+    assert!(!store.is_saved(&PostId::new("p1")));
+    assert!(store.saved.is_empty());
+
+    // Any other preference is kept, and touches no list.
+    let other = mm_types::Preference {
+        category: "display_settings".to_owned(),
+        name: "x".to_owned(),
+        ..pref("1")
+    };
+    let key = ("display_settings".to_owned(), "x".to_owned());
+    store.apply_ws(&WsEvent::PreferencesChanged(vec![other.clone()]));
+    assert_eq!(store.prefs.get(&key), Some(&"1".to_owned()));
+    store.apply_ws(&WsEvent::PreferencesDeleted(vec![other]));
+    assert!(!store.prefs.contains_key(&key));
+}

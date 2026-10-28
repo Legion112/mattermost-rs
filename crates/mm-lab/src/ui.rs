@@ -403,7 +403,7 @@ impl Screen {
     /// Selecting a row that is already selected tells the window
     /// nothing at all, and a reader who clicks the highlighted channel
     /// to come back from Threads is doing exactly that.
-    pub async fn select_row(&self, label: &str) -> Result<()> {
+    async fn select_row_once(&self, label: &str) -> Result<()> {
         let tree = self.tree().await?;
         // Every list, not the first one: an open popover puts its own list
         // of members in the tree ahead of the sidebar, and "the first list"
@@ -455,6 +455,25 @@ impl Screen {
         Err(Error(format!(
             "no list row labelled {label:?}. Rows carried: {seen:?}"
         )))
+    }
+
+    /// `select_row_once`, tried again for a while when the row is not
+    /// there: a list being rebuilt -- the sidebar after a `user_updated`,
+    /// say -- has no rows for a moment, and one snapshot taken then is
+    /// not the window being wrong.
+    pub async fn select_row(&self, label: &str) -> Result<()> {
+        let deadline = std::time::Instant::now() + PATIENCE;
+        loop {
+            match self.select_row_once(label).await {
+                Err(e)
+                    if std::time::Instant::now() < deadline
+                        && e.0.starts_with("no list row labelled") =>
+                {
+                    tokio::time::sleep(POLL).await;
+                }
+                other => return other,
+            }
+        }
     }
 
     /// Where the window is on screen, so a failure photographs it rather

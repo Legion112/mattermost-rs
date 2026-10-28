@@ -1187,6 +1187,46 @@ impl Store {
         vec![Change::Found]
     }
 
+    /// Preferences changed in another client -- saving a post, mostly,
+    /// which is a preference on the wire. Kept in step here the way a
+    /// sync would keep it, so the menu offers the right half of save and
+    /// unsave, and the saved list gains or drops the post without a
+    /// round trip. The server orders that list, so a window showing it
+    /// asks again; this keeps the window honest until the answer comes.
+    fn on_preferences_changed(&mut self, prefs: &[mm_types::Preference]) -> Vec<Change> {
+        for pref in prefs {
+            self.prefs.insert(
+                (pref.category.clone(), pref.name.clone()),
+                pref.value.clone(),
+            );
+            if pref.category == mm_types::keys::FLAGGED_POST {
+                let post = PostId::new(&pref.name);
+                if mm_types::is_true(&pref.value) {
+                    if !self.saved.contains(&post) {
+                        self.saved.insert(0, post);
+                    }
+                } else {
+                    self.saved.retain(|held| *held != post);
+                }
+            }
+        }
+        vec![Change::Found]
+    }
+
+    /// The other half: preferences removed, which is how a post is
+    /// unsaved by the webapp.
+    fn on_preferences_deleted(&mut self, prefs: &[mm_types::Preference]) -> Vec<Change> {
+        for pref in prefs {
+            self.prefs
+                .remove(&(pref.category.clone(), pref.name.clone()));
+            if pref.category == mm_types::keys::FLAGGED_POST {
+                let post = PostId::new(&pref.name);
+                self.saved.retain(|held| *held != post);
+            }
+        }
+        vec![Change::Found]
+    }
+
     /// Whether this reader wrote a post, which decides whether they may
     /// edit or delete it.
     #[must_use]
@@ -1602,6 +1642,8 @@ impl Store {
                 self.mark_viewed(channel_id, now);
                 vec![Change::ReadState]
             }
+            WsEvent::PreferencesChanged(prefs) => self.on_preferences_changed(prefs),
+            WsEvent::PreferencesDeleted(prefs) => self.on_preferences_deleted(prefs),
             WsEvent::UserUpdated(user) => {
                 let id = user.id.clone();
                 self.users.insert(id.clone(), user.clone());

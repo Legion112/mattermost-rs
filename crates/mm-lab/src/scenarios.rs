@@ -25,6 +25,7 @@ use crate::{Error, Result};
 pub const SCENARIOS: &[&str] = &[
     "signs-in",
     "sets-a-custom-status",
+    "shows-a-post-saved-elsewhere",
     "shows-a-thread-reply-count",
     "shows-a-new-reply-in-threads",
     "adds-and-removes-somebody",
@@ -107,6 +108,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
     match name {
         "signs-in" => signs_in(screen).await,
         "sets-a-custom-status" => custom_status(screen, admin).await,
+        "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
         "shows-a-thread-reply-count" => reply_count(screen).await,
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
@@ -211,6 +213,32 @@ async fn server_holds(admin: &Admin, expected: Option<&str>) -> Result<()> {
     Err(Error(format!(
         "the server holds custom status {last:?}, expected {expected:?}"
     )))
+}
+
+/// A post saved from another client of this account shows up in the
+/// saved view without a sync, and goes when it is unsaved there.
+///
+/// Saving is a preference on the wire, announced as
+/// `preferences_changed`, which this client used not to decode -- so
+/// the view was a photograph of the last sync. Design is opened first
+/// so the message can only be on screen because the saved list has it.
+async fn saved_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Design").await?;
+    screen.press("Saved messages").await?;
+    admin.save_post("engineering", ROOT, true).await?;
+    screen
+        .until("the saved post appears in the saved view", |tree| {
+            tree.has("label", ROOT)
+        })
+        .await?;
+    admin.save_post("engineering", ROOT, false).await?;
+    screen
+        .until("the unsaved post goes from the saved view", |tree| {
+            !tree.has("label", ROOT)
+        })
+        .await
+        .map(|_| ())
 }
 
 /// The bug the lab found on its first day: the thread's reply count came
@@ -347,10 +375,23 @@ async fn new_reply_in_threads(screen: &Screen, admin: &Admin) -> Result<()> {
     // pressed. Opened by its reply count, which is a button on the row
     // the way it is under a message.
     let expected = format!("{} replies", before + 1);
+    // One fewer, not none: a lab that has run the perf fixture has other
+    // followed threads unread, and they are not this test's business.
+    let unread = screen
+        .until("the thread list is drawn", |tree| {
+            tree.has("button", &expected)
+        })
+        .await?
+        .iter()
+        .filter(|n| n.role == "button" && n.name == "Mark this thread read")
+        .count();
     screen.press(&expected).await?;
     screen
-        .until("opening the thread marks it read", |tree| {
-            !tree.has("button", "Mark this thread read")
+        .until("opening the thread marks it read", move |tree| {
+            tree.iter()
+                .filter(|n| n.role == "button" && n.name == "Mark this thread read")
+                .count()
+                < unread
         })
         .await
         .map(|_| ())

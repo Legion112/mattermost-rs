@@ -8839,6 +8839,15 @@ impl Ui {
             self.sidebar_stale.set(true);
             self.refresh_presence();
         }
+        // A post saved or unsaved from another client: the saved list on
+        // screen is the server's to order, so ask for it again.
+        if matches!(
+            ws,
+            mm_api::ws::WsEvent::PreferencesChanged(_) | mm_api::ws::WsEvent::PreferencesDeleted(_)
+        ) && matches!(&*self.pane.borrow(), Pane::Found(mm_core::Found::Saved))
+        {
+            self.commands.send(Command::Saved).ok();
+        }
         // The Threads badge is not part of what the sidebar compares
         // against, so a thread moving has to say so, the way the threads
         // list arriving does.

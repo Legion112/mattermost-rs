@@ -674,3 +674,48 @@ fn thread_read_changed_without_counts_reads_zero() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Saving a post from another client arrives as a preference, and the
+/// array is a JSON document inside a JSON string, like a `post`.
+#[test]
+fn preferences_changed_and_deleted_are_decoded_from_the_nested_array() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(
+        r#"{"event":"preferences_changed","data":{"preferences":
+            "[{\"user_id\":\"u1\",\"category\":\"flagged_post\",\"name\":\"p1\",\"value\":\"true\"}]"},
+            "broadcast":{"user_id":"u1"},"seq":1}"#,
+    );
+    match &out[0] {
+        WsOutcome::Event(WsEvent::PreferencesChanged(prefs)) => {
+            assert_eq!(prefs.len(), 1);
+            assert_eq!(prefs[0].category, "flagged_post");
+            assert_eq!(prefs[0].name, "p1");
+            assert_eq!(prefs[0].value, "true");
+        }
+        other => panic!("expected PreferencesChanged, got {other:?}"),
+    }
+
+    let out = p.on_frame(
+        r#"{"event":"preferences_deleted","data":{"preferences":
+            "[{\"user_id\":\"u1\",\"category\":\"flagged_post\",\"name\":\"p1\",\"value\":\"true\"}]"},
+            "seq":2}"#,
+    );
+    match &out[0] {
+        WsOutcome::Event(WsEvent::PreferencesDeleted(prefs)) => {
+            assert_eq!(prefs[0].name, "p1");
+        }
+        other => panic!("expected PreferencesDeleted, got {other:?}"),
+    }
+
+    // The array missing is a frame that says nothing usable, either way.
+    let out = p.on_frame(r#"{"event":"preferences_changed","data":{},"seq":3}"#);
+    assert!(
+        !matches!(&out[0], WsOutcome::Event(WsEvent::PreferencesChanged(_))),
+        "{out:?}"
+    );
+    let out = p.on_frame(r#"{"event":"preferences_deleted","data":{},"seq":4}"#);
+    assert!(
+        !matches!(&out[0], WsOutcome::Event(WsEvent::PreferencesDeleted(_))),
+        "{out:?}"
+    );
+}

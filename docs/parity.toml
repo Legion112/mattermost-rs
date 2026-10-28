@@ -943,7 +943,13 @@ rather than a wrong verb, and the post stayed saved with nothing on \
 screen admitting it. And a save was sent without being recorded here, \
 so the menu went on offering "Remove from saved" for a post that had \
 just been unsaved: saving is a preference, and the server announces a \
-changed preference over an event this client does not decode.
+changed preference over an event this client did not then decode. It \
+does now: `preferences_changed` and `preferences_deleted` move the \
+menu and the saved list the way a sync would, and a window showing the \
+saved list asks the server for it again, since the order is the \
+server's. Verified in the lab: a post saved through the preference API, \
+as another client of the account would, appeared in the open saved \
+view, and went when the preference was deleted.
 
 Verified against the live account on the self-DM: saving a message put \
 it at the top of the saved list, the button took it off and the \
