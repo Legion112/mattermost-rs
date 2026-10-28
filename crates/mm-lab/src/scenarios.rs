@@ -30,6 +30,7 @@ pub const SCENARIOS: &[&str] = &[
     "edits-the-profile",
     "shows-a-post-saved-elsewhere",
     "shows-a-thread-reply-count",
+    "follows-a-permalink",
     "shows-a-new-reply-in-threads",
     "shows-who-is-typing",
     "follows-edits-reactions-and-deletions",
@@ -145,6 +146,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "edits-the-profile" => edits_profile(screen, admin).await,
         "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
         "shows-a-thread-reply-count" => reply_count(screen).await,
+        "follows-a-permalink" => follows_permalink(screen, admin).await,
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
         "shows-who-is-typing" => who_is_typing(screen, admin).await,
         "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
@@ -1346,6 +1348,63 @@ async fn reply_count(screen: &Screen) -> Result<()> {
         .map(|_| ())
 }
 
+/// A `mattermost://…/pl/…` link handed to the running client by a second
+/// launch opens the post's channel and its thread, and that second
+/// process goes away again.
+///
+/// Started on a different channel with no thread open, so that both
+/// halves of what the link does are visible when it lands.
+async fn follows_permalink(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Design").await?;
+    if screen.tree().await?.has("text box", "Reply…") {
+        screen.press_key(key::ESCAPE, &[])?;
+        screen
+            .until("the thread box is away", |tree| {
+                !tree.has("text box", "Reply…")
+            })
+            .await?;
+    }
+    let root = admin.post_id_of("engineering", ROOT).await?;
+    let link = format!(
+        "mattermost://{}/{}/pl/{root}",
+        crate::stack::URL.trim_start_matches("http://"),
+        crate::seed::TEAM
+    );
+    let mut second = Client::handing(&lab_home(), &link)?;
+    screen
+        .until("the link opens the channel and its thread", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Engineering"))
+                && tree.has("text box", "Reply…")
+                && tree.has("label", ROOT)
+        })
+        .await?;
+    // The second process is the messenger, not a second window: it has
+    // to be gone, or every link would leave a client behind.
+    let mut exited = false;
+    for _ in 0..50 {
+        if second
+            .0
+            .try_wait()
+            .map_err(|e| Error(e.to_string()))?
+            .is_some()
+        {
+            exited = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if !exited {
+        second.stop();
+        return Err(Error(
+            "the link landed, but the process that carried it is still running".to_owned(),
+        ));
+    }
+    screen.press_key(key::ESCAPE, &[])?;
+    Ok(())
+}
+
 /// Putting somebody into a channel and taking them out again, checked
 /// against the server both times.
 async fn add_and_remove(screen: &Screen, admin: &Admin) -> Result<()> {
@@ -1528,7 +1587,17 @@ impl Client {
         Self::spawn(home, &[])
     }
 
+    /// A second launch carrying a link, which `gio::Application` hands to
+    /// the running instance over D-Bus before this process exits.
+    fn handing(home: &Path, link: &str) -> Result<Self> {
+        Self::spawn_with(home, &[], &[link])
+    }
+
     fn spawn(home: &Path, extra: &[(&str, &str)]) -> Result<Self> {
+        Self::spawn_with(home, extra, &[])
+    }
+
+    fn spawn_with(home: &Path, extra: &[(&str, &str)], args: &[&str]) -> Result<Self> {
         // The build tree first, then the installed one. Inside the test
         // container there is no build tree at all -- the client is there
         // because the .deb put it in /usr/bin, which is the whole point of
@@ -1553,6 +1622,7 @@ impl Client {
         println!("running {}", binary.display());
         let mut command = Command::new(&binary);
         command
+            .args(args)
             .env("MMRS_APP_ID", "mmrs.lab")
             .env("XDG_STATE_HOME", home.join("state"))
             .env("XDG_CACHE_HOME", home.join("cache"))

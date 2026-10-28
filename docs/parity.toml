@@ -1383,9 +1383,12 @@ that a URL is not a subcommand: without that, every link printed "unknown \
 command", which is worse than never registering the handler. Verified on \
 this machine: with the client already running, \
 `mattermost://.../alanbase/channels/town-square` moved it to Town Square and \
-the second process exited. NOT verified: the permalink form, which fetches \
-the post to learn its channel and then opens the thread -- built and \
-unit-tested, but not followed end to end."""
+the second process exited. The permalink form, which fetches the post to \
+learn its channel and then opens the thread, is followed end to end by the \
+lab's `follows-a-permalink` scenario: a second `mattermost-rs` process \
+inside the container is given a `/pl/` link to the seeded thread while the \
+window is on another channel, the channel and the thread box come up, and \
+the second process is seen to exit."""
 
 [[feature]]
 id       = "desktop.package"
