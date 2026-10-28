@@ -10,6 +10,7 @@ fn row(id: &str, name: &str) -> SidebarRow {
         unread: Unread::default(),
         muted: false,
         avatar_user: None,
+        has_draft: false,
     }
 }
 

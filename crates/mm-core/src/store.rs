@@ -210,6 +210,9 @@ pub struct SidebarRow {
     pub avatar_user: Option<UserId>,
     pub unread: Unread,
     pub muted: bool,
+    /// Something half-typed in it, which the row marks with a pencil
+    /// the way the webapp does: a draft is a thing to come back to.
+    pub has_draft: bool,
 }
 
 impl SidebarRow {
@@ -1259,6 +1262,30 @@ impl Store {
         vec![Change::Found]
     }
 
+    /// Who reacted to a post with one emoji, by the names the window
+    /// shows, the reader first and as "you". In the order they reacted.
+    #[must_use]
+    pub fn reacted_with(&self, post: &PostId, emoji: &str) -> Vec<String> {
+        let Some(held) = self.reactions.get(post) else {
+            return Vec::new();
+        };
+        let mut who: Vec<(bool, Timestamp, String)> = held
+            .iter()
+            .filter(|((name, _), _)| name == emoji)
+            .map(|((_, user), at)| {
+                let me = *user == self.me;
+                let name = if me {
+                    "you".to_owned()
+                } else {
+                    self.user_label(user)
+                };
+                (!me, *at, name)
+            })
+            .collect();
+        who.sort();
+        who.into_iter().map(|(_, _, name)| name).collect()
+    }
+
     /// Whether this reader wrote a post, which decides whether they may
     /// edit or delete it.
     #[must_use]
@@ -2161,6 +2188,7 @@ impl Store {
                 avatar_user: self.other_party(c),
                 unread: self.unread(&c.id),
                 muted: self.is_muted(&c.id),
+                has_draft: self.draft_for(&c.id, None).is_some(),
             })
             .collect();
         self.disambiguate(&mut rows);

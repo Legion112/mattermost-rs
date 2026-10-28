@@ -381,7 +381,9 @@ Verified on a live account: typing in a channel and switching away and back \
 brought the text back; quitting and relaunching brought it back from the \
 server; sending it cleared the draft here and on the server; and the \
 server's own drafts endpoint agreed at every step. NOT built: files attached \
-to a draft, which the composer holds and does not write down."""
+to a draft, which the composer holds and does not write down. A channel with a draft wears a \
+pencil after its name in the sidebar, the way the webapp marks one; the \
+lab sees it come with the draft and go with it."""
 
 [[feature]]
 id       = "posts.reactions"
@@ -399,7 +401,9 @@ Reactions on the message and one-click reactions on the hover toolbar, both \
 toggles: there is no separate way to take a reaction back, here or anywhere in \
 Mattermost. The one-click buttons are ranked by what this reader uses most. \
 Custom emoji are NOT fetched, so one resolves to its shortcode rather than an \
-image."""
+image. Resting the pointer on a chip says \
+who reacted -- "you, ada and grace reacted with :+1:", the reader first \
+-- read from the store when asked, the way every row tooltip is."""
 
 [[feature]]
 id       = "files.inline_images"

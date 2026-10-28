@@ -467,8 +467,20 @@ async fn draft_on_server(screen: &Screen, admin: &Admin) -> Result<()> {
     let half = "Half a thought, left in the box";
     screen.type_into(composer, half).await?;
     drafts_hold(admin, half, true).await?;
+    // And the row says so, with a pencil after the name.
+    screen
+        .until("the row shows a pencil for the draft", |tree| {
+            badge_after(tree, "Engineering") == Some("✎")
+        })
+        .await?;
     screen.type_into(composer, "").await?;
-    drafts_hold(admin, half, false).await
+    drafts_hold(admin, half, false).await?;
+    screen
+        .until("the pencil goes with the draft", |tree| {
+            badge_after(tree, "Engineering") != Some("✎")
+        })
+        .await
+        .map(|_| ())
 }
 
 /// Wait for the server to agree a channel says something, or not.

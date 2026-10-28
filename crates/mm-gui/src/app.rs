@@ -3519,6 +3519,17 @@ fn emoji_face(emoji: &Emoji, name: &str) -> gtk::Widget {
     }
 }
 
+/// "ada and grace reacted with :+1:", the way the webapp says it; the
+/// reader is "you", first.
+fn reaction_tooltip(who: &[String], emoji: &str) -> String {
+    let named = match who {
+        [] => return format!(":{emoji}:"),
+        [one] => one.clone(),
+        [all @ .., last] => format!("{} and {last}", all.join(", ")),
+    };
+    format!("{named} reacted with :{emoji}:")
+}
+
 /// Now, as the server stamps a post.
 fn now_stamp() -> mm_types::Timestamp {
     mm_types::Timestamp(chrono::Utc::now().timestamp_millis())
@@ -5261,13 +5272,21 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     // test container the same call is 0.1ms, which is why this stood for
     // months. Set once per row widget here, and those are recycled.
     reactions.set_has_tooltip(true);
-    reactions.connect_query_tooltip(|row, x, y, _, tip| {
+    let (holder, store) = (item.clone(), Rc::clone(&ctx.store));
+    reactions.connect_query_tooltip(move |row, x, y, _, tip| {
         let Some(chip) = chip_at(row, x, y) else {
             return false;
         };
         // The chip was named for its emoji when it was built, because a
-        // widget carries no other place to put it.
-        tip.set_text(Some(&format!(":{}:", chip.widget_name())));
+        // widget carries no other place to put it. Who reacted is read
+        // from the store when asked, the way every row tooltip is.
+        let emoji = chip.widget_name();
+        let who = holder
+            .item()
+            .and_downcast::<PostRow>()
+            .map(|data| store.borrow().reacted_with(&PostId::new(data.id()), &emoji))
+            .unwrap_or_default();
+        tip.set_text(Some(&reaction_tooltip(&who, &emoji)));
         true
     });
 
@@ -10424,6 +10443,16 @@ impl Ui {
             name.add_css_class("dim-label");
         }
         line.append(&name);
+        // Something half-typed here: a pencil, the way the webapp marks a
+        // draft, so the row says there is something to come back to.
+        if row.has_draft {
+            line.append(
+                &gtk::Label::builder()
+                    .label("✎")
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
         // A conversation's other half may have said what they are up
         // to, and this list is where the reader decides whom to ask.
         if let Some(status) = row.avatar_user.as_ref().and_then(|user| {

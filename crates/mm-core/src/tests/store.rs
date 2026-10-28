@@ -3824,3 +3824,48 @@ fn a_channel_updated_over_the_socket_is_read() {
     assert_eq!(s.channels[&c1].display_name, "Renamed");
     assert_eq!(s.channels[&c1].header, "A new header");
 }
+
+/// Who reacted, for the chip's tooltip: the reader first and as "you",
+/// the rest in the order they reacted, by the names the window shows.
+#[test]
+fn who_reacted_is_named_with_the_reader_first() {
+    let mut s = seeded();
+    let post = PostId::new("p1");
+    let react = |user: &str, emoji: &str, at: i64| mm_types::Reaction {
+        user_id: UserId::new(user),
+        post_id: post.clone(),
+        emoji_name: emoji.to_owned(),
+        create_at: Timestamp(at),
+        ..Default::default()
+    };
+    s.apply_ws(&WsEvent::ReactionAdded(react("u-other", "+1", 20)));
+    s.apply_ws(&WsEvent::ReactionAdded(react(ME, "+1", 30)));
+    s.apply_ws(&WsEvent::ReactionAdded(react("u-third", "+1", 10)));
+    s.apply_ws(&WsEvent::ReactionAdded(react("u-other", "tada", 5)));
+    let who = s.reacted_with(&post, "+1");
+    assert_eq!(who[0], "you");
+    assert_eq!(who.len(), 3);
+    assert_eq!(who[1], s.user_label(&UserId::new("u-third")));
+    assert!(s.reacted_with(&post, "eyes").is_empty());
+    assert!(s.reacted_with(&PostId::new("p-none"), "+1").is_empty());
+}
+
+/// A sidebar row says when something is half-typed in its channel.
+#[test]
+fn a_sidebar_row_knows_it_holds_a_draft() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let row = |s: &Store| s.sidebar().into_iter().find(|r| r.channel == c1).unwrap();
+    assert!(!row(&s).has_draft);
+    s.set_draft_locally(mm_types::Draft {
+        channel_id: c1.clone(),
+        message: "half a thought".to_owned(),
+        ..Default::default()
+    });
+    assert!(row(&s).has_draft);
+    s.set_draft_locally(mm_types::Draft {
+        channel_id: c1.clone(),
+        ..Default::default()
+    });
+    assert!(!row(&s).has_draft);
+}
