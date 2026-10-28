@@ -26,6 +26,7 @@ use crate::{Error, Result};
 pub const SCENARIOS: &[&str] = &[
     "signs-in",
     "sets-a-custom-status",
+    "goes-quiet-for-an-hour",
     "shows-a-post-saved-elsewhere",
     "shows-a-thread-reply-count",
     "shows-a-new-reply-in-threads",
@@ -122,6 +123,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
     match name {
         "signs-in" => signs_in(screen).await,
         "sets-a-custom-status" => custom_status(screen, admin).await,
+        "goes-quiet-for-an-hour" => quiet_for_an_hour(screen, admin).await,
         "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
         "shows-a-thread-reply-count" => reply_count(screen).await,
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
@@ -588,6 +590,39 @@ async fn card_from_mention(screen: &Screen) -> Result<()> {
         })
         .await
         .map(|_| ())
+}
+
+/// A timed do-not-disturb from the status menu reaches the server with
+/// its end, and going back online takes it off.
+async fn quiet_for_an_hour(screen: &Screen, admin: &Admin) -> Result<()> {
+    let asked = i64::try_from(crate::seed::stamp() / 1000).unwrap_or(0);
+    screen.press("Set your status").await?;
+    screen.press("Do not disturb for 1 hour").await?;
+    let mut last = (String::new(), 0);
+    for _ in 0..25 {
+        last = admin.my_status().await?;
+        if last.0 == "dnd" && (last.1 - asked - 3600).abs() <= 120 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if last.0 != "dnd" || (last.1 - asked - 3600).abs() > 120 {
+        return Err(Error(format!(
+            "the server holds {last:?}; expected dnd ending about an hour after {asked}"
+        )));
+    }
+    screen.press("Set your status").await?;
+    screen.press("Online").await?;
+    for _ in 0..25 {
+        last = admin.my_status().await?;
+        if last.0 == "online" {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server still holds {last:?} after Online"
+    )))
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

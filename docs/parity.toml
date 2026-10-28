@@ -646,7 +646,12 @@ lab: a colleague's status set over the API appeared beside her name \
 in the open channel and went when it was cleared. The sidebar shows it after a \
 conversation's name too, and the reader's own sits beside their dot.
 
-NOT built: a do-not-disturb timer."""
+**A timed do-not-disturb**: the status menu offers the same four spans \
+Mattermost does -- 30 minutes, 1 hour, 2 hours, until tomorrow (nine in \
+the morning) -- sent as `dnd_end_time`, which the server counts in \
+*seconds* where everything else on the wire is milliseconds, and the \
+menu says when a running one ends. Verified in the lab: the hour row \
+left the server holding `dnd` ending an hour on, and Online took it off."""
 
 [[feature]]
 id       = "posts.typing"

@@ -1100,10 +1100,13 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             };
             best_effort(a, &request, events).await;
         }
-        Command::SetPresence(presence) => {
+        Command::SetPresence {
+            presence,
+            dnd_until,
+        } => {
             match fetch(
                 &a.client,
-                &rest::set_status(&UserId::new(&a.session.user_id), presence),
+                &rest::set_status(&UserId::new(&a.session.user_id), presence, dnd_until),
                 rest::parse_status,
             )
             .await

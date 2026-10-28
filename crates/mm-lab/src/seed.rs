@@ -857,6 +857,22 @@ impl Admin {
         Ok((text, names))
     }
 
+    /// The admin's presence as the server holds it, and when a timed
+    /// do-not-disturb ends (seconds since the epoch; zero for never).
+    pub async fn my_status(&self) -> Result<(String, i64)> {
+        let status = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/status",
+                self.me
+            )))
+            .await?;
+        Ok((
+            status["status"].as_str().unwrap_or_default().to_owned(),
+            status["dnd_end_time"].as_i64().unwrap_or(0),
+        ))
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self

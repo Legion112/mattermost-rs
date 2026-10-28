@@ -3752,3 +3752,24 @@ fn a_mention_of_the_reader_is_known_without_the_roster() {
     assert_eq!(store.mentioned("legion"), Some(mm_md::Mentioned::Me));
     assert_eq!(store.mentioned("legionnaire"), None);
 }
+
+/// When the reader's own do-not-disturb ends is kept, for the menu to
+/// say; anybody else's is not, and a plain status clears it.
+#[test]
+fn the_readers_own_timed_quiet_is_remembered() {
+    let mut store = store();
+    let status = |id: &str, state: &str, until: i64| mm_types::Status {
+        user_id: UserId::new(id),
+        status: state.to_owned(),
+        dnd_end_time: until,
+        ..mm_types::Status::default()
+    };
+    store.apply_statuses(&[status("u1", "dnd", 1_730_000_000)]);
+    assert_eq!(store.my_dnd_until, None);
+    store.apply_statuses(&[status(ME, "dnd", 1_730_000_000)]);
+    assert_eq!(store.my_dnd_until, Some(1_730_000_000));
+    store.apply_statuses(&[status(ME, "dnd", 0)]);
+    assert_eq!(store.my_dnd_until, None);
+    store.apply_statuses(&[status(ME, "online", 1_730_000_000)]);
+    assert_eq!(store.my_dnd_until, None);
+}

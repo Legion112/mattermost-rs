@@ -231,6 +231,9 @@ pub struct Store {
     /// one of anybody else. Held apart from `users`, which is a roster
     /// of the people on screen and need not hold the reader at all.
     pub my_username: String,
+    /// When the reader's own timed do-not-disturb ends, in seconds since
+    /// the epoch; `None` for no end, or no do-not-disturb.
+    pub my_dnd_until: Option<i64>,
     /// Whether collapsed reply threads are in effect. Must be set from the
     /// server config plus the user preference, never assumed.
     pub threading: Threading,
@@ -645,6 +648,11 @@ impl Store {
             .iter()
             .filter_map(|status| {
                 let presence = status.presence();
+                if status.user_id == self.me {
+                    self.my_dnd_until = (presence == mm_types::Presence::Dnd
+                        && status.dnd_end_time > 0)
+                        .then_some(status.dnd_end_time);
+                }
                 let known = self.statuses.insert(status.user_id.clone(), presence);
                 (known != Some(presence)).then(|| Change::User(status.user_id.clone()))
             })

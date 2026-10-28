@@ -1299,28 +1299,40 @@ fn wire_presence(ui: &Ui) {
         popup.connect_closed(gtk::Popover::unparent);
 
         let now = menu.my_presence();
+        let quiet_until = menu.store.borrow().my_dnd_until;
         for presence in mm_types::Presence::ALL {
             let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            line.set_margin_start(6);
-            line.set_margin_end(6);
             line.append(&presence_dot(*presence));
-            let label = gtk::Label::new(Some(presence.label()));
             // Capitalised the way a menu entry is, without a second
             // spelling of each state to keep in step with the first.
-            label.set_markup(&format!(
-                "<span>{}{}</span>",
+            let mut said = format!(
+                "{}{}",
                 presence.label()[..1].to_uppercase(),
-                glib::markup_escape_text(&presence.label()[1..])
-            ));
-            line.append(&label);
-            let row = gtk::ListBoxRow::builder().child(&line).build();
+                &presence.label()[1..]
+            );
+            // A timed quiet says when it ends, which is the one thing
+            // about it the reader cannot otherwise see.
+            if *presence == mm_types::Presence::Dnd
+                && now == mm_types::Presence::Dnd
+                && let Some(until) = quiet_until
+            {
+                use std::fmt::Write as _;
+                let _ = write!(said, " · until {}", clock_at(until));
+            }
+            line.append(&gtk::Label::new(Some(&said)));
             // The one it is already on is shown but not offered: asking
             // the server to set what it already says is a round trip
             // for nothing.
-            row.set_activatable(*presence != now);
-            row.set_sensitive(*presence != now);
-            row.set_widget_name(presence.as_str());
-            list.append(&row);
+            menu_row(&list, &line, &said, presence.as_str(), *presence != now);
+        }
+        // Quiet for a while, under the plain kind: Mattermost offers the
+        // same four spans, and "do not disturb until I remember to turn
+        // it off" is how a lunch becomes an afternoon of missed pings.
+        for (said, name) in QUIET_FOR {
+            let label = gtk::Label::new(Some(said));
+            label.set_margin_start(20);
+            label.set_halign(gtk::Align::Start);
+            menu_row(&list, &label, said, name, true);
         }
         custom_status_rows(&list, &menu);
 
@@ -1329,20 +1341,102 @@ fn wire_presence(ui: &Ui) {
         let near = button.clone();
         list.connect_row_activated(move |_, row| {
             popdown.popdown();
-            match row.widget_name().as_str() {
+            let name = row.widget_name();
+            match name.as_str() {
                 "custom:set" => open_custom_status_dialog(&ui, near.upcast_ref()),
                 "custom:clear" => {
                     ui.commands.send(Command::ClearCustomStatus).ok();
                 }
-                presence => {
+                other => {
+                    let (presence, dnd_until) = match other.strip_prefix("dnd:") {
+                        Some(span) => (
+                            mm_types::Presence::Dnd,
+                            Some(quiet_until_from(span, chrono::Local::now())),
+                        ),
+                        None => (mm_types::Presence::parse(other), None),
+                    };
                     ui.commands
-                        .send(Command::SetPresence(mm_types::Presence::parse(presence)))
+                        .send(Command::SetPresence {
+                            presence,
+                            dnd_until,
+                        })
                         .ok();
                 }
             }
         });
         popup.popup();
     });
+}
+
+/// The timed kinds of quiet the status menu offers, as said and as
+/// named on the row: a span in seconds, or `tomorrow` for nine in the
+/// morning, which is what Mattermost means by it.
+const QUIET_FOR: &[(&str, &str)] = &[
+    ("Do not disturb for 30 minutes", "dnd:1800"),
+    ("Do not disturb for 1 hour", "dnd:3600"),
+    ("Do not disturb for 2 hours", "dnd:7200"),
+    ("Do not disturb until tomorrow", "dnd:tomorrow"),
+];
+
+/// When a quiet chosen now ends, as the server counts it: seconds since
+/// the epoch. `tomorrow` is nine the next morning, local time.
+fn quiet_until_from(span: &str, now: chrono::DateTime<chrono::Local>) -> i64 {
+    use chrono::{Duration, TimeZone};
+    if span == "tomorrow" {
+        let morning = (now.date_naive() + Duration::days(1))
+            .and_hms_opt(9, 0, 0)
+            .expect("a valid time of day");
+        return chrono::Local
+            .from_local_datetime(&morning)
+            .earliest()
+            .unwrap_or(now)
+            .timestamp();
+    }
+    now.timestamp() + span.parse::<i64>().unwrap_or(0)
+}
+
+/// A moment in seconds since the epoch, as a local clock time.
+fn clock_at(seconds: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local
+        .timestamp_opt(seconds, 0)
+        .earliest()
+        .map_or_else(String::new, |at| at.format("%H:%M").to_string())
+}
+
+/// One row of the status menu: a flat button inside a list row, as in
+/// the Threads view, because a `ListBoxRow` offers nothing a screen
+/// reader -- or the lab -- can press, and a button does. Named for what
+/// it says, since a button holding a box has no name of its own.
+fn menu_row(
+    list: &gtk::ListBox,
+    child: &impl IsA<gtk::Widget>,
+    said: &str,
+    name: &str,
+    offered: bool,
+) {
+    let press = gtk::Button::builder()
+        .child(child)
+        .css_classes(["flat"])
+        .can_focus(false)
+        .sensitive(offered)
+        .build();
+    {
+        use gtk::prelude::AccessibleExtManual as _;
+        press.update_property(&[gtk::accessible::Property::Label(said)]);
+    }
+    let row = gtk::ListBoxRow::builder()
+        .child(&press)
+        .activatable(offered)
+        .build();
+    row.set_widget_name(name);
+    {
+        let row = row.clone();
+        press.connect_clicked(move |_| {
+            row.activate();
+        });
+    }
+    list.append(&row);
 }
 
 /// The bottom of the status menu: what this reader said they were up
@@ -11102,7 +11196,7 @@ fn wire_scroller(ui: &Ui, scroller: &gtk::ScrolledWindow) {
 }
 #[cfg(test)]
 mod tests {
-    use super::{SPLICE_GAP, custom_status_expiry, runs};
+    use super::{SPLICE_GAP, custom_status_expiry, quiet_until_from, runs};
 
     /// A moment in local time, for the expiry arithmetic.
     fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> chrono::DateTime<chrono::Local> {
@@ -11118,6 +11212,30 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339(wire)
             .expect("the server's shape")
             .with_timezone(&chrono::Local)
+    }
+
+    #[test]
+    fn a_quiet_for_a_span_ends_that_many_seconds_from_now() {
+        let now = local(2026, 10, 28, 21, 10);
+        assert_eq!(quiet_until_from("1800", now), now.timestamp() + 1800);
+        assert_eq!(quiet_until_from("7200", now), now.timestamp() + 7200);
+        // Nonsense is now, which the server treats as no end.
+        assert_eq!(quiet_until_from("soon", now), now.timestamp());
+    }
+
+    #[test]
+    fn a_quiet_until_tomorrow_ends_at_nine() {
+        use chrono::Timelike as _;
+        let end = back(
+            &chrono::DateTime::from_timestamp(
+                quiet_until_from("tomorrow", local(2026, 10, 28, 21, 10)),
+                0,
+            )
+            .expect("a moment")
+            .to_rfc3339(),
+        );
+        assert_eq!(end.date_naive(), local(2026, 10, 29, 0, 0).date_naive());
+        assert_eq!((end.hour(), end.minute()), (9, 0));
     }
 
     #[test]

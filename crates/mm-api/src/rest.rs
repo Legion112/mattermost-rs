@@ -1015,11 +1015,21 @@ pub fn parse_statuses(resp: &HttpResponse) -> Result<Vec<Status>, ApiError> {
 /// **manual**, so the server stops moving it on its own, which is the
 /// whole point of choosing one.
 #[must_use]
-pub fn set_status(user: &UserId, presence: mm_types::Presence) -> HttpRequest {
-    HttpRequest::put(format!("{API}/users/{user}/status")).json(&serde_json::json!({
+pub fn set_status(
+    user: &UserId,
+    presence: mm_types::Presence,
+    dnd_until: Option<i64>,
+) -> HttpRequest {
+    let mut body = serde_json::json!({
         "user_id": user.as_str(),
         "status": presence.as_str(),
-    }))
+    });
+    // Seconds since the epoch, as the server counts this one field, and
+    // only with a do-not-disturb: on any other status it is noise.
+    if let (mm_types::Presence::Dnd, Some(until)) = (presence, dnd_until) {
+        body["dnd_end_time"] = serde_json::Value::from(until);
+    }
+    HttpRequest::put(format!("{API}/users/{user}/status")).json(&body)
 }
 
 pub fn parse_status(resp: &HttpResponse) -> Result<Status, ApiError> {

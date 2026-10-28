@@ -18,6 +18,11 @@ pub struct Status {
     pub status: String,
     pub manual: bool,
     pub last_activity_at: Timestamp,
+    /// When a timed do-not-disturb ends, in **seconds** since the epoch
+    /// -- not the milliseconds everything else on the wire uses -- and
+    /// zero when there is no end to it.
+    #[serde(default)]
+    pub dnd_end_time: i64,
 }
 
 impl Status {
@@ -47,5 +52,20 @@ mod tests {
         };
         assert_eq!(odd.presence(), Presence::Offline);
         assert_eq!(Status::default().presence(), Presence::Offline);
+    }
+
+    /// The end of a timed quiet comes in seconds, and a status without
+    /// one says zero rather than nothing.
+    #[test]
+    fn a_timed_quiet_says_when_it_ends() {
+        let timed: Status = serde_json::from_str(
+            r#"{"user_id":"u1","status":"dnd","manual":true,"last_activity_at":0,"dnd_end_time":1730000000}"#,
+        )
+        .expect("parses");
+        assert_eq!(timed.dnd_end_time, 1_730_000_000);
+        assert_eq!(timed.presence(), Presence::Dnd);
+        let plain: Status =
+            serde_json::from_str(r#"{"user_id":"u1","status":"online"}"#).expect("parses");
+        assert_eq!(plain.dnd_end_time, 0);
     }
 }

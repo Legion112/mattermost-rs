@@ -1129,7 +1129,7 @@ fn an_empty_emoji_page_is_null_not_an_array() {
 #[test]
 fn saying_where_you_are_repeats_your_id_in_the_body() {
     let me = UserId::new("u1");
-    let req = set_status(&me, mm_types::Presence::Dnd);
+    let req = set_status(&me, mm_types::Presence::Dnd, None);
     assert_eq!(req.method, Method::Put);
     assert_eq!(req.path, "/api/v4/users/u1/status");
     let Body::Json(body) = &req.body else {
@@ -1298,4 +1298,28 @@ fn a_custom_status_is_put_on_me_and_an_empty_expiry_is_left_out() {
     let gone = clear_custom_status();
     assert_eq!(gone.method, Method::Delete);
     assert_eq!(gone.path, "/api/v4/users/me/status/custom");
+}
+
+/// A timed do-not-disturb says when it ends, in seconds; any other
+/// status leaves the field out, and so does an untimed one.
+#[test]
+fn a_timed_quiet_carries_its_end_in_seconds() {
+    let me = UserId::new("u1");
+    let Body::Json(body) = &set_status(&me, mm_types::Presence::Dnd, Some(1_730_000_000)).body
+    else {
+        panic!("expected a JSON body");
+    };
+    assert!(body.contains(r#""dnd_end_time":1730000000"#), "{body}");
+    let Body::Json(body) = &set_status(&me, mm_types::Presence::Online, Some(1_730_000_000)).body
+    else {
+        panic!("expected a JSON body");
+    };
+    assert!(!body.contains("dnd_end_time"), "{body}");
+    let back = parse_status(&ok(
+        r#"{"user_id":"u1","status":"dnd","manual":true,"dnd_end_time":1730000000}"#,
+    ))
+    .unwrap();
+    assert_eq!(back.dnd_end_time, 1_730_000_000);
+    let back = parse_status(&ok(r#"{"user_id":"u1","status":"online","manual":false}"#)).unwrap();
+    assert_eq!(back.dnd_end_time, 0);
 }
