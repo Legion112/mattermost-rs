@@ -363,7 +363,17 @@ pub(crate) fn watching_switch() -> bool {
 thread_local! {
     /// The channel last clicked, when it was clicked, and how many
     /// changes to it have been reported since.
-    static SWITCH: RefCell<Option<(String, Instant, u32)>> = const { RefCell::new(None) };
+    static SWITCH: RefCell<Option<Switch>> = const { RefCell::new(None) };
+}
+
+/// The channel on screen, and what has happened to it since the click
+/// that opened it.
+struct Switch {
+    channel: String,
+    /// What the sidebar calls it, learned on the first redraw.
+    name: String,
+    began: Instant,
+    drawn: u32,
 }
 
 /// How many later changes to a channel are worth printing before the
@@ -376,7 +386,26 @@ pub(crate) fn switch_began(channel: &str) {
     if !watching_switch() {
         return;
     }
-    SWITCH.with_borrow_mut(|switch| *switch = Some((channel.to_owned(), Instant::now(), 0)));
+    SWITCH.with_borrow_mut(|switch| {
+        // What the channel just left behind: every redraw it took while
+        // it was open. A channel that is still being redrawn long after
+        // it settled is one the background is dragging around, and that
+        // is what leaves no main loop for the next click.
+        if let Some(left) = switch.as_ref() {
+            eprintln!(
+                "  ({} was redrawn {} times over {:.1}s)",
+                left.name,
+                left.drawn,
+                left.began.elapsed().as_secs_f64()
+            );
+        }
+        *switch = Some(Switch {
+            channel: channel.to_owned(),
+            name: channel.to_owned(),
+            began: Instant::now(),
+            drawn: 0,
+        });
+    });
 }
 
 /// The open channel now shows `rows` rows.
@@ -388,18 +417,19 @@ pub(crate) fn switch_drew(channel: &str, name: &str, rows: usize) {
         return;
     }
     SWITCH.with_borrow_mut(|switch| {
-        let Some((clicked, began, shown)) = switch.as_mut() else {
+        let Some(open) = switch.as_mut() else {
             return;
         };
-        if clicked != channel {
+        if open.channel != channel {
             return;
         }
-        let since = began.elapsed().as_secs_f64() * 1000.0;
-        if *shown == 0 {
+        name.clone_into(&mut open.name);
+        let since = open.began.elapsed().as_secs_f64() * 1000.0;
+        if open.drawn == 0 {
             eprintln!("switch {name}: {rows} rows from local state after {since:.0}ms");
-        } else if *shown <= CHANGES_SHOWN {
+        } else if open.drawn <= CHANGES_SHOWN {
             eprintln!("  {name}: now {rows} rows, {since:.0}ms after the click");
         }
-        *shown += 1;
+        open.drawn += 1;
     });
 }

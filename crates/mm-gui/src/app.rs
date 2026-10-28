@@ -194,11 +194,18 @@ struct Ui {
     /// long that the previous channel's messages stayed on screen for
     /// seconds after the click. They are collected into one redraw instead.
     redraw_queued: Rc<std::cell::Cell<bool>>,
+    /// What the last full redraw cost, which is what the next one waits
+    /// a multiple of. See `redraw_soon`.
+    redraw_cost: Rc<std::cell::Cell<std::time::Duration>>,
     sidebar_queued: Rc<std::cell::Cell<bool>>,
     /// One backfill request at a time. The top edge fires repeatedly while
     /// the user sits there, and without this each firing would start another
     /// identical request.
     loading_older: Rc<std::cell::Cell<bool>>,
+    /// Whether the channel on screen is still being opened: handed to
+    /// the list, but not yet scrolled to its newest message. See the
+    /// top-edge handler in `wire`.
+    settling: Rc<std::cell::Cell<bool>>,
     /// How many of the open channel's posts the model is allowed to
     /// hold.
     ///
@@ -1116,9 +1123,11 @@ fn build(
         drawn_sidebar: Rc::new(RefCell::new(None)),
         sidebar_stale: Rc::new(std::cell::Cell::new(false)),
         redraw_queued: Rc::new(std::cell::Cell::new(false)),
+        redraw_cost: Rc::new(std::cell::Cell::new(std::time::Duration::ZERO)),
         sidebar_queued: Rc::new(std::cell::Cell::new(false)),
         unread_from: Rc::new(RefCell::new(None)),
         loading_older: Rc::new(std::cell::Cell::new(false)),
+        settling: Rc::new(std::cell::Cell::new(false)),
         shown_window: Rc::new(std::cell::Cell::new(CHANNEL_WINDOW)),
         restore_to: Rc::new(RefCell::new(None)),
         reopen: Rc::new(RefCell::new(reopen)),
@@ -3876,9 +3885,31 @@ fn wire(
         // fetching sooner only arrives at it sooner. Worth revisiting if
         // the splice ever stops being the expensive part.
         let ask = Rc::clone(&ask_for_older);
+        let settling = Rc::clone(&ui.settling);
         ui.scroller.connect_edge_reached(move |_, edge| match edge {
             gtk::PositionType::Bottom => stick.set(true),
-            gtk::PositionType::Top => ask(),
+            // Only when the reader put themselves there.
+            //
+            // A list that has just been handed a channel's rows is at
+            // the top until the scroll to the bottom runs, and GTK
+            // reports that as reaching the top edge. So opening a
+            // channel asked for the page before it, every time: the
+            // window doubled, every row was rebuilt, and a channel
+            // whose rows are expensive -- the one this was reported
+            // against -- went from 91 rows drawn in 311ms to 182 rows
+            // two seconds after the click, on every visit, including
+            // going back to it.
+            //
+            // So the top edge counts only once that scroll has run.
+            // Not `stick_to_bottom`, which looks like the same thing
+            // and is not: it is cleared by a scroll *gesture*, so a
+            // reader who drags the scrollbar or pages up with the
+            // keyboard would never backfill again.
+            gtk::PositionType::Top => {
+                if !settling.get() {
+                    ask();
+                }
+            }
             _ => {}
         });
     }
@@ -5952,6 +5983,18 @@ fn restate_members(list: &gtk::ListBox, heading: &gtk::Label) {
     let count = (0..).map_while(|i| list.row_at_index(i)).count();
     heading.set_label(&members_heading(count));
 }
+
+/// How much of the main loop a background redraw may have: one part in
+/// four, by waiting three times what the last one cost.
+const REDRAW_SHARE: u32 = 3;
+
+/// And the window it is held between. The lower bound is what it used to
+/// be unconditionally, and a cheap channel stays there. The upper bound
+/// is a limit on how stale the background may get -- a picture that
+/// arrived, a name that is still a raw user id -- when drawing the
+/// channel is expensive.
+const REDRAW_SOONEST: std::time::Duration = std::time::Duration::from_millis(100);
+const REDRAW_LATEST: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// How tall a code block is allowed to be before it scrolls.
 ///
@@ -8386,6 +8429,10 @@ impl Ui {
         // it.
         self.remember_drafts();
         crate::perf::switch_began(id.as_str());
+        // Until the list has been scrolled to the newest message it is
+        // sitting at the top, and GTK says so: see the top-edge handler
+        // in `wire`.
+        self.settling.set(true);
 
         // Opening a channel always starts at the newest message, and
         // closes whatever thread was open: a thread belongs to the
@@ -9393,14 +9440,32 @@ impl Ui {
         if self.redraw_queued.replace(true) {
             return;
         }
+        // Long enough that the redraw cannot take more than its share of
+        // the main loop.
+        //
+        // These redraws answer the background: a colleague's status
+        // moving, a roster landing, a picture arriving. They cost what
+        // drawing the open channel costs, and on a real account that is
+        // a quarter of a second -- so a fixed 100ms window asked for
+        // 250ms of work every 100ms, and a loop that is over its budget
+        // never notices a click. One measured startup there spent 6.3 of
+        // its 15 seconds in redraws nobody asked for.
+        //
+        // So the wait is a multiple of what the last one actually cost,
+        // which bounds the share rather than the count: a small channel
+        // keeps redrawing at the old rate, and a channel expensive to
+        // draw backs off on its own.
+        let wait = (REDRAW_SHARE * self.redraw_cost.get()).clamp(REDRAW_SOONEST, REDRAW_LATEST);
         let ui = self.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+        glib::timeout_add_local_once(wait, move || {
             ui.redraw_queued.set(false);
+            let started = std::time::Instant::now();
             // Cheap, and the alternative is a second path for the one
             // case that moves it from outside: a `status_change` for
             // this reader, sent when they set it in another client.
             ui.refresh_presence();
             ui.redraw_everything();
+            ui.redraw_cost.set(started.elapsed());
         });
     }
 
@@ -9724,6 +9789,7 @@ impl Ui {
                 // already measured.
                 let view = self.post_view.clone();
                 let posts = model.clone();
+                let settling = Rc::clone(&self.settling);
                 glib::timeout_add_local_once(std::time::Duration::from_millis(120), move || {
                     // The row count is read again for the same reason as
                     // above: what was last is not last once the model has
@@ -9732,6 +9798,9 @@ impl Ui {
                     if last > 0 {
                         view.scroll_to(last - 1, gtk::ListScrollFlags::empty(), None);
                     }
+                    // Away from the top, so a top edge means the reader
+                    // went back there.
+                    settling.set(false);
                 });
             }
         }
