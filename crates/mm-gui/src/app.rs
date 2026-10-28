@@ -2785,6 +2785,7 @@ fn build_composer(placeholder: &str, which: &'static str, emoji: &Emoji) -> Comp
     row.append(&attach);
 
     let bar = build_formatting_bar(&view);
+    attach_preview_eye(&view, &scroll, &row, &bar, emoji);
     let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
     card.add_css_class("card");
     card.append(&row);
@@ -3950,6 +3951,47 @@ fn build_formatting_bar(view: &gtk::TextView) -> gtk::Box {
         bar.append(&button);
     }
     bar
+}
+
+/// Mattermost's eye, at the bar's far end: the message as it will be
+/// read, drawn by the same code that draws every message, in the box's
+/// place until the eye is pressed again.
+fn attach_preview_eye(
+    view: &gtk::TextView,
+    scroll: &gtk::ScrolledWindow,
+    row: &gtk::Box,
+    bar: &gtk::Box,
+    emoji: &Emoji,
+) {
+    let preview = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    preview.set_hexpand(true);
+    preview.set_margin_start(10);
+    preview.set_margin_end(10);
+    preview.set_margin_top(8);
+    preview.set_margin_bottom(8);
+    preview.set_visible(false);
+    row.insert_child_after(&preview, Some(scroll));
+    let eye = gtk::ToggleButton::new();
+    eye.set_icon_name("view-reveal-symbolic");
+    eye.set_tooltip_text(Some("Preview"));
+    eye.add_css_class("flat");
+    eye.set_hexpand(true);
+    eye.set_halign(gtk::Align::End);
+    eye.set_focus_on_click(false);
+    let (view, scroll, emoji) = (view.clone(), scroll.clone(), emoji.clone());
+    eye.connect_toggled(move |eye| {
+        let on = eye.is_active();
+        if on {
+            let doc = mm_md::parse(&composer_text(&view));
+            fill_blocks(&preview, &render_blocks(&doc, &emoji));
+        }
+        scroll.set_visible(!on);
+        preview.set_visible(on);
+        if !on {
+            view.grab_focus();
+        }
+    });
+    bar.append(&eye);
 }
 
 /// Reshape the composer's text round its selection, and select what

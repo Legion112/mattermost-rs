@@ -546,6 +546,21 @@ async fn formats_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
     screen.press("Bulleted list").await?;
     composer_says(screen, &composer, "**shout**").await?;
 
+    // The eye: the message as it will be read, in the box's place, and
+    // the box back when it is pressed again.
+    screen.press("Preview").await?;
+    screen
+        .until("the preview shows the word, drawn bold", |tree| {
+            tree.has("label", "shout") && !tree.has("text box", "Write a message…")
+        })
+        .await?;
+    screen.press("Preview").await?;
+    screen
+        .until("the box is back", |tree| {
+            tree.has("text box", "Write a message…")
+        })
+        .await?;
+
     // Hidden, and the server told so in the webapp's own words.
     screen.press("Aa").await?;
     screen

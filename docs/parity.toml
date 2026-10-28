@@ -402,8 +402,10 @@ typing.
 Verified on a live account: typing in a channel and switching away and back \
 brought the text back; quitting and relaunching brought it back from the \
 server; sending it cleared the draft here and on the server; and the \
-server's own drafts endpoint agreed at every step. NOT built: files attached \
-to a draft, which the composer holds and does not write down. A channel with a draft wears a \
+server's own drafts endpoint agreed at every step. Files attached to a draft \
+are written down with it as their ids, since an attachment goes up the \
+moment it is chosen, and come back as chips -- the lab's \
+`sends-a-draft-with-its-file` sends a webapp-made draft with its file. A channel with a draft wears a \
 pencil after its name in the sidebar, the way the webapp marks one; the \
 lab sees it come with the draft and go with it."""
 
@@ -807,8 +809,11 @@ preference -- `post` for the channel box, `comment` for the thread's, \
 `"true"` meaning hidden -- so the two clients agree, and a change made in \
 either reaches the other over the socket. Lab-verified by \
 `formats-from-the-toolbar`: Bold round a selected word, a bulleted list on \
-and off again, and the toggle writing `true` and then `false` to the server. \
-NOT built: the markdown preview eye.
+and off again, and the toggle writing `true` and then `false` to the server. The eye at \
+the bar's far end is built as well: the message as it will be read, drawn \
+by the same code that draws every message, in the box's place until the eye \
+is pressed again -- lab-verified in the same scenario, where a bold word \
+showed in the preview with the box gone, and the box came back.
 
 The thread box is lab-verified: a reply typed into "Reply…" and sent with \
 Return landed under the root on the server, and Escape put the panel \
