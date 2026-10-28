@@ -1426,16 +1426,27 @@ const BACKFILL_PAGE: u32 = 60;
 /// which thirty those are is not something this client can know better
 /// than the person clicking.
 ///
-/// Pace rather than quantity is what keeps it polite. Two speeds: the
-/// recently-active head goes out briskly, because that is what gets
-/// clicked in the first few seconds, and the long tail trickles. A
-/// channel the reader *does* click is never queued behind the guesses
-/// -- that request is issued on the click and shares nothing with
-/// these but the connection pool, which `WARM_AT_ONCE` keeps room in.
+/// Pace rather than quantity is what keeps it polite, and the pace was
+/// far too gentle. Measured against the official client on the same
+/// account: its channel switches land in under a frame, ours in about
+/// 1.9 seconds -- but a third of ours were *also* instant, and those
+/// were the channels already warm. The slow ones were not GTK at all.
+/// They were a round trip, because at four at a time with a quarter of
+/// a second between starts, sixty channels take the better part of ten
+/// seconds to ask for, and the reader is clicking during those ten
+/// seconds.
+///
+/// Ten at a time and a sixtieth of a second between starts puts the
+/// same sixty channels in hand in about two. The server multiplexes
+/// them over one HTTP/2 connection and the official client prefetches
+/// at least as hard; what this must not do is make somebody's work
+/// server carry a burst without end, which is what `WARM_CEILING` is
+/// for. A channel the reader *does* click is never queued behind the
+/// guesses -- that request is issued on the click.
 const WARM_EAGER: usize = 40;
-const WARM_AT_ONCE: usize = 4;
-const WARM_GAP: std::time::Duration = std::time::Duration::from_millis(40);
-const WARM_GAP_TAIL: std::time::Duration = std::time::Duration::from_millis(250);
+const WARM_AT_ONCE: usize = 10;
+const WARM_GAP: std::time::Duration = std::time::Duration::from_millis(15);
+const WARM_GAP_TAIL: std::time::Duration = std::time::Duration::from_millis(60);
 
 /// A ceiling, not a policy: an account in four figures of channels is
 /// not a shape this has been measured against, and an unbounded loop
