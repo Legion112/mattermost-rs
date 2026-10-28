@@ -1134,6 +1134,25 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
         Command::OpenFile { file, name } => open_file(a, &file, &name, events).await,
+        Command::Upload {
+            channel,
+            attachment,
+            token,
+        } => {
+            let name = attachment.name();
+            let answer = match upload_one(a, &channel, &attachment, events).await {
+                Ok(id) => Event::Uploaded {
+                    token,
+                    file: mm_types::FileRef {
+                        id,
+                        name,
+                        ..Default::default()
+                    },
+                },
+                Err(why) => Event::UploadFailed { token, why },
+            };
+            let _ = events.send(answer).await;
+        }
         Command::FileInfo(file) => {
             match fetch(&a.client, &rest::file_info(&file), rest::parse_file_info).await {
                 Ok(info) => {

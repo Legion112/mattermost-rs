@@ -2596,6 +2596,9 @@ fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
         pane,
         tray,
         chosen: Rc::new(RefCell::new(Vec::new())),
+        channel: Rc::new(RefCell::new(None)),
+        pending: Rc::new(RefCell::new(HashMap::new())),
+        commands: emoji.commands.clone(),
     };
     composer.wire_attach(&attach);
     composer.wire_emoji(&emoji_button, emoji);
@@ -2613,7 +2616,19 @@ struct Composer {
     pane: gtk::Box,
     tray: gtk::Box,
     chosen: Rc<RefCell<Vec<crate::bridge::Attachment>>>,
+    /// Where what is attached goes up to. Set when a channel or a
+    /// thread opens; with none, an attachment waits for the send.
+    channel: Rc<RefCell<Option<ChannelId>>>,
+    /// Attachments on their way up, by the token the engine answers
+    /// with, so the answer finds its chip whatever has been removed
+    /// around it since.
+    pending: Rc<RefCell<HashMap<u64, crate::bridge::Attachment>>>,
+    commands: tokio::sync::mpsc::UnboundedSender<Command>,
 }
+
+/// The next token for an upload asked for by this window: a counter,
+/// since two pastes can land in one millisecond.
+static NEXT_UPLOAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// What to call a pasted image on the server.
 ///
@@ -2722,13 +2737,9 @@ impl Composer {
                     let Ok(files) = chosen else { return };
                     for file in files.iter::<gio::File>().flatten() {
                         if let Some(path) = file.path() {
-                            picked
-                                .chosen
-                                .borrow_mut()
-                                .push(crate::bridge::Attachment::File(path));
+                            picked.attach(crate::bridge::Attachment::File(path));
                         }
                     }
-                    picked.refresh_tray();
                 });
         });
     }
@@ -2783,7 +2794,13 @@ impl Composer {
         let chosen = self.chosen.borrow().clone();
         self.tray.set_visible(!chosen.is_empty());
         for (at, attachment) in chosen.iter().enumerate() {
-            let name = attachment.name();
+            // On its way up, or waiting for the send: either way not yet
+            // the server's, and the chip says so.
+            let name = if attachment.uploaded_id().is_some() {
+                attachment.name()
+            } else {
+                format!("{} · uploading…", attachment.name())
+            };
             let chip = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             chip.add_css_class("mmrs-chip");
             chip.append(&gtk::Image::from_icon_name("mail-attachment-symbolic"));
@@ -2831,32 +2848,67 @@ impl Composer {
             let Ok(Some(texture)) = found else {
                 return;
             };
-            composer
-                .chosen
-                .borrow_mut()
-                .push(crate::bridge::Attachment::Pasted {
-                    // The time, so two screenshots in one message do
-                    // not arrive as one name twice.
-                    name: pasted_name(),
-                    data: texture.save_to_png_bytes().to_vec(),
-                });
-            composer.refresh_tray();
+            composer.attach(crate::bridge::Attachment::Pasted {
+                // The time, so two screenshots in one message do
+                // not arrive as one name twice.
+                name: pasted_name(),
+                data: texture.save_to_png_bytes().to_vec(),
+            });
         });
     }
 
     /// Attach files dropped onto the composer.
     fn attach_dropped(&self, files: &gdk::FileList) {
-        {
-            let mut chosen = self.chosen.borrow_mut();
-            chosen.extend(
-                files
-                    .files()
-                    .iter()
-                    .filter_map(gio::File::path)
-                    .map(crate::bridge::Attachment::File),
-            );
+        for path in files.files().iter().filter_map(gio::File::path) {
+            self.attach(crate::bridge::Attachment::File(path));
         }
+    }
+
+    /// Put something in the tray, and on its way to the server at once
+    /// if there is a channel to send it to: the draft can then name it,
+    /// and sending is instant. With no channel yet it waits for the send.
+    fn attach(&self, attachment: crate::bridge::Attachment) {
+        self.chosen.borrow_mut().push(attachment.clone());
         self.refresh_tray();
+        let Some(channel) = self.channel.borrow().clone() else {
+            return;
+        };
+        let token = NEXT_UPLOAD.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.pending.borrow_mut().insert(token, attachment.clone());
+        self.commands
+            .send(Command::Upload {
+                channel,
+                attachment,
+                token,
+            })
+            .ok();
+    }
+
+    /// The server has an attachment: its chip becomes the id. Says
+    /// whether the token was this box's.
+    fn finish_upload(&self, token: u64, file: &mm_types::FileRef) -> bool {
+        let Some(was) = self.pending.borrow_mut().remove(&token) else {
+            return false;
+        };
+        let mut chosen = self.chosen.borrow_mut();
+        if let Some(held) = chosen.iter_mut().find(|held| **held == was) {
+            *held = crate::bridge::Attachment::Uploaded {
+                id: file.id.clone(),
+                name: file.name.clone(),
+            };
+        }
+        drop(chosen);
+        self.refresh_tray();
+        true
+    }
+
+    /// An attachment never reached the server: its chip goes, and its
+    /// name comes back for the complaint. `None` for another box's.
+    fn fail_upload(&self, token: u64) -> Option<String> {
+        let was = self.pending.borrow_mut().remove(&token)?;
+        self.chosen.borrow_mut().retain(|held| *held != was);
+        self.refresh_tray();
+        Some(was.name())
     }
 
     /// What to send, and nothing left behind for the next message.
@@ -7673,6 +7725,8 @@ impl Ui {
             Event::Status(text) => self.set_status(&text),
             Event::FileReady(path) => self.open_on_desktop(&path),
             Event::FileInfo(info) => self.on_file_info(&info),
+            Event::Uploaded { token, file } => self.on_uploaded(token, &file),
+            Event::UploadFailed { token, why } => self.on_upload_failed(token, &why),
             Event::Uploading { name, sent, total } => {
                 let percent = if total == 0 {
                     100
@@ -9172,6 +9226,28 @@ impl Ui {
         );
     }
 
+    /// An attachment is up: its chip becomes the id, and the draft is
+    /// written again, since it can name the file now.
+    fn on_uploaded(&self, token: u64, file: &mm_types::FileRef) {
+        if self.composer.finish_upload(token, file)
+            || self.thread_composer.finish_upload(token, file)
+        {
+            self.remember_drafts();
+        }
+        self.set_status("ready");
+    }
+
+    /// An attachment never got up: its chip goes, with a word on why.
+    fn on_upload_failed(&self, token: u64, why: &str) {
+        let gone = self
+            .composer
+            .fail_upload(token)
+            .or_else(|| self.thread_composer.fail_upload(token));
+        if let Some(name) = gone {
+            self.set_status(&format!("error: could not upload {name}: {why}"));
+        }
+    }
+
     /// A file's record: whichever box has a chip waiting for the name
     /// takes it.
     fn on_file_info(&self, info: &mm_types::FileRef) {
@@ -9781,6 +9857,7 @@ impl Ui {
             CHANNEL_WINDOW
         }));
         crate::perf::marked("open:model", || self.show_model_for(id));
+        *self.composer.channel.borrow_mut() = Some(id.clone());
         crate::perf::marked("open:draft", || self.restore_draft(id));
         crate::perf::marked("open:pane", || self.show_pane(&Pane::Channel));
         // Draw what is already held, before asking for anything. A
@@ -10552,6 +10629,12 @@ impl Ui {
         // one, before the root that names it moves.
         self.remember_drafts();
         *self.thread_root.borrow_mut() = Some(root.clone());
+        *self.thread_composer.channel.borrow_mut() = self
+            .store
+            .borrow()
+            .posts
+            .get(root)
+            .map(|p| p.channel_id.clone());
         self.restore_thread_draft(root);
         self.refresh_thread();
         // Opening it is reading it.

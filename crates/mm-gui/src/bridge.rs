@@ -260,6 +260,14 @@ pub enum Command {
     },
     /// One file's name and size, for a draft that names it by id.
     FileInfo(FileId),
+    /// Put an attachment on the server the moment it is attached, so
+    /// the draft can name it and sending is instant. `token` is the
+    /// window's own name for it, handed back with the answer.
+    Upload {
+        channel: ChannelId,
+        attachment: Attachment,
+        token: u64,
+    },
     /// Fetch an attachment and hand it to the desktop's own handler
     /// for its kind -- a PDF to the PDF viewer, an archive to the
     /// archiver -- rather than draw it, which this client cannot.
@@ -483,6 +491,16 @@ pub enum Event {
     FileReady(std::path::PathBuf),
     /// A file's record, asked for by id: see `Command::FileInfo`.
     FileInfo(mm_types::FileRef),
+    /// An attachment is on the server: see `Command::Upload`.
+    Uploaded {
+        token: u64,
+        file: mm_types::FileRef,
+    },
+    /// It never got there, and why.
+    UploadFailed {
+        token: u64,
+        why: String,
+    },
     /// How far a big attachment has got on its way up, for the status
     /// line: a screencast takes a while, and silence reads as a hang.
     Uploading {
