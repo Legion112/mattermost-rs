@@ -130,9 +130,12 @@ mod imp {
         pub voice: Cell<super::Voice>,
         /// Already grouped and ordered by `mm-core`; the row only draws them.
         pub reactions: RefCell<Vec<mm_core::ReactionSummary>>,
-        /// The author's face, once it has been fetched and decoded. `None`
-        /// draws initials instead, so a row never waits on the network.
-        pub avatar: RefCell<Option<gtk::gdk::Texture>>,
+        /// Whose picture draws in the gutter: the author, or nobody for a
+        /// webhook posting under a borrowed name and for the server
+        /// talking. The picture itself is not here -- it is looked up
+        /// at bind time and swapped in place when it lands, so an avatar
+        /// arriving does not rebuild every row that person wrote.
+        pub avatar_user: RefCell<Option<mm_types::UserId>>,
         /// How many replies hang off this post, for the button that opens
         /// the thread. Zero on a reply, which has no thread of its own.
         pub replies: Cell<i64>,
@@ -191,7 +194,7 @@ pub struct PostRowFields<'a> {
     pub files: Vec<mm_types::FileRef>,
     pub flags: PostRowFlags,
     pub reactions: Vec<mm_core::ReactionSummary>,
-    pub avatar: Option<gtk::gdk::Texture>,
+    pub avatar_user: Option<mm_types::UserId>,
     pub replies: i64,
     pub images: Vec<Attachment>,
     pub cards: Vec<AttachmentView>,
@@ -245,7 +248,7 @@ impl PostRow {
         inner.voice.set(fields.flags.voice);
         inner.grouped.set(fields.flags.grouped);
         inner.reactions.replace(fields.reactions);
-        inner.avatar.replace(fields.avatar);
+        inner.avatar_user.replace(fields.avatar_user);
         inner.replies.set(fields.replies);
         inner.images.replace(fields.images);
         inner.quick_reactions.replace(fields.quick_reactions);
@@ -316,7 +319,10 @@ impl PostRow {
                 "quick_reactions",
                 *a.quick_reactions.borrow() == *b.quick_reactions.borrow(),
             ),
-            ("avatar", *a.avatar.borrow() == *b.avatar.borrow()),
+            (
+                "avatar_user",
+                *a.avatar_user.borrow() == *b.avatar_user.borrow(),
+            ),
         ];
         same.into_iter()
             .find_map(|(what, same)| (!same).then_some(what))
@@ -374,8 +380,8 @@ impl PostRow {
     }
 
     #[must_use]
-    pub fn avatar(&self) -> Option<gtk::gdk::Texture> {
-        self.imp().avatar.borrow().clone()
+    pub fn avatar_user(&self) -> Option<mm_types::UserId> {
+        self.imp().avatar_user.borrow().clone()
     }
 
     #[must_use]

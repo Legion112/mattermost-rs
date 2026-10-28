@@ -719,16 +719,17 @@ struct RowContext {
     links: LinkImages,
     avatars: Avatars,
     emoji: Emoji,
-    /// Every row widget's presence dot, with the list item it belongs
-    /// to, so a status change can recolour the dots on screen without
-    /// rebuilding a row. One entry per widget built, not per bind: the
-    /// item outlives every row that passes through its widget, and
-    /// says which row that is now.
-    dots: Dots,
+    /// Every row widget's gutter -- the face and the presence dot --
+    /// with the list item it belongs to, so a status change can recolour
+    /// the dots on screen and a picture landing can be put on the faces
+    /// on screen without rebuilding a row. One entry per widget built,
+    /// not per bind: the item outlives every row that passes through its
+    /// widget, and says which row that is now.
+    gutters: Gutters,
 }
 
-/// See `RowContext::dots`.
-type Dots = Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, gtk::Box)>>>;
+/// See `RowContext::gutters`.
+type Gutters = Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, adw::Avatar, gtk::Box)>>>;
 
 impl RowContext {
     /// Everything the rows share, made once. The caches start empty and
@@ -748,7 +749,7 @@ impl RowContext {
             links: Rc::new(RefCell::new(HashMap::new())),
             avatars: Rc::new(RefCell::new(HashMap::new())),
             emoji: emoji.clone(),
-            dots: Rc::new(RefCell::new(Vec::new())),
+            gutters: Rc::new(RefCell::new(Vec::new())),
         }
     }
 }
@@ -4455,8 +4456,8 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     // face, so grouped messages line up under the one that named them.
     // `adw::Avatar` draws initials when there is no picture, which means a
     // row never has to wait on the network to look finished.
-    let (gutter, _, dot) = face_with_dot(32);
-    ctx.dots.borrow_mut().push((item.downgrade(), dot));
+    let (gutter, face, dot) = face_with_dot(32);
+    ctx.gutters.borrow_mut().push((item.downgrade(), face, dot));
     let main = gtk::Box::new(gtk::Orientation::Vertical, 2);
     main.set_hexpand(true);
     // Attached images, above the file line that names them. Rebuilt on each
@@ -5843,10 +5844,17 @@ impl RowWidgets {
 /// Handing a picture to an `AdwAvatar` makes it build a rounded copy,
 /// and a recycled row often carries the same author as the row it
 /// replaced -- so most of those copies were of a picture already shown.
-fn bind_face(face: &adw::Avatar, data: &PostRow) {
+fn bind_face(face: &adw::Avatar, data: &PostRow, avatars: &Avatars) {
     face.set_text(Some(&data.author()));
-    let wanted = data.avatar();
-    let same = match (face.custom_image(), wanted.as_ref()) {
+    let wanted = data
+        .avatar_user()
+        .and_then(|user| avatars.borrow().get(&user).cloned());
+    set_face(face, wanted.as_ref());
+}
+
+/// Put a picture on a face, when it is not the one already there.
+fn set_face(face: &adw::Avatar, wanted: Option<&gdk::Texture>) {
+    let same = match (face.custom_image(), wanted) {
         (Some(shown), Some(want)) => {
             shown.as_ptr() == want.clone().upcast::<gdk::Paintable>().as_ptr()
         }
@@ -5854,7 +5862,7 @@ fn bind_face(face: &adw::Avatar, data: &PostRow) {
         _ => false,
     };
     if !same {
-        face.set_custom_image(wanted.as_ref());
+        face.set_custom_image(wanted);
     }
 }
 
@@ -5908,7 +5916,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     let presence = ctx.store.borrow().presence(&data.author_id());
     set_presence(&dot, presence, !grouped, false);
     main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
-    bind_face(&face, &data);
+    bind_face(&face, &data, &ctx.avatars);
 
     let system = data.is_system();
     // Still the same person talking: the author line would just repeat
@@ -8367,7 +8375,7 @@ impl Ui {
     fn refresh_dots(&self) {
         crate::perf::marked("dots", || {
             let store = self.store.borrow();
-            self.row_ctx.dots.borrow_mut().retain(|(item, dot)| {
+            self.row_ctx.gutters.borrow_mut().retain(|(item, _, dot)| {
                 let Some(item) = item.upgrade() else {
                     return false;
                 };
@@ -8378,6 +8386,32 @@ impl Ui {
                         !row.is_grouped(),
                         false,
                     );
+                }
+                true
+            });
+        });
+    }
+
+    /// One person's picture has landed: put it on their faces on screen.
+    ///
+    /// The row-side half of what `refresh_dots` does for presence. The
+    /// rows themselves do not change -- a row says *whose* face it
+    /// wears, not which picture -- so nothing is spliced and nothing is
+    /// re-measured; the widgets that exist are touched, and the ones not
+    /// yet built will look the picture up when they are bound.
+    fn refresh_faces(&self, user: &UserId) {
+        crate::perf::marked("faces", || {
+            let picture = self.avatars.borrow().get(user).cloned();
+            self.row_ctx.gutters.borrow_mut().retain(|(item, face, _)| {
+                let Some(item) = item.upgrade() else {
+                    return false;
+                };
+                if item
+                    .item()
+                    .and_downcast::<PostRow>()
+                    .is_some_and(|row| row.avatar_user().as_ref() == Some(user))
+                {
+                    set_face(face, picture.as_ref());
                 }
                 true
             });
@@ -9339,13 +9373,9 @@ impl Ui {
         // so it borrows nobody's face.
         let system = post.is_system();
         let overridden = post.override_username().is_some() || system;
-        let avatar = if overridden {
-            None
-        } else {
-            self.avatars.borrow().get(&post.user_id).cloned()
-        };
-        if avatar.is_none()
-            && !overridden
+        let avatar_user = (!overridden).then(|| post.user_id.clone());
+        if !overridden
+            && !self.avatars.borrow().contains_key(&post.user_id)
             && !post.user_id.as_str().is_empty()
             && self.asked.borrow_mut().insert(post.user_id.clone())
         {
@@ -9427,7 +9457,7 @@ impl Ui {
             // What the author typed, not what is drawn: "copy text" should
             // paste back as markdown, the way it was written.
             plain_body: post.message.clone(),
-            avatar,
+            avatar_user,
             images,
             cards: post
                 .message_attachments()
@@ -9615,7 +9645,7 @@ impl Ui {
             Event::OlderPosts { channel, page } => {
                 crate::perf::marked("older_page", || self.on_older_posts(&channel, &page));
             }
-            Event::Avatar { user, image } => self.on_avatar(user, image),
+            Event::Avatar { user, image } => self.on_avatar(&user, image),
             Event::File { file, image } => self.on_file(file, image),
             Event::LinkImage { url, image } => {
                 let bytes = glib::Bytes::from_owned(image);
@@ -9955,11 +9985,11 @@ impl Ui {
     /// decode on the engine, and for message images it will stay there -- an
     /// avatar is at most 128px and decodes in well under a millisecond,
     /// which is cheaper than the round trip that moving it would cost.
-    fn on_avatar(&self, user: UserId, image: Vec<u8>) {
+    fn on_avatar(&self, user: &UserId, image: Vec<u8>) {
         crate::perf::marked("on_avatar", || self.on_avatar_inner(user, image));
     }
 
-    fn on_avatar_inner(&self, user: UserId, image: Vec<u8>) {
+    fn on_avatar_inner(&self, user: &UserId, image: Vec<u8>) {
         let bytes = glib::Bytes::from_owned(image);
         // Scaled on the way in, the same as a custom emoji and for a
         // sharper reason. Mattermost serves a profile picture at 128
@@ -9991,9 +10021,13 @@ impl Ui {
                 Err(_) => return,
             },
         };
-        self.avatars.borrow_mut().insert(user, texture);
+        self.avatars.borrow_mut().insert(user.clone(), texture);
+        // The rows on screen wear it at once, without being rebuilt.
+        self.refresh_faces(user);
         // A face is drawn in the sidebar for a DM, and the rows it is
-        // built from have not changed, so say so explicitly.
+        // built from have not changed, so say so explicitly. The thread
+        // pane and the member list build their faces by hand and are
+        // redrawn whole, which the back-off keeps cheap.
         self.sidebar_stale.set(true);
         self.redraw_soon();
     }

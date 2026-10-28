@@ -490,12 +490,19 @@ seven-pixel dot.
 
 The row carries the author now and the dot is read from the store at
 bind time. Between binds, `refresh_dots` recolours the dots on the
-widgets that exist: `RowContext::dots` holds one `(ListItem, dot)` per
+widgets that exist: `RowContext::gutters` holds one `(ListItem, face, dot)` per
 row widget built -- not per bind -- and the item says which row its
 widget is showing now. Items whose widget is gone are dropped on the
 way past. A status change costs 0.15ms in the lab and no splice at
 all; the trace that used to say `23 of 50 rows differ … by presence`
 says nothing.
 
-The same shape would serve avatars, which still replace a row per
-author when the picture lands, once per author per channel.
+Nor is the picture. A row says *whose* face it wears (`avatar_user`,
+nobody for a webhook under a borrowed name) and the texture is looked
+up at bind time; when one lands, `refresh_faces` puts it on the faces
+on screen through the same registry. Before, a picture arriving
+replaced every row by that author -- `16 of 22 rows differ … by
+avatar` on the first draw of a channel, once per author per channel,
+each one a row rebuilt for a 32-pixel circle. Now it is `faces 0.03ms`
+and no splice; the first draw of the lab's Long channel went from 45
+to 31ms after the click.
