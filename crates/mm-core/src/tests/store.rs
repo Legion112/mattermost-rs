@@ -857,6 +857,110 @@ fn reply_count_prefers_the_servers_number_but_never_undercounts() {
     assert_eq!(s.reply_count(&PostId::new("absent")), 0);
 }
 
+/// The bug the Docker lab found: two endpoints send the same post with the
+/// same `update_at`, one of them with the reply count and one with zero, and
+/// whichever answered second used to be thrown away. Whether a thread showed
+/// "2 replies" or nothing came down to which request won the race.
+#[test]
+fn a_second_copy_of_a_post_may_only_add_to_what_is_known() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+
+    // The threads list first: it embeds the root with reply_count 0.
+    let bare = post("p1", "c1", 10);
+    assert_eq!(bare.reply_count, 0);
+    s.apply_post_list(&c1, &page(vec![bare]), PageAnchor::Newest);
+    assert_eq!(s.reply_count(&PostId::new("p1")), 0);
+
+    // Then the channel page, byte-identical but for the count.
+    let mut counted = post("p1", "c1", 10);
+    counted.reply_count = 2;
+    let changes = s.apply_post_list(&c1, &page(vec![counted]), PageAnchor::Newest);
+    assert!(
+        changes.contains(&Change::Post(PostId::new("p1"))),
+        "{changes:?}"
+    );
+    assert_eq!(s.reply_count(&PostId::new("p1")), 2);
+
+    // And the other way round: the informed copy must not be undone by the
+    // bare one arriving afterwards.
+    let mut s = seeded();
+    let mut counted = post("p2", "c1", 20);
+    counted.reply_count = 2;
+    s.apply_post_list(&c1, &page(vec![counted]), PageAnchor::Newest);
+    let changes = s.apply_post_list(&c1, &page(vec![post("p2", "c1", 20)]), PageAnchor::Newest);
+    assert!(changes.is_empty(), "nothing was learned: {changes:?}");
+    assert_eq!(s.reply_count(&PostId::new("p2")), 2);
+}
+
+/// Metadata is absent from some endpoints' copy of a post, and absent has to
+/// mean "not loaded" rather than "no files" -- otherwise opening a thread
+/// strips the attachments off a message that was showing them.
+#[test]
+fn a_copy_without_metadata_does_not_erase_the_metadata_already_held() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let mut rich = post("p1", "c1", 10);
+    rich.metadata = serde_json::json!({ "files": [{ "id": "f1", "name": "a.png" }] });
+    s.apply_post_list(&c1, &page(vec![rich.clone()]), PageAnchor::Newest);
+
+    // The same post, one edit newer, from an endpoint that sends no metadata.
+    let mut edited = post("p1", "c1", 10);
+    edited.update_at = Timestamp(30);
+    edited.message = "edited".to_owned();
+    s.apply_post_list(&c1, &page(vec![edited]), PageAnchor::Newest);
+
+    let held = &s.posts[&PostId::new("p1")];
+    assert_eq!(held.message, "edited", "the newer text wins");
+    assert_eq!(held.metadata, rich.metadata, "the known metadata survives");
+}
+
+/// An edit that arrives out of order must still not regress a newer one.
+#[test]
+fn an_older_copy_of_a_post_is_still_refused() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let mut newer = post("p1", "c1", 10);
+    newer.update_at = Timestamp(90);
+    newer.message = "the newer text".to_owned();
+    newer.reply_count = 2;
+    s.apply_post_list(&c1, &page(vec![newer]), PageAnchor::Newest);
+
+    let mut older = post("p1", "c1", 10);
+    older.update_at = Timestamp(50);
+    older.message = "the older text".to_owned();
+    older.reply_count = 7;
+    let changes = s.apply_post_list(&c1, &page(vec![older]), PageAnchor::Newest);
+    assert!(changes.is_empty(), "{changes:?}");
+    let held = &s.posts[&PostId::new("p1")];
+    assert_eq!(held.message, "the newer text");
+    assert_eq!(held.reply_count, 2, "and its count is not raised either");
+}
+
+/// A followed thread states its own reply count, and states it correctly
+/// where the root post embedded beside it says zero. That is the number to
+/// draw while the channel page is still in flight.
+#[test]
+fn a_followed_thread_supplies_the_count_its_root_post_omits() {
+    let mut s = seeded();
+    let root = PostId::new("p1");
+    s.apply_threads(&mm_types::ThreadList {
+        threads: vec![mm_types::UserThread {
+            id: root.clone(),
+            reply_count: 4,
+            post: Some(post("p1", "c1", 10)),
+            ..mm_types::UserThread::default()
+        }],
+        ..mm_types::ThreadList::default()
+    });
+    assert_eq!(s.reply_count(&root), 4);
+    assert_eq!(
+        s.reply_count(&PostId::new("p9")),
+        0,
+        "and no thread, no count"
+    );
+}
+
 /// A deleted reply must not be counted, or a thread shows replies that are
 /// not there.
 #[test]

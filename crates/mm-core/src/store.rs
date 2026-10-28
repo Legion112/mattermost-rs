@@ -1360,15 +1360,56 @@ impl Store {
                     .collect(),
             );
         }
-        match self.posts.get(&incoming.id) {
-            // An out-of-order edit must not regress a newer one, and a
-            // replayed `posted` must not resurrect a deleted post.
-            Some(held) if held.update_at >= incoming.update_at => false,
-            _ => {
-                self.posts.insert(incoming.id.clone(), incoming);
-                true
-            }
+        let Some(held) = self.posts.get(&incoming.id) else {
+            self.posts.insert(incoming.id.clone(), incoming);
+            return true;
+        };
+        // An out-of-order edit must not regress a newer one, and a replayed
+        // `posted` must not resurrect a deleted post.
+        if held.update_at > incoming.update_at {
+            return false;
         }
+        let merged = Self::better_informed(held, incoming);
+        if *held == merged {
+            return false;
+        }
+        self.posts.insert(merged.id.clone(), merged);
+        true
+    }
+
+    /// One post from two copies of it, keeping whichever field is known.
+    ///
+    /// Endpoints disagree about how much of a post they send, and the same
+    /// `update_at` on both copies means neither is newer -- so "the second
+    /// one loses" throws information away rather than preventing a
+    /// regression. That is not hypothetical: `GET /users/{id}/teams/{id}/
+    /// threads` embeds each thread's root post with **`reply_count: 0`**,
+    /// while the channel page carries the real count on a byte-identical
+    /// `update_at`. Whichever request answered second was discarded, so
+    /// whether a thread showed "2 replies" or nothing at all came down to
+    /// which of two requests won a race. It showed replies on a busy server
+    /// and none on a quiet one, which is the worst way for a bug to behave.
+    ///
+    /// `incoming` is the base because it is the same version or newer; only
+    /// the fields an endpoint can legitimately omit are taken from `held`.
+    fn better_informed(held: &Post, incoming: Post) -> Post {
+        let mut post = incoming;
+        // A deletion is the same kind of fact: the copy that carries it
+        // knows something the other one does not, and no endpoint ever
+        // un-deletes a post. Without this a replayed `posted` for a
+        // tombstoned id puts the message back on screen.
+        if held.is_deleted() && !post.is_deleted() {
+            post.delete_at = held.delete_at;
+        }
+        // Never reported lower by an endpoint that knows it; reported as
+        // zero by every endpoint that does not.
+        post.reply_count = post.reply_count.max(held.reply_count);
+        // Absent metadata means "not loaded", not "no files" -- the same
+        // distinction `FileRef` is documented around.
+        if post.metadata.is_null() && !held.metadata.is_null() {
+            post.metadata = held.metadata.clone();
+        }
+        post
     }
 
     // ------------------------------------------------------------ WebSocket
@@ -1893,12 +1934,23 @@ impl Store {
     #[must_use]
     pub fn reply_count(&self, root: &PostId) -> i64 {
         let stated = self.posts.get(root).map_or(0, |p| p.reply_count);
+        // A followed thread states its own count, and states it correctly
+        // even where the root post embedded beside it says zero. For a
+        // thread in this list that makes the number right without waiting
+        // for the channel page to arrive.
+        let followed = self
+            .threads
+            .iter()
+            .find(|thread| thread.id == *root)
+            .map_or(0, |thread| thread.reply_count);
         let held = self
             .posts
             .values()
             .filter(|p| !p.is_deleted() && p.root_id == *root)
             .count();
-        stated.max(i64::try_from(held).unwrap_or(i64::MAX))
+        stated
+            .max(followed)
+            .max(i64::try_from(held).unwrap_or(i64::MAX))
     }
 }
 
