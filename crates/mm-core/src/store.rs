@@ -574,6 +574,43 @@ impl Store {
             .collect()
     }
 
+    /// People who could be added to a channel, matching what is typed.
+    ///
+    /// The mirror of `mention_candidates`: that one puts the people who
+    /// are already here first, and this one leaves them out entirely.
+    /// Deactivated accounts and bots are not offered -- the server
+    /// accepts both and neither can read anything -- and nor is the
+    /// reader, who is already in the channel by definition of being able
+    /// to open its menu.
+    ///
+    /// Ranked by the same `mention_rank`, so "ada" offers the same person
+    /// here as it does after an `@`.
+    #[must_use]
+    pub fn not_in_channel(&self, channel: &ChannelId, typed: &str, limit: usize) -> Vec<User> {
+        let wanted = typed.trim().to_lowercase();
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        let members = self.channel_members.get(channel);
+        let mut found: Vec<(u8, &User)> = self
+            .users
+            .values()
+            .filter(|u| u.delete_at.is_zero() && !u.is_bot && !u.username.is_empty())
+            .filter(|u| u.id != self.me)
+            .filter(|u| !members.is_some_and(|m| m.contains(&u.id)))
+            .filter_map(|u| Some((mention_rank(u, &wanted)?, u)))
+            .collect();
+        found.sort_by(|(tier, a), (other_tier, b)| {
+            tier.cmp(other_tier)
+                .then_with(|| a.username.cmp(&b.username))
+        });
+        found
+            .into_iter()
+            .map(|(_, user)| user.clone())
+            .take(limit)
+            .collect()
+    }
+
     /// When each person last said anything in a channel.
     ///
     /// Replies count, unlike `channel_posts`: someone answering in a
@@ -1050,6 +1087,69 @@ impl Store {
         vec![Change::Sidebar]
     }
 
+    /// Leave a channel here and now, without waiting for the server.
+    ///
+    /// Everything the client knows about it goes: it is out of the sidebar,
+    /// its history is dropped, and its roster with it. Optimistic like
+    /// muting and marking read -- the row disappearing when the button is
+    /// pressed is the whole point, and if the request fails the next sync
+    /// brings the channel back, which is the right way round. Leaving it on
+    /// screen until a round trip finished would read as the click doing
+    /// nothing.
+    ///
+    /// Also what runs when the server says somebody removed this reader,
+    /// which is the same situation arriving from the other direction.
+    pub fn leave_channel_locally(&mut self, channel: &ChannelId) -> Vec<Change> {
+        let known = self.channels.remove(channel).is_some();
+        let member = self.my_member.remove(channel).is_some();
+        self.timelines.remove(channel);
+        self.stats.remove(channel);
+        self.channel_members.remove(channel);
+        if known || member {
+            vec![Change::Sidebar]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Record that somebody is now in a channel, or no longer is.
+    ///
+    /// Only the roster: whether the *reader* is still in it is a different
+    /// question, answered by [`Store::leave_channel_locally`]. A channel
+    /// whose roster was never fetched is left alone rather than created
+    /// holding one person -- an incomplete roster that looks complete is
+    /// what makes `@` offer three names in a channel of forty.
+    pub fn set_channel_member(
+        &mut self,
+        channel: &ChannelId,
+        user: &UserId,
+        present: bool,
+    ) -> Vec<Change> {
+        let Some(roster) = self.channel_members.get_mut(channel) else {
+            return Vec::new();
+        };
+        let changed = if present {
+            roster.insert(user.clone())
+        } else {
+            roster.remove(user)
+        };
+        if changed {
+            // The member count beside the channel's name is drawn from
+            // `stats`, so it has to move with the roster or the two
+            // disagree on screen until the channel is opened again.
+            if let Some(stats) = self.stats.get_mut(channel) {
+                stats.member_count = if present {
+                    stats.member_count.saturating_add(1)
+                } else {
+                    stats.member_count.saturating_sub(1)
+                };
+            }
+            vec![Change::Unread(channel.clone())]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Whether this reader has saved a post.
     ///
     /// Saved posts are preferences in the `flagged_post` category, keyed
@@ -1426,6 +1526,27 @@ impl Store {
             }
             WsEvent::PostDeleted(post) => self.on_deleted(post),
             WsEvent::EmojiAdded(emoji) => self.apply_custom_emoji(std::slice::from_ref(emoji)),
+            WsEvent::UserAddedToChannel {
+                channel_id,
+                user_id,
+            } => {
+                // Being added to a channel is not a roster change for this
+                // client -- it is a channel it has never heard of. The
+                // sidebar cannot draw it from an id, so the caller fetches
+                // it; all that happens here is the roster, for the case
+                // where it is somebody else.
+                self.set_channel_member(channel_id, user_id, true)
+            }
+            WsEvent::UserRemovedFromChannel {
+                channel_id,
+                user_id,
+            } => {
+                if *user_id == self.me {
+                    self.leave_channel_locally(channel_id)
+                } else {
+                    self.set_channel_member(channel_id, user_id, false)
+                }
+            }
             WsEvent::ReactionAdded(reaction) => {
                 self.reactions
                     .entry(reaction.post_id.clone())

@@ -107,7 +107,26 @@ impl Channel {
     pub fn is_deleted(&self) -> bool {
         !self.delete_at.is_zero()
     }
+
+    /// Whether the server will let anybody out of this channel.
+    ///
+    /// The default channel of every team cannot be left: the server
+    /// answers 403, and the member stays. It is identified by its URL
+    /// name, which is `town-square` on every Mattermost server and is
+    /// not configurable -- `Off-Topic`, created alongside it, is an
+    /// ordinary channel that can be left like any other.
+    ///
+    /// A conversation has no membership to leave either: a DM is closed
+    /// rather than left, which is a preference rather than this call.
+    #[must_use]
+    pub fn can_be_left(&self) -> bool {
+        matches!(self.kind, ChannelType::Open | ChannelType::Private)
+            && self.name != DEFAULT_CHANNEL
+    }
 }
+
+/// The URL name of every team's default channel.
+const DEFAULT_CHANNEL: &str = "town-square";
 
 /// `notify_props.mark_unread`. There is no separate "muted" flag on the wire:
 /// muting a channel *is* setting this to `mention`.
@@ -172,6 +191,24 @@ pub struct ChannelStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default channel is refused by the server, with a 403 and no
+    /// change -- so the button for it has to be off rather than hopeful.
+    #[test]
+    fn only_a_real_channel_that_is_not_town_square_can_be_left() {
+        let channel = |name: &str, kind: ChannelType| Channel {
+            name: name.to_owned(),
+            kind,
+            ..Channel::default()
+        };
+        assert!(channel("engineering", ChannelType::Open).can_be_left());
+        assert!(channel("secret-plans", ChannelType::Private).can_be_left());
+        assert!(!channel("town-square", ChannelType::Open).can_be_left());
+        // A conversation is closed, not left, and that is a preference.
+        assert!(!channel("u1__u2", ChannelType::Direct).can_be_left());
+        assert!(!channel("abc", ChannelType::Group).can_be_left());
+        assert!(!channel("abc", ChannelType::Other("X".into())).can_be_left());
+    }
 
     /// Every string on a channel tolerates `null`, for the same reason
     /// the ones on `User` do: `#[serde(default)]` covers a missing key,

@@ -503,3 +503,13 @@ fn post(channel: &str, message: &str, root: Option<&str>) -> HttpRequest {
     }
     HttpRequest::new(Method::Post, "/api/v4/posts").json(&body)
 }
+
+/// Log in as a seeded account and hand back the token.
+///
+/// For the lab's own tools, which need to be somebody to watch a socket.
+pub async fn token_for(username: &str) -> Result<String> {
+    Api::anonymous()?
+        .login(username)
+        .await
+        .map(|(token, _)| token)
+}

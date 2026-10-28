@@ -18,7 +18,7 @@
 //!   resync over REST.
 
 use crate::error::AppError;
-use mm_types::{ChannelId, ChannelMember, Post, Reaction, User};
+use mm_types::{ChannelId, ChannelMember, Post, Reaction, User, UserId};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -123,10 +123,47 @@ pub enum WsEvent {
     /// is unknown until the next sync, so the person who has just added
     /// one sees their own shortcode as text when they use it.
     EmojiAdded(mm_types::CustomEmoji),
+    /// Somebody joined a channel, or was added to one.
+    ///
+    /// The channel is in `broadcast`, never in `data`, and the same shape
+    /// reaches everyone: the person added gets `broadcast.user_id` set to
+    /// themselves as well, which is the only difference.
+    UserAddedToChannel {
+        channel_id: ChannelId,
+        user_id: UserId,
+    },
+    /// Somebody left a channel, or was removed from one.
+    ///
+    /// **Not the mirror image of `user_added`.** The copy sent to everyone
+    /// still in the channel carries `broadcast.channel_id` and
+    /// `data.user_id`; the copy sent to the person who left carries
+    /// `data.channel_id` and `broadcast.user_id`, with **no**
+    /// `broadcast.channel_id` at all. Reading one field for each from
+    /// whichever side has it is not tidiness, it is the difference between
+    /// noticing you were removed and not.
+    ///
+    /// Measured in the lab against 12.0.1, both directions.
+    UserRemovedFromChannel {
+        channel_id: ChannelId,
+        user_id: UserId,
+    },
     /// Anything else, kept so it can be logged and counted.
     Unknown {
         event: String,
     },
+}
+
+/// The envelope that says who a frame was addressed to.
+///
+/// Several events put what identifies them here rather than in `data`, so a
+/// decoder that reads `data` alone classifies them as `Unknown` and the
+/// client simply never notices what happened.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct Broadcast {
+    #[serde(default)]
+    pub(crate) channel_id: String,
+    #[serde(default)]
+    pub(crate) user_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +180,8 @@ struct RawFrame {
     status: String,
     #[serde(default)]
     error: Option<AppError>,
+    #[serde(default)]
+    broadcast: Broadcast,
 }
 
 /// Connection state and sequence bookkeeping.
@@ -299,7 +338,7 @@ impl WsProtocol {
             self.last_event_seq = Some(seq);
         }
 
-        match decode_event(&frame.event, &frame.data) {
+        match decode_event(&frame.event, &frame.data, &frame.broadcast) {
             Ok(event) => out.push(WsOutcome::Event(event)),
             Err(detail) => out.push(WsOutcome::Undecodable { detail }),
         }
@@ -314,7 +353,11 @@ impl WsProtocol {
 /// the server calls `.ToJSON()` on the model before putting it in the data
 /// map. The exceptions are `user` on `user_updated` and `channel_times` on
 /// `multiple_channels_viewed`, which are ordinary nested values.
-fn decode_event(event: &str, data: &serde_json::Value) -> Result<WsEvent, String> {
+fn decode_event(
+    event: &str,
+    data: &serde_json::Value,
+    broadcast: &Broadcast,
+) -> Result<WsEvent, String> {
     match event {
         "posted" => Ok(WsEvent::Posted {
             post: nested_json(data, "post")?,
@@ -354,6 +397,22 @@ fn decode_event(event: &str, data: &serde_json::Value) -> Result<WsEvent, String
             serde_json::from_value(data.get("user").cloned().unwrap_or_default())
                 .map_err(|e| format!("user_updated.user: {e}"))?,
         )),
+        "user_added" => Ok(WsEvent::UserAddedToChannel {
+            channel_id: ChannelId::new(broadcast.channel_id.clone()),
+            user_id: UserId::new(str_field(data, "user_id")),
+        }),
+        // Each field from whichever side of the frame carries it: see the
+        // variant's documentation for why the two copies differ.
+        "user_removed" => Ok(WsEvent::UserRemovedFromChannel {
+            channel_id: ChannelId::new(match str_field(data, "channel_id") {
+                empty if empty.is_empty() => broadcast.channel_id.clone(),
+                stated => stated,
+            }),
+            user_id: UserId::new(match str_field(data, "user_id") {
+                empty if empty.is_empty() => broadcast.user_id.clone(),
+                stated => stated,
+            }),
+        }),
         other => Ok(WsEvent::Unknown {
             event: other.to_owned(),
         }),

@@ -186,6 +186,22 @@ pub enum Command {
     /// The server stops moving a status it was told, so choosing one is
     /// also choosing to keep it until it is changed again.
     SetPresence(mm_types::Presence),
+    /// Leave a channel.
+    ///
+    /// The server has no "leave": it is removing yourself, and it posts a
+    /// system notice into the channel saying so. Nothing the client can do
+    /// about that, and worth knowing before pressing it.
+    LeaveChannel(ChannelId),
+    /// Put somebody into a channel.
+    AddToChannel {
+        channel: ChannelId,
+        user: UserId,
+    },
+    /// Take somebody out of a channel. Also posts a notice.
+    RemoveFromChannel {
+        channel: ChannelId,
+        user: UserId,
+    },
     /// Mute a channel, or let it speak again.
     SetMuted {
         channel: ChannelId,

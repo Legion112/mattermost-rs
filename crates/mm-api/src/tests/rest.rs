@@ -1001,6 +1001,17 @@ fn joining_and_opening_a_dm() {
     };
     assert_eq!(body, r#"{"user_id":"u-me"}"#);
 
+    // Leaving is removing yourself: the same route, and whose id is in the
+    // path is the only thing that says which of the two it is.
+    let leave = remove_from_channel(&ChannelId::new("c1"), &me);
+    assert_eq!(leave.method, Method::Delete);
+    assert_eq!(leave.path, "/api/v4/channels/c1/members/u-me");
+    assert_eq!(leave.body, Body::Empty);
+    assert_eq!(
+        remove_from_channel(&ChannelId::new("c1"), &UserId::new("u2")).path,
+        "/api/v4/channels/c1/members/u2"
+    );
+
     let dm = open_direct(&me, &UserId::new("u2"));
     assert_eq!(dm.path, "/api/v4/channels/direct");
     let Body::Json(body) = &dm.body else {

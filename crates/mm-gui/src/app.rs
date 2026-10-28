@@ -5770,6 +5770,32 @@ const EDITOR_HEIGHT: i32 = 260;
 /// type another letter rather than scroll a list.
 const MENTIONS_OFFERED: usize = 8;
 
+/// "4 MEMBERS", and the two counts that do not read that way.
+fn members_heading(count: usize) -> String {
+    match count {
+        0 => "MEMBERS".to_owned(),
+        // A DM with yourself really is one member, and "1 MEMBERS" reads
+        // as a bug in the client.
+        1 => "1 MEMBER".to_owned(),
+        n => format!("{n} MEMBERS"),
+    }
+}
+
+/// Restate the heading from what is actually in the list.
+///
+/// Counted from the widget rather than from the store, because the row
+/// has just been added or taken away by hand and the heading beside it
+/// has to agree with what the reader can see.
+fn restate_members(list: &gtk::ListBox, heading: &gtk::Label) {
+    let count = (0..).map_while(|i| list.row_at_index(i)).count();
+    heading.set_label(&members_heading(count));
+}
+
+/// How many candidates "add people" offers. Fewer than the mention
+/// popup: this list sits inside the channel menu, under everything
+/// else in it, and a long one pushes the roster off the screen.
+const PEOPLE_OFFERED: usize = 6;
+
 /// How many emoji a half-typed `:` offers. Fewer than the picker's
 /// grid, because this is a list with a shortcode on every row and it
 /// sits over the message being written.
@@ -6210,6 +6236,7 @@ impl Ui {
                 ..
             }) => self.on_typing(channel_id, UserId::new(&user_id)),
             Event::Ws(ws) => {
+                self.on_membership(&ws);
                 self.maybe_notify(&ws);
                 let changes = self.store.borrow_mut().apply_ws(&ws);
                 if changes.is_empty() {
@@ -6710,27 +6737,35 @@ impl Ui {
         column.append(&self.mute_switch(&channel));
         column.append(&self.notify_level(&channel));
 
-        let people = store.channel_roster(&channel);
-        column.append(
-            &gtk::Label::builder()
-                .label(match people.len() {
-                    0 => "MEMBERS".to_owned(),
-                    // A DM with yourself really is one member, and
-                    // "1 MEMBERS" reads as a bug in the client.
-                    1 => "1 MEMBER".to_owned(),
-                    n => format!("{n} MEMBERS"),
-                })
-                .xalign(0.0)
-                .margin_top(12)
-                .css_classes(["dim-label", "caption-heading"])
-                .build(),
+        let people: Vec<mm_types::User> = store
+            .channel_roster(&channel)
+            .into_iter()
+            .cloned()
+            .collect();
+        let tally = gtk::Label::builder()
+            .label(members_heading(people.len()))
+            .xalign(0.0)
+            .margin_top(12)
+            .css_classes(["dim-label", "caption-heading"])
+            .build();
+        column.append(&tally);
+        let kind = store.channels.get(&channel).map(|c| c.kind.clone());
+        drop(store);
+        // Who may be taken out of a channel: nobody, in a conversation --
+        // a DM has no membership to edit, and leaving a group DM is
+        // "close", which is a different thing the server calls something
+        // else. Not yourself either: that is the button at the bottom.
+        let editable = matches!(
+            kind,
+            Some(mm_types::ChannelType::Open | mm_types::ChannelType::Private)
         );
+
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
             .css_classes(["navigation-sidebar"])
             .build();
         for user in &people {
-            list.append(&self.member_row(user));
+            list.append(&self.member_row(&channel, user, editable, &tally));
         }
         if people.is_empty() {
             // The roster arrives with the channel's first page, so this
@@ -6747,6 +6782,10 @@ impl Ui {
         );
 
         let menu = gtk::Popover::builder().child(&column).build();
+        if editable {
+            column.append(&self.add_people(&channel, &list, &tally));
+            column.append(&self.leave_button(&channel, &menu));
+        }
         menu.set_parent(at);
         menu.connect_closed(gtk::Popover::unparent);
         menu.popup();
@@ -6866,7 +6905,13 @@ impl Ui {
     }
 
     /// One person in the member list: their face, their name, their dot.
-    fn member_row(&self, user: &mm_types::User) -> gtk::ListBoxRow {
+    fn member_row(
+        &self,
+        channel: &ChannelId,
+        user: &mm_types::User,
+        removable: bool,
+        tally: &gtk::Label,
+    ) -> gtk::ListBoxRow {
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         line.set_margin_start(6);
         line.set_margin_end(6);
@@ -6893,7 +6938,278 @@ impl Ui {
                     .build(),
             );
         }
+
+        let row = gtk::ListBoxRow::builder().child(&line).build();
+        // Not yourself: taking yourself out of a channel is leaving it,
+        // and that is a button of its own with a question attached.
+        if removable && user.id != self.store.borrow().me {
+            let take_out = gtk::Button::builder()
+                .icon_name("list-remove-symbolic")
+                .tooltip_text(format!("Remove @{} from this channel", user.username))
+                .valign(gtk::Align::Center)
+                .halign(gtk::Align::End)
+                .hexpand(true)
+                .css_classes(["flat", "circular"])
+                .build();
+            let ui = self.clone();
+            let channel = channel.clone();
+            let who = user.id.clone();
+            let row_to_drop = row.clone();
+            let tally = tally.clone();
+            take_out.connect_clicked(move |button| {
+                // Once: the server answers 404 the second time, and a
+                // double click should not read as a failure.
+                button.set_sensitive(false);
+                ui.commands
+                    .send(Command::RemoveFromChannel {
+                        channel: channel.clone(),
+                        user: who.clone(),
+                    })
+                    .ok();
+                ui.store
+                    .borrow_mut()
+                    .set_channel_member(&channel, &who, false);
+                // The row rather than the whole list: rebuilding the menu
+                // under the pointer moves everything else the reader was
+                // about to click.
+                if let Some(list) = row_to_drop.parent().and_downcast::<gtk::ListBox>() {
+                    list.remove(&row_to_drop);
+                    restate_members(&list, &tally);
+                }
+                ui.redraw_soon();
+            });
+            line.append(&take_out);
+        }
+        row
+    }
+
+    /// Put somebody into this channel.
+    ///
+    /// The candidates come from the server, not from the store: the point
+    /// is the people who are *not* in this channel, and the store only
+    /// knows the ones this client has already seen. `autocomplete_users`
+    /// answers with exactly that split, and the composer's `@` popup
+    /// already asks for it -- so this is the same request read the other
+    /// way round.
+    fn add_people(
+        &self,
+        channel: &ChannelId,
+        roster: &gtk::ListBox,
+        tally: &gtk::Label,
+    ) -> gtk::Box {
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        column.set_margin_top(12);
+        column.append(
+            &gtk::Label::builder()
+                .label("ADD PEOPLE")
+                .xalign(0.0)
+                .css_classes(["dim-label", "caption-heading"])
+                .build(),
+        );
+        let entry = gtk::SearchEntry::builder()
+            .placeholder_text("Name or username")
+            .build();
+        column.append(&entry);
+
+        let found = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["navigation-sidebar"])
+            .visible(false)
+            .build();
+        column.append(&found);
+
+        let ui = self.clone();
+        let channel = channel.clone();
+        let roster = roster.clone();
+        let tally = tally.clone();
+        let draw = {
+            let ui = ui.clone();
+            let channel = channel.clone();
+            let entry = entry.clone();
+            let found = found.clone();
+            let tally = tally.clone();
+            move || {
+                while let Some(row) = found.first_child() {
+                    found.remove(&row);
+                }
+                let typed = entry.text().to_lowercase();
+                let typed = typed.trim_start_matches('@');
+                if typed.is_empty() {
+                    found.set_visible(false);
+                    return;
+                }
+                let candidates = ui
+                    .store
+                    .borrow()
+                    .not_in_channel(&channel, typed, PEOPLE_OFFERED);
+                found.set_visible(true);
+                if candidates.is_empty() {
+                    found.append(&empty_view("Nobody new by that name"));
+                    return;
+                }
+                for user in candidates {
+                    found.append(&ui.add_person_row(&channel, &user, &roster, &entry, &tally));
+                }
+            }
+        };
+        draw();
+
+        let refill: PickerRefill = Rc::new(draw);
+        // The same slot the composer's `@` popup uses, so a late answer
+        // redraws whichever of the two asked for it. They cannot both be
+        // open: this one lives inside the channel menu.
+        *self.mentions_refill.borrow_mut() = Some(Rc::clone(&refill));
+        let ui_for_entry = ui.clone();
+        let channel_for_entry = channel.clone();
+        entry.connect_search_changed(move |entry| {
+            let typed = entry.text().to_string();
+            ui_for_entry.ask_for_mentions(typed.trim_start_matches('@'), Some(&channel_for_entry));
+            refill();
+        });
+        column
+    }
+
+    /// One candidate, with the button that puts them in.
+    fn add_person_row(
+        &self,
+        channel: &ChannelId,
+        user: &mm_types::User,
+        roster: &gtk::ListBox,
+        entry: &gtk::SearchEntry,
+        tally: &gtk::Label,
+    ) -> gtk::ListBoxRow {
+        let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        line.set_margin_start(6);
+        line.set_margin_end(6);
+        line.set_margin_top(3);
+        line.set_margin_bottom(3);
+        let (gutter, face, dot) = face_with_dot(24);
+        face.set_text(Some(user.display_name()));
+        face.set_custom_image(self.avatars.borrow().get(&user.id));
+        set_presence(&dot, self.store.borrow().presence(&user.id), true);
+        line.append(&gutter);
+        line.append(
+            &gtk::Label::builder()
+                .label(format!("@{}", user.username))
+                .xalign(0.0)
+                .build(),
+        );
+        let full = user.full_name();
+        if !full.is_empty() {
+            line.append(
+                &gtk::Label::builder()
+                    .label(&full)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
+        let add = gtk::Button::builder()
+            .label("Add")
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::End)
+            .hexpand(true)
+            .css_classes(["flat", "caption"])
+            .build();
+        let ui = self.clone();
+        let channel = channel.clone();
+        let who = user.clone();
+        let roster = roster.clone();
+        let entry = entry.clone();
+        let tally = tally.clone();
+        add.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            ui.commands
+                .send(Command::AddToChannel {
+                    channel: channel.clone(),
+                    user: who.id.clone(),
+                })
+                .ok();
+            ui.store
+                .borrow_mut()
+                .set_channel_member(&channel, &who.id, true);
+            // Straight into the list above, so the menu shows the channel
+            // as it now is rather than as it was when it opened.
+            roster.append(&ui.member_row(&channel, &who, true, &tally));
+            restate_members(&roster, &tally);
+            entry.set_text("");
+            ui.redraw_soon();
+        });
+        line.append(&add);
         gtk::ListBoxRow::builder().child(&line).build()
+    }
+
+    /// The button that leaves the channel, and the question it asks first.
+    ///
+    /// Asked because leaving is not quiet: the server posts "x left the
+    /// channel" into it, everybody still there sees it, and a private
+    /// channel cannot be rejoined without being invited back. None of
+    /// that is recoverable by pressing the button again.
+    fn leave_button(&self, channel: &ChannelId, menu: &gtk::Popover) -> gtk::Button {
+        let store = self.store.borrow();
+        let held = store.channels.get(channel);
+        let leavable = held.is_some_and(mm_types::Channel::can_be_left);
+        let private = held.is_some_and(|c| c.kind == mm_types::ChannelType::Private);
+        let name = store.channel_heading(channel).name;
+        drop(store);
+
+        let button = gtk::Button::builder()
+            .label("Leave channel")
+            .margin_top(12)
+            .sensitive(leavable)
+            .css_classes(["destructive-action"])
+            .build();
+        if !leavable {
+            // Said rather than left to be discovered: the server refuses
+            // this one, and a greyed-out button with no reason reads as
+            // the client being broken.
+            button.set_tooltip_text(Some("The default channel cannot be left"));
+            return button;
+        }
+
+        let ui = self.clone();
+        let channel = channel.clone();
+        let menu = menu.clone();
+        button.connect_clicked(move |_| {
+            // Down before the dialog is up, not after the answer comes
+            // back. A popover holds the pointer while it is open, so the
+            // first click on a dialog raised over it is spent dismissing
+            // the popover and never reaches the button -- "Leave" had to
+            // be pressed twice, and the first press looked like nothing.
+            menu.popdown();
+            let ask = adw::AlertDialog::builder()
+                .heading(format!("Leave {name}?"))
+                .body(if private {
+                    "Everybody still in it will see that you left. It is private, so                      getting back in means somebody adding you."
+                } else {
+                    "Everybody still in it will see that you left. You can join it again."
+                })
+                .build();
+            ask.add_response("stay", "Stay");
+            ask.add_response("leave", "Leave");
+            ask.set_response_appearance("leave", adw::ResponseAppearance::Destructive);
+            ask.set_default_response(Some("stay"));
+            ask.set_close_response("stay");
+
+            let window = ui.window.clone();
+            let ui = ui.clone();
+            let channel = channel.clone();
+            ask.connect_response(None, move |_, answer| {
+                if answer != "leave" {
+                    return;
+                }
+                ui.commands.send(Command::LeaveChannel(channel.clone())).ok();
+                ui.store.borrow_mut().leave_channel_locally(&channel);
+                if ui.selected.borrow().as_ref() == Some(&channel) {
+                    ui.show_somewhere_else();
+                } else {
+                    ui.sidebar_stale.set(true);
+                    ui.redraw_soon();
+                }
+            });
+            ask.present(Some(&window));
+        });
+        button
     }
 
     /// Go to a message found somewhere that is not its channel.
@@ -7324,6 +7640,58 @@ impl Ui {
     /// so far. Selecting the row is what opens it: the sidebar's own
     /// handler does the fetching and the mark-read, and going around it
     /// would mean two places that know how to open a channel.
+    /// What the store cannot do about somebody joining or leaving.
+    ///
+    /// Being *added* to a channel is the event the store has no answer
+    /// for: the channel is one this client has never heard of, and a
+    /// sidebar cannot draw an id. A sync fetches it with its category
+    /// placement and read state, which is everything the row needs --
+    /// and being added to a channel is rare enough to pay for it.
+    ///
+    /// Being removed from the open one is the other half: the window is
+    /// left showing a conversation that is no longer anybody's to read.
+    fn on_membership(&self, ws: &mm_api::ws::WsEvent) {
+        match ws {
+            mm_api::ws::WsEvent::UserAddedToChannel { user_id, .. }
+                if *user_id == self.store.borrow().me =>
+            {
+                self.commands.send(Command::Sync).ok();
+            }
+            mm_api::ws::WsEvent::UserRemovedFromChannel {
+                channel_id,
+                user_id,
+            } if *user_id == self.store.borrow().me
+                && self.selected.borrow().as_ref() == Some(channel_id) =>
+            {
+                self.show_somewhere_else();
+            }
+            _ => {}
+        }
+    }
+
+    /// Go somewhere readable after the open channel has gone.
+    ///
+    /// Leaving a channel, or being removed from one, leaves the window
+    /// showing a conversation that is no longer anybody's to read. The
+    /// first channel still in the sidebar is the least surprising place
+    /// to land; an empty sidebar means there is nowhere to go, and the
+    /// window says so rather than keeping the old messages up.
+    fn show_somewhere_else(&self) {
+        self.sidebar_stale.set(true);
+        self.refresh_sidebar();
+        let next = (0..)
+            .map_while(|i| self.sidebar.row_at_index(i))
+            .map(|row| ChannelId::new(row.widget_name().as_str()))
+            // Category headings are rows too, and are not channels.
+            .find(|id| self.store.borrow().channels.contains_key(id));
+        if let Some(channel) = next {
+            self.show_channel(&channel);
+        } else {
+            self.selected.replace(None);
+            self.refresh_posts(&ChannelId::new(""));
+        }
+    }
+
     fn show_channel(&self, channel: &ChannelId) {
         // The channel first, the sidebar after. It used to be the other
         // way round -- find the row, select it, and let the selection

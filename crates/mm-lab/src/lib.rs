@@ -31,6 +31,7 @@
 mod docker;
 pub mod seed;
 pub mod stack;
+pub mod watch;
 
 /// Anything that went wrong in the lab, as a sentence worth printing.
 ///

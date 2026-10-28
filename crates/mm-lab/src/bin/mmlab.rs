@@ -19,6 +19,8 @@ usage: cargo run -p mm-lab --bin mmlab -- <command>
   reset               throw the lab away and build a fresh seeded one
   down [--keep-data]  stop and delete the lab; --keep-data keeps the volumes
   status              what is running, and the URL
+  watch [as]          print every WebSocket frame the lab sends, as the
+                      named account (default: the admin)
   logs [--lines N]    the server's log, where a failed boot says why
   run [--release] [-- args]
                       run the client against the lab, with its own stored
@@ -40,6 +42,9 @@ async fn main() -> ExitCode {
         "reset" => reset().await,
         "down" => mm_lab::stack::down(rest.iter().any(|a| a == "--keep-data")),
         "status" => mm_lab::stack::status().map(|s| print!("{s}")),
+        "watch" => {
+            mm_lab::watch::watch(rest.first().map_or(mm_lab::seed::ADMIN, String::as_str)).await
+        }
         "logs" => lines(rest).and_then(|n| mm_lab::stack::logs(n).map(|s| print!("{s}"))),
         "run" => run_client(rest),
         other => Err(mm_lab::Error(format!(

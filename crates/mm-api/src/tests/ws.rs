@@ -554,3 +554,52 @@ fn an_uploaded_emoji_arrives_as_json_inside_a_string() {
     assert_eq!(emoji.name, "party_parrot");
     assert_eq!(emoji.id, mm_types::EmojiId::new("e1"));
 }
+
+/// Captured from a lab server at 12.0.1 on 2026-10-28, both directions.
+///
+/// `user_added` puts the channel in `broadcast` and the person in `data`.
+/// `user_removed` does the same for everyone still in the channel — but the
+/// copy sent to the person who left carries `data.channel_id` and
+/// `broadcast.user_id`, with no `broadcast.channel_id` at all. A decoder
+/// reading only one side of the frame misses being removed from a channel,
+/// which is a row that stays in the sidebar for good.
+#[test]
+fn membership_events_read_each_field_from_whichever_side_carries_it() {
+    let mut p = WsProtocol::new();
+    p.on_frame(&hello_frame("conn-1", 0));
+
+    let added = r#"{"event":"user_added",
+        "broadcast":{"channel_id":"c1","user_id":""},
+        "data":{"team_id":"t1","user_id":"u-oscar"},"seq":1}"#;
+    assert_eq!(
+        p.on_frame(added),
+        vec![WsOutcome::Event(WsEvent::UserAddedToChannel {
+            channel_id: ChannelId::new("c1"),
+            user_id: UserId::new("u-oscar"),
+        })]
+    );
+
+    // What everyone else in the channel sees.
+    let removed_for_others = r#"{"event":"user_removed",
+        "broadcast":{"channel_id":"c1","user_id":""},
+        "data":{"remover_id":"u-me","user_id":"u-oscar"},"seq":2}"#;
+    assert_eq!(
+        p.on_frame(removed_for_others),
+        vec![WsOutcome::Event(WsEvent::UserRemovedFromChannel {
+            channel_id: ChannelId::new("c1"),
+            user_id: UserId::new("u-oscar"),
+        })]
+    );
+
+    // What the person removed sees: the other way round, in both fields.
+    let removed_for_them = r#"{"event":"user_removed",
+        "broadcast":{"channel_id":"","user_id":"u-oscar"},
+        "data":{"channel_id":"c1","remover_id":"u-me"},"seq":3}"#;
+    assert_eq!(
+        p.on_frame(removed_for_them),
+        vec![WsOutcome::Event(WsEvent::UserRemovedFromChannel {
+            channel_id: ChannelId::new("c1"),
+            user_id: UserId::new("u-oscar"),
+        })]
+    );
+}

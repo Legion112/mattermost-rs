@@ -3242,3 +3242,153 @@ fn a_channels_notification_level_defaults_to_the_accounts() {
     assert_eq!(store.channel_notify(&channel), "all");
     assert!(store.is_muted(&channel));
 }
+
+// ------------------------------------------------------------ membership
+
+/// Leaving takes the channel off the sidebar at once, because the row
+/// staying put until a round trip finished reads as the button not working.
+#[test]
+fn leaving_a_channel_takes_everything_about_it_with_it() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    s.apply_post_list(&c1, &page(vec![post("p1", "c1", 10)]), PageAnchor::Newest);
+    s.apply_channel_roster(&c1, vec![a_user("u-other", "other")]);
+
+    let changes = s.leave_channel_locally(&c1);
+    assert!(changes.contains(&Change::Sidebar), "{changes:?}");
+    assert!(!s.channels.contains_key(&c1));
+    assert!(s.channel_posts(&c1).is_empty());
+    assert!(s.channel_roster(&c1).is_empty());
+
+    assert!(
+        s.leave_channel_locally(&ChannelId::new("never-heard-of"))
+            .is_empty(),
+        "leaving a channel we never had is not a sidebar change"
+    );
+}
+
+/// Being removed by somebody else is the same situation arriving from the
+/// other direction, and the client has to notice: a row that stays in the
+/// sidebar after the server has taken you out of the channel never recovers
+/// on its own.
+#[test]
+fn being_removed_leaves_the_channel_and_removing_somebody_else_does_not() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    s.apply_channel_roster(&c1, vec![a_user("u-me", "me"), a_user("u-other", "other")]);
+    s.apply_stats(mm_types::ChannelStats {
+        channel_id: c1.clone(),
+        member_count: 2,
+        ..mm_types::ChannelStats::default()
+    });
+
+    let changes = s.apply_ws(&WsEvent::UserRemovedFromChannel {
+        channel_id: c1.clone(),
+        user_id: UserId::new("u-other"),
+    });
+    assert!(changes.contains(&Change::Unread(c1.clone())), "{changes:?}");
+    assert!(s.channels.contains_key(&c1), "still in the channel");
+    assert_eq!(s.channel_roster(&c1).len(), 1);
+    assert_eq!(
+        s.stats[&c1].member_count, 1,
+        "the count beside the name moves with the roster"
+    );
+
+    let changes = s.apply_ws(&WsEvent::UserRemovedFromChannel {
+        channel_id: c1.clone(),
+        user_id: UserId::new("u-me"),
+    });
+    assert!(changes.contains(&Change::Sidebar), "{changes:?}");
+    assert!(!s.channels.contains_key(&c1), "and now out of it");
+}
+
+/// The roster is only updated where there is one. Creating it from a single
+/// event would leave a channel of forty looking like a channel of one, and
+/// `@` offers people from exactly this list.
+#[test]
+fn somebody_joining_is_added_to_a_roster_that_exists_and_invents_none() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let joined = WsEvent::UserAddedToChannel {
+        channel_id: c1.clone(),
+        user_id: UserId::new("u-other"),
+    };
+
+    assert!(
+        s.apply_ws(&joined).is_empty(),
+        "no roster fetched yet, so nothing to add to"
+    );
+    assert!(s.channel_roster(&c1).is_empty());
+
+    s.apply_channel_roster(&c1, vec![a_user("u-me", "me")]);
+    s.apply_users(vec![a_user("u-other", "other"), a_user("u-third", "third")]);
+
+    // The channel's stats are fetched when it is opened, so a roster
+    // change can land before there is a count to move.
+    let changes = s.apply_ws(&joined);
+    assert!(changes.contains(&Change::Unread(c1.clone())), "{changes:?}");
+    assert_eq!(s.channel_roster(&c1).len(), 2);
+    assert!(!s.stats.contains_key(&c1), "and none was invented");
+
+    assert!(
+        s.apply_ws(&joined).is_empty(),
+        "and saying it twice changes nothing"
+    );
+
+    s.apply_stats(mm_types::ChannelStats {
+        channel_id: c1.clone(),
+        member_count: 2,
+        ..mm_types::ChannelStats::default()
+    });
+    s.apply_ws(&WsEvent::UserAddedToChannel {
+        channel_id: c1.clone(),
+        user_id: UserId::new("u-third"),
+    });
+    assert_eq!(s.channel_roster(&c1).len(), 3);
+    assert_eq!(
+        s.stats[&c1].member_count, 3,
+        "the count beside the name moves with the roster"
+    );
+}
+
+fn a_user(id: &str, username: &str) -> User {
+    User {
+        id: UserId::new(id),
+        username: username.to_owned(),
+        ..User::default()
+    }
+}
+
+/// The mirror of `mention_candidates`: people who are *not* here yet.
+#[test]
+fn offering_people_to_add_leaves_out_everybody_already_in_the_channel() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    s.apply_users(vec![
+        a_user("u-ada", "ada"),
+        a_user("u-adam", "adam"),
+        a_user("u-grace", "grace"),
+    ]);
+    s.apply_channel_roster(&c1, vec![a_user("u-adam", "adam")]);
+
+    let names =
+        |found: Vec<User>| -> Vec<String> { found.into_iter().map(|u| u.username).collect() };
+    assert_eq!(
+        names(s.not_in_channel(&c1, "ad", 6)),
+        vec!["ada"],
+        "adam is in it"
+    );
+    assert_eq!(names(s.not_in_channel(&c1, "", 6)), Vec::<String>::new());
+    assert_eq!(names(s.not_in_channel(&c1, "zz", 6)), Vec::<String>::new());
+    assert_eq!(s.not_in_channel(&c1, "a", 1).len(), 1, "the limit holds");
+
+    // Yourself, a bot and a deactivated account are all accepted by the
+    // server and none of them should be offered.
+    let mut bot = a_user("u-bot", "helper");
+    bot.is_bot = true;
+    let mut gone = a_user("u-gone", "hubert");
+    gone.delete_at = Timestamp(1);
+    s.apply_users(vec![bot, gone, a_user("u-me", "me")]);
+    assert!(names(s.not_in_channel(&c1, "h", 6)).is_empty());
+    assert!(names(s.not_in_channel(&c1, "me", 6)).is_empty());
+}

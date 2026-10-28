@@ -913,6 +913,32 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             )
             .await;
         }
+        Command::LeaveChannel(channel) => {
+            let me = UserId::new(&a.session.user_id);
+            // Said out loud rather than best-effort: the window has already
+            // taken the channel off the sidebar, so a failure the reader is
+            // not told about leaves them looking at a sidebar that disagrees
+            // with the server until the next sync puts the row back.
+            let request = rest::remove_from_channel(&channel, &me);
+            if let Err(e) = fetch(&a.client, &request, |_| Ok(())).await {
+                let _ = events.send(Event::Failed(format!("leave: {e}"))).await;
+                let _ = events
+                    .send(Event::ResyncRequired("leave failed".to_owned()))
+                    .await;
+            }
+        }
+        Command::AddToChannel { channel, user } => {
+            let request = rest::join_channel(&channel, &user);
+            if let Err(e) = fetch(&a.client, &request, rest::parse_channel_member).await {
+                let _ = events.send(Event::Failed(format!("add: {e}"))).await;
+            }
+        }
+        Command::RemoveFromChannel { channel, user } => {
+            let request = rest::remove_from_channel(&channel, &user);
+            if let Err(e) = fetch(&a.client, &request, |_| Ok(())).await {
+                let _ = events.send(Event::Failed(format!("remove: {e}"))).await;
+            }
+        }
         Command::SetMuted { channel, muted } => {
             let me = UserId::new(&a.session.user_id);
             best_effort(a, &rest::set_channel_muted(&channel, &me, muted), events).await;

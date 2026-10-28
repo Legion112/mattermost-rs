@@ -350,6 +350,22 @@ pub fn parse_channel_member(resp: &HttpResponse) -> Result<ChannelMember, ApiErr
     parse_json(resp, "POST /channels/{channel}/members")
 }
 
+/// Take somebody out of a channel -- or yourself, which is what leaving is.
+///
+/// There is no separate "leave" route: leaving is removing yourself, and the
+/// server tells the difference by whose id is in the path. It answers a bare
+/// `200` with `{"status":"OK"}` and posts a system notice into the channel,
+/// which is why this is the one thing in the client that was never tested
+/// against a server with colleagues on it.
+///
+/// Refused with 403 on the last channel a guest is in, and on a default
+/// channel: **Town Square cannot be left**, and the server says so rather
+/// than silently doing nothing.
+#[must_use]
+pub fn remove_from_channel(channel: &ChannelId, user: &UserId) -> HttpRequest {
+    HttpRequest::delete(format!("{API}/channels/{channel}/members/{user}"))
+}
+
 /// One channel by id. **No `ETag` on this route**, unlike most of the
 /// others, so there is nothing to cache against.
 #[must_use]

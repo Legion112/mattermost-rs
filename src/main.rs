@@ -686,6 +686,14 @@ fn describe(event: &mm_api::WsEvent) -> String {
             )
         }
         E::EmojiAdded(e) => format!("custom emoji :{}: added", e.name),
+        E::UserAddedToChannel {
+            channel_id,
+            user_id,
+        } => format!("{user_id} joined {channel_id}"),
+        E::UserRemovedFromChannel {
+            channel_id,
+            user_id,
+        } => format!("{user_id} left {channel_id}"),
         E::Unknown { event } => format!("(unhandled event {event})"),
     }
 }
