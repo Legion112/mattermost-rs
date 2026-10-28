@@ -246,6 +246,13 @@ pub enum Command {
         file: FileId,
         name: String,
     },
+    /// Fetch an attachment and hand it to the desktop's own handler
+    /// for its kind -- a PDF to the PDF viewer, an archive to the
+    /// archiver -- rather than draw it, which this client cannot.
+    OpenFile {
+        file: FileId,
+        name: String,
+    },
     /// Fetch one custom emoji's image. Asked once per emoji the window
     /// has had to draw, by id, because a name can be freed and re-used
     /// while an id cannot.
@@ -457,6 +464,9 @@ pub enum Event {
     Quit,
     /// Something to show in the status line.
     Status(String),
+    /// An attachment is on disk under its own name, ready for the
+    /// desktop to open.
+    FileReady(std::path::PathBuf),
     /// How far a big attachment has got on its way up, for the status
     /// line: a screencast takes a while, and silence reads as a hang.
     Uploading {

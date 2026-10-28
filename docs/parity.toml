@@ -1142,8 +1142,12 @@ as text.
 size, a megabyte a request, the server naming the file when the last \
 byte is in -- and the status line says how far it has got, because a \
 screencast is tens of megabytes and silence reads as a hang. NOT \
-verified in the lab, which has no way to hand the window a file. NOT \
-built: previewing a non-image attachment in the client."""
+verified in the lab, which has no way to hand the window a file. **Open**, beside Save on a file that is not a picture, fetches it and \
+hands a copy under its own name to the desktop's handler for its kind \
+-- a PDF to the PDF viewer -- which is a preview this client could \
+never draw as well. The copy lives in the cache, one folder per file \
+id, so two attachments called `report.pdf` do not take turns. NOT \
+verified in the lab, which has no handlers to open anything with."""
 
 [[feature]]
 id       = "desktop.window_geometry"

@@ -6026,6 +6026,28 @@ fn file_row(
     }
     line.append(&column);
 
+    // Open first, with the desktop's own handler for the kind: a PDF
+    // in the PDF viewer is a preview this client could never draw as
+    // well. Save beside it, for keeping.
+    let open = gtk::Button::from_icon_name("document-open-symbolic");
+    open.set_tooltip_text(Some("Open"));
+    open.add_css_class("flat");
+    open.set_valign(gtk::Align::Center);
+    {
+        let commands = commands.clone();
+        let wanted = file.id.clone();
+        let as_named = name.to_owned();
+        open.connect_clicked(move |_| {
+            commands
+                .send(Command::OpenFile {
+                    file: wanted.clone(),
+                    name: as_named.clone(),
+                })
+                .ok();
+        });
+    }
+    line.append(&open);
+
     let save = gtk::Button::from_icon_name("document-save-symbolic");
     save.set_tooltip_text(Some("Save to Downloads"));
     save.add_css_class("flat");
@@ -7607,6 +7629,7 @@ impl Ui {
                 self.window.close();
             }
             Event::Status(text) => self.set_status(&text),
+            Event::FileReady(path) => self.open_on_desktop(&path),
             Event::Uploading { name, sent, total } => {
                 let percent = if total == 0 {
                     100
@@ -9089,6 +9112,21 @@ impl Ui {
                 true
             });
         });
+    }
+
+    /// Hand a file in the cache to the desktop's own handler for its
+    /// kind, and say so on the status line.
+    fn open_on_desktop(&self, path: &std::path::Path) {
+        let shown = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.set_status(&format!("opening {shown}"));
+        gtk::FileLauncher::new(Some(&gio::File::for_path(path))).launch(
+            Some(&self.window),
+            gio::Cancellable::NONE,
+            |_| {},
+        );
     }
 
     /// Where people are, from a sync or the once-a-minute poll.

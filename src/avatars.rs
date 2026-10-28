@@ -110,6 +110,22 @@ pub(crate) fn store_file(file: &FileId, bytes: &[u8]) {
     }
 }
 
+/// A copy of an attachment under its own name, in the cache, for the
+/// desktop's own handler to open: `xdg-open` and its kind go by the
+/// extension, and the cached file is named by id. One folder per file
+/// id, so two attachments called `report.pdf` do not take turns.
+pub(crate) fn opened_copy(file: &FileId, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let dir = cache_root()
+        .ok_or_else(|| "no cache directory".to_owned())?
+        .join("open")
+        .join(file.as_str());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot use {}: {e}", dir.display()))?;
+    // The desktop's own rule for the name: the last component only, so a
+    // name off the wire cannot climb out of the folder.
+    let path = mm_desktop::destination(&dir, name, |_| false);
+    std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(path)
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -466,6 +466,40 @@ async fn save_file(
     }
 }
 
+/// Fetch an attachment, if it is not already here, and tell the window
+/// where a copy under its own name is, for the desktop to open.
+async fn open_file(
+    a: &Active,
+    file: &mm_types::FileId,
+    name: &str,
+    events: &async_channel::Sender<Event>,
+) {
+    let bytes = match crate::avatars::load_file(file) {
+        Some(bytes) => bytes,
+        None => match fetch(
+            &a.client,
+            &rest::file_contents(file, false),
+            rest::parse_image,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = events.send(Event::Failed(format!("open: {e}"))).await;
+                return;
+            }
+        },
+    };
+    match crate::avatars::opened_copy(file, name, &bytes) {
+        Ok(path) => {
+            let _ = events.send(Event::FileReady(path)).await;
+        }
+        Err(e) => {
+            let _ = events.send(Event::Failed(format!("open: {e}"))).await;
+        }
+    }
+}
+
 /// Put an icon in the tray, and turn its clicks into events.
 ///
 /// `None` where no `StatusNotifierItem` host is listening, which the
@@ -1097,6 +1131,7 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             spawn_download(a, events.clone(), Download::Avatar { user, version });
         }
         Command::SaveFile { file, name } => save_file(a, &file, &name, events).await,
+        Command::OpenFile { file, name } => open_file(a, &file, &name, events).await,
         Command::SetChannelNotify { channel, desktop } => {
             let user = UserId::new(&a.session.user_id);
             let request = rest::set_channel_notify(&channel, &user, &desktop);

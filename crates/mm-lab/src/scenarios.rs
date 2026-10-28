@@ -721,6 +721,19 @@ async fn jumps_with_switcher(screen: &Screen) -> Result<()> {
                 >= 2
         })
         .await?;
+    // What the finder holds at the moment of Return, for the log: on
+    // one fresh lab Return opened a conversation it should not have.
+    let before = screen.tree().await?;
+    let from = before
+        .iter()
+        .position(|n| n.role == "search box" && n.name == "Find channel…")
+        .unwrap_or(0);
+    let rows: Vec<String> = before[from..]
+        .iter()
+        .filter(|n| !n.name.is_empty())
+        .map(|n| format!("{} {:?}", n.role, n.name))
+        .collect();
+    eprintln!("  the finder holds {rows:?}");
     screen.press_key(key::RETURN, &[])?;
     screen
         .until("Design is open", |tree| tree.has("button", "Design, "))
