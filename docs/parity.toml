@@ -793,10 +793,22 @@ rather than bytes so a Cyrillic word is not sliced in half. Verified on a \
 live account: Ctrl+B made `**bold**`, Ctrl+B again took it back, and \
 Ctrl+Shift+C made a code span of it.
 
-NOT built: the formatting toolbar -- which is the other way to offer the \
-above, and is what Mattermost draws; for somebody who types code into chat \
-all day the keys are the thing, and a row of buttons takes height from the \
-conversation permanently -- and the markdown preview eye.
+The formatting bar is built too, under the box the way Mattermost draws it: \
+bold, italic, strikethrough, heading, link, code, bulleted and numbered \
+lists, and quote. The marker buttons are the keys above with a picture on; \
+the line shapes put a prefix on every line the selection touches and take \
+it off again when they all have it, a numbered list renumbering itself, and \
+the link puts `[what was selected](url)` in with the address selected to be \
+typed over. The arithmetic is in `mm_md` beside `wrap`, settled by tests. \
+For somebody who types code into chat all day a row of buttons is height \
+taken from the conversation, so the `Aa` toggle beside the smiley hides it, \
+and that choice is kept as the webapp's own `advanced_text_editor` \
+preference -- `post` for the channel box, `comment` for the thread's, \
+`"true"` meaning hidden -- so the two clients agree, and a change made in \
+either reaches the other over the socket. Lab-verified by \
+`formats-from-the-toolbar`: Bold round a selected word, a bulleted list on \
+and off again, and the toggle writing `true` and then `false` to the server. \
+NOT built: the markdown preview eye.
 
 The thread box is lab-verified: a reply typed into "Reply…" and sent with \
 Return landed under the root on the server, and Escape put the panel \

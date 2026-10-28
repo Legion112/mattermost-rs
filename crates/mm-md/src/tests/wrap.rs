@@ -85,3 +85,126 @@ fn offsets_out_of_range_are_clamped() {
     assert_eq!(one, one.clone());
     assert!(!format!("{one:?}").is_empty());
 }
+
+/// A list is a prefix on each line the selection touches, and the
+/// selection follows its text: the start moves by the first line's
+/// prefix, the end by all of them.
+#[test]
+fn a_prefix_goes_on_every_touched_line() {
+    assert_eq!(
+        prefix_lines("one\ntwo\nthree", 1, 9, "- "),
+        Wrapped {
+            text: "- one\n- two\n- three".to_owned(),
+            start: 3,
+            end: 15,
+        }
+    );
+}
+
+/// When every touched line has the prefix, pressing again takes it
+/// off all of them.
+#[test]
+fn a_prefix_on_every_line_comes_off() {
+    let on = prefix_lines("one\ntwo", 0, 7, "> ");
+    let off = prefix_lines(&on.text, on.start, on.end, "> ");
+    assert_eq!(off.text, "one\ntwo");
+    assert_eq!((off.start, off.end), (0, 7));
+}
+
+/// A mixed block -- some lines prefixed, some not -- gets the prefix on
+/// the ones missing it rather than losing it from the ones that have it.
+#[test]
+fn a_mixed_block_is_completed_not_cleared() {
+    assert_eq!(prefix_lines("- one\ntwo", 0, 9, "- ").text, "- one\n- two");
+}
+
+/// With nothing selected the caret's own line is the one, and the caret
+/// moves past the prefix.
+#[test]
+fn an_empty_selection_prefixes_the_caret_line() {
+    assert_eq!(
+        prefix_lines("first\nsecond", 8, 8, "### "),
+        Wrapped {
+            text: "first\n### second".to_owned(),
+            start: 12,
+            end: 12,
+        }
+    );
+    assert_eq!(prefix_lines("", 0, 0, "- ").text, "- ");
+}
+
+/// A selection that ends just after a line break stops at that break:
+/// dragging to the start of the next line is not selecting it.
+#[test]
+fn a_selection_ending_at_a_break_leaves_the_next_line_alone() {
+    assert_eq!(prefix_lines("one\ntwo", 0, 4, "- ").text, "- one\ntwo");
+}
+
+/// A caret inside the prefix being removed lands where the prefix was,
+/// never before the start of its line.
+#[test]
+fn a_caret_inside_a_removed_prefix_stays_on_its_line() {
+    assert_eq!(
+        prefix_lines("ab\n- cd", 4, 4, "- "),
+        Wrapped {
+            text: "ab\ncd".to_owned(),
+            start: 3,
+            end: 3,
+        }
+    );
+}
+
+/// Numbers count up, and a block already numbered -- however it was
+/// numbered -- comes back unnumbered.
+#[test]
+fn numbering_counts_and_toggles() {
+    let on = number_lines("a\nb\nc", 0, 5);
+    assert_eq!(on.text, "1. a\n2. b\n3. c");
+    let off = number_lines(&on.text, on.start, on.end);
+    assert_eq!(off.text, "a\nb\nc");
+    assert_eq!((off.start, off.end), (0, 5));
+}
+
+/// A line slipped into a numbered list is numbered with the rest, and
+/// the rest are renumbered so the list stays in order.
+#[test]
+fn numbering_a_mixed_block_renumbers_it() {
+    assert_eq!(
+        number_lines("1. a\nb\n12. c", 0, 12).text,
+        "1. a\n2. b\n3. c"
+    );
+    // Something that only looks numbered is not.
+    assert_eq!(number_lines("1.a", 0, 3).text, "1. 1.a");
+    assert_eq!(number_lines("12", 0, 2).text, "1. 12");
+}
+
+/// A link round the selection, with the placeholder address selected
+/// so it can be typed straight over.
+#[test]
+fn a_selection_becomes_a_link_with_the_address_selected() {
+    assert_eq!(
+        link("see docs now", 4, 8),
+        Wrapped {
+            text: "see [docs](url) now".to_owned(),
+            start: 11,
+            end: 14,
+        }
+    );
+}
+
+/// Nothing selected: a whole placeholder link, with the text selected
+/// first since that is what gets written first.
+#[test]
+fn no_selection_gives_a_placeholder_link() {
+    assert_eq!(
+        link("say ", 4, 4),
+        Wrapped {
+            text: "say [text](url)".to_owned(),
+            start: 5,
+            end: 9,
+        }
+    );
+    // Offsets past the end are the end, backwards offsets are put the
+    // right way round, as with `wrap`.
+    assert_eq!(link("ab", 9, 1).text, "a[b](url)");
+}

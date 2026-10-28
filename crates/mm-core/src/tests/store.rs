@@ -3893,3 +3893,33 @@ fn a_channel_converted_over_the_socket_becomes_private() {
         .is_empty()
     );
 }
+
+/// The formatting bar's hidden flag is the webapp's own preference,
+/// read the webapp's way round: `"true"` hides, anything else or
+/// nothing at all shows, and the channel and thread composers are
+/// remembered apart.
+#[test]
+fn the_formatting_bar_preference_reads_the_webapps_way_round() {
+    let mut store = Store::new(UserId::new("me"), Threading::Flat);
+    assert_eq!(store.preference("advanced_text_editor", "post"), None);
+    assert!(!store.formatting_hidden("post"));
+    store.apply_preferences(&[mm_types::Preference {
+        category: "advanced_text_editor".into(),
+        name: "post".into(),
+        value: "true".into(),
+        ..mm_types::Preference::default()
+    }]);
+    assert_eq!(
+        store.preference("advanced_text_editor", "post"),
+        Some("true")
+    );
+    assert!(store.formatting_hidden("post"));
+    assert!(!store.formatting_hidden("comment"));
+    store.apply_preferences(&[mm_types::Preference {
+        category: "advanced_text_editor".into(),
+        name: "post".into(),
+        value: "false".into(),
+        ..mm_types::Preference::default()
+    }]);
+    assert!(!store.formatting_hidden("post"));
+}

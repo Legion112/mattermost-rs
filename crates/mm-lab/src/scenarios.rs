@@ -41,6 +41,7 @@ pub const SCENARIOS: &[&str] = &[
     "keeps-a-draft-on-the-server",
     "sends-a-draft-with-its-file",
     "sends-a-message",
+    "formats-from-the-toolbar",
     "completes-a-mention-with-tab",
     "completes-an-emoji-with-tab",
     "opens-a-dm-from-the-switcher",
@@ -158,6 +159,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
         "sends-a-draft-with-its-file" => draft_with_file(screen, admin).await,
         "sends-a-message" => sends_a_message(screen, admin).await,
+        "formats-from-the-toolbar" => formats_from_toolbar(screen, admin).await,
         "completes-a-mention-with-tab" => completes_mention(screen).await,
         "completes-an-emoji-with-tab" => completes_emoji(screen).await,
         "opens-a-dm-from-the-switcher" => dm_from_switcher(screen, admin).await,
@@ -523,6 +525,72 @@ async fn focused_composer(screen: &Screen) -> Result<Node> {
     let composer = tree.find("text box", "Write a message…")?.clone();
     screen.click_into(&composer).await?;
     Ok(composer)
+}
+
+/// The formatting bar under the composer shapes what is selected, and
+/// its toggle is remembered on the server the way the webapp remembers
+/// it -- as a preference saying the bar is hidden.
+async fn formats_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "shout").await?;
+    screen.click_into(&composer).await?;
+    // Ctrl+A: everything, so the markers go round the whole word.
+    screen.press_key(0x61, &[key::CONTROL])?;
+    screen.press("Bold").await?;
+    composer_says(screen, &composer, "**shout**").await?;
+    // The word stays selected inside its markers, and a list is a
+    // prefix on the line, so both shapes end up on one line.
+    screen.press("Bulleted list").await?;
+    composer_says(screen, &composer, "- **shout**").await?;
+    screen.press("Bulleted list").await?;
+    composer_says(screen, &composer, "**shout**").await?;
+
+    // Hidden, and the server told so in the webapp's own words.
+    screen.press("Aa").await?;
+    screen
+        .until("the bar is away", |tree| !tree.has("button", "Bold"))
+        .await?;
+    preference_says(admin, "post", Some("true")).await?;
+    screen.press("Aa").await?;
+    screen
+        .until("the bar is back", |tree| tree.has("button", "Bold"))
+        .await?;
+    preference_says(admin, "post", Some("false")).await?;
+
+    // Nothing left in the box for the draft scenarios to trip over.
+    screen.type_into(&composer, "").await?;
+    Ok(())
+}
+
+/// Wait for the composer to hold exactly `expected`.
+async fn composer_says(screen: &Screen, composer: &Node, expected: &str) -> Result<()> {
+    let mut last = String::new();
+    for _ in 0..25 {
+        last = screen.text_of(composer).await?;
+        if last == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the composer says {last:?}, not {expected:?}"
+    )))
+}
+
+/// Wait for the server's copy of a formatting-bar preference.
+async fn preference_says(admin: &Admin, name: &str, expected: Option<&str>) -> Result<()> {
+    let mut last = None;
+    for _ in 0..25 {
+        last = admin.my_preference("advanced_text_editor", name).await?;
+        if last.as_deref() == expected {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(format!(
+        "the server holds the {name} formatting preference as {last:?}, not {expected:?}"
+    )))
 }
 
 /// What the whole thing is for: a message typed and sent with Return,

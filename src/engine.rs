@@ -1141,6 +1141,19 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         }
         Command::SetCategory(category) => set_category(a, &category, events).await,
         Command::SetCategories(categories) => set_categories(a, &categories, events).await,
+        Command::SetPreference {
+            category,
+            name,
+            value,
+        } => {
+            let me = UserId::new(&a.session.user_id);
+            best_effort(
+                a,
+                &rest::set_preference(&me, &category, &name, &value),
+                events,
+            )
+            .await;
+        }
         Command::Pin { .. }
         | Command::Save { .. }
         | Command::MarkUnread(_)

@@ -262,6 +262,13 @@ pub enum Command {
     /// channel between two of them needs: the one it left and the one it
     /// joined have to change together.
     SetCategories(Vec<mm_types::ChannelCategory>),
+    /// Write one of the reader's preferences, by the server's own
+    /// category and name: the formatting bar's hidden flag, for one.
+    SetPreference {
+        category: String,
+        name: String,
+        value: String,
+    },
     /// Fetch the page of history immediately before `before`, which is the
     /// oldest post currently held.
     LoadOlder {

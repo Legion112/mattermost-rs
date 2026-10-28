@@ -1421,6 +1421,27 @@ impl Store {
         out
     }
 
+    /// One preference by the server's own category and name, when the
+    /// reader has set it.
+    #[must_use]
+    pub fn preference(&self, category: &str, name: &str) -> Option<&str> {
+        self.prefs
+            .get(&(category.to_owned(), name.to_owned()))
+            .map(String::as_str)
+    }
+
+    /// Whether the reader has hidden the composer's formatting bar.
+    ///
+    /// The webapp's own preference, read the webapp's way round: the
+    /// value says whether the bar is *hidden*, `"true"` for hidden, and
+    /// with nothing set the bar is shown. `name` is `post` for the
+    /// channel composer and `comment` for the thread's, which the webapp
+    /// remembers separately.
+    #[must_use]
+    pub fn formatting_hidden(&self, name: &str) -> bool {
+        self.preference("advanced_text_editor", name) == Some("true")
+    }
+
     /// Take in the reader's preferences, replacing what is held.
     pub fn apply_preferences(&mut self, prefs: &[mm_types::Preference]) -> Vec<Change> {
         for pref in prefs {

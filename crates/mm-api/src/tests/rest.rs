@@ -1427,3 +1427,21 @@ fn a_channels_privacy_is_a_letter() {
         Body::Json(r#"{"privacy":"O"}"#.to_owned())
     );
 }
+
+/// Any preference, by category and name: the formatting bar's hidden
+/// flag is one, under the webapp's own category so the two agree.
+#[test]
+fn a_preference_is_put_as_a_list_of_one() {
+    let request = set_preference(&UserId::new("u1"), "advanced_text_editor", "post", "true");
+    assert_eq!(request.method, Method::Put);
+    assert_eq!(request.path, "/api/v4/users/u1/preferences");
+    let Body::Json(body) = &request.body else {
+        panic!("expected a JSON body");
+    };
+    let body: serde_json::Value = serde_json::from_str(body).expect("parses");
+    assert_eq!(body.as_array().map(Vec::len), Some(1));
+    assert_eq!(body[0]["user_id"], "u1");
+    assert_eq!(body[0]["category"], "advanced_text_editor");
+    assert_eq!(body[0]["name"], "post");
+    assert_eq!(body[0]["value"], "true");
+}

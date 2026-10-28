@@ -919,6 +919,20 @@ pub fn set_saved(user: &UserId, post: &PostId, saved: bool) -> HttpRequest {
     }
 }
 
+/// Write one preference: `PUT /users/{id}/preferences` with a list of
+/// one. The value is a string whatever it means -- the server stores
+/// `"true"` and `"false"` as text and so does every client.
+#[must_use]
+pub fn set_preference(user: &UserId, category: &str, name: &str, value: &str) -> HttpRequest {
+    let body = serde_json::json!([{
+        "user_id": user.as_str(),
+        "category": category,
+        "name": name,
+        "value": value,
+    }]);
+    HttpRequest::put(format!("{API}/users/{user}/preferences")).json(&body)
+}
+
 /// Mark a channel read.
 ///
 /// An **empty** `channel` is legal and means focus loss, which is how the web

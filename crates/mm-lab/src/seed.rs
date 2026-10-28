@@ -930,6 +930,24 @@ impl Admin {
         id_of(&find_root(&page, starts_with)?)
     }
 
+    /// One of the signed-in user's preferences, as the server holds it.
+    pub async fn my_preference(&self, category: &str, name: &str) -> Result<Option<String>> {
+        let all = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/preferences/{category}",
+                self.me
+            )))
+            .await?;
+        Ok(all.as_array().and_then(|prefs| {
+            prefs
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .and_then(|p| p["value"].as_str())
+                .map(str::to_owned)
+        }))
+    }
+
     /// Whether the server holds a post pinned.
     pub async fn is_pinned(&self, post_id: &str) -> Result<bool> {
         let post = self

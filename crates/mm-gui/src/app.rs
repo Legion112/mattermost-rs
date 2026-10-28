@@ -814,7 +814,7 @@ fn build_thread_pane(
     thread_header.append(&thread_title);
     thread_header.append(&thread_follow);
     thread_header.append(&thread_close);
-    let thread_composer = build_composer("Reply…", &ctx.emoji);
+    let thread_composer = build_composer("Reply…", "comment", &ctx.emoji);
     let thread_composer_pane = thread_composer.pane.clone();
     let thread_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
     thread_pane.append(&thread_header);
@@ -2694,7 +2694,7 @@ fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool, told:
 /// Insensitive until a channel is open: a composer that accepts text
 /// with nowhere to send it is a message the reader will lose.
 fn build_composer_row(emoji: &Emoji) -> (Composer, gtk::Label) {
-    let composer = build_composer("Write a message…", emoji);
+    let composer = build_composer("Write a message…", "post", emoji);
     composer.pane.set_sensitive(false);
     let status = gtk::Label::builder()
         .xalign(0.0)
@@ -2713,7 +2713,9 @@ fn build_composer_row(emoji: &Emoji) -> (Composer, gtk::Label) {
 /// line. Shift+Return puts in a newline and Return sends, which is the
 /// binding Mattermost uses and the one muscle memory expects -- an
 /// `Entry` can express neither, since it has no newline to insert.
-fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
+/// `which` is the webapp's name for this composer's formatting-bar
+/// preference: `post` for the channel's, `comment` for the thread's.
+fn build_composer(placeholder: &str, which: &'static str, emoji: &Emoji) -> Composer {
     let view = gtk::TextView::builder()
         .wrap_mode(gtk::WrapMode::WordChar)
         .top_margin(8)
@@ -2765,11 +2767,28 @@ fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
     emoji_button.set_valign(gtk::Align::End);
     emoji_button.set_margin_bottom(4);
 
+    // Mattermost's own toggle for the bar below, which some readers
+    // want out of the way: it is a row of buttons permanently taking
+    // height from the conversation, and the keys do the same work.
+    let formatting = gtk::ToggleButton::with_label("Aa");
+    formatting.set_tooltip_text(Some("Show or hide formatting"));
+    formatting.add_css_class("flat");
+    formatting.set_valign(gtk::Align::End);
+    formatting.set_margin_bottom(4);
+    formatting.set_focus_on_click(false);
+    formatting.set_active(true);
+
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    row.add_css_class("card");
     row.append(&scroll);
+    row.append(&formatting);
     row.append(&emoji_button);
     row.append(&attach);
+
+    let bar = build_formatting_bar(&view);
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("card");
+    card.append(&row);
+    card.append(&bar);
 
     // What has been chosen but not yet sent, above the box it will be
     // sent with. Hidden while empty so an untouched composer is the
@@ -2784,12 +2803,16 @@ fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
     pane.set_margin_top(6);
     pane.set_margin_bottom(12);
     pane.append(&tray);
-    pane.append(&row);
+    pane.append(&card);
 
     let composer = Composer {
         view,
         pane,
         tray,
+        bar,
+        formatting,
+        which,
+        quiet: Rc::new(std::cell::Cell::new(false)),
         chosen: Rc::new(RefCell::new(Vec::new())),
         channel: Rc::new(RefCell::new(None)),
         pending: Rc::new(RefCell::new(HashMap::new())),
@@ -2797,6 +2820,7 @@ fn build_composer(placeholder: &str, emoji: &Emoji) -> Composer {
     };
     composer.wire_attach(&attach);
     composer.wire_emoji(&emoji_button, emoji);
+    composer.wire_formatting_toggle();
     composer.wire_paste();
     composer.wire_drop();
     composer
@@ -2810,6 +2834,15 @@ struct Composer {
     /// The whole column, which is what is shown, hidden and greyed.
     pane: gtk::Box,
     tray: gtk::Box,
+    /// The row of formatting buttons under the box, and the toggle
+    /// that shows and hides it.
+    bar: gtk::Box,
+    formatting: gtk::ToggleButton,
+    /// The preference name the bar's state is kept under on the server.
+    which: &'static str,
+    /// Set while the toggle is being moved to match the server, so the
+    /// move is not sent back to it.
+    quiet: Rc<std::cell::Cell<bool>>,
     chosen: Rc<RefCell<Vec<crate::bridge::Attachment>>>,
     /// Where what is attached goes up to. Set when a channel or a
     /// thread opens; with none, an attachment waits for the send.
@@ -2917,6 +2950,40 @@ impl Composer {
     }
 
     /// The paperclip: pick files, and show what was picked.
+    /// The toggle shows and hides the bar, and tells the server when it
+    /// was the reader who moved it rather than the server's own word
+    /// arriving. The webapp's preference says whether the bar is
+    /// *hidden*, so the value sent is the toggle's state the other way
+    /// round.
+    fn wire_formatting_toggle(&self) {
+        let composer = self.clone();
+        self.formatting.connect_toggled(move |toggle| {
+            let shown = toggle.is_active();
+            composer.bar.set_visible(shown);
+            if composer.quiet.get() {
+                return;
+            }
+            composer
+                .commands
+                .send(Command::SetPreference {
+                    category: "advanced_text_editor".to_owned(),
+                    name: composer.which.to_owned(),
+                    value: (!shown).to_string(),
+                })
+                .ok();
+        });
+    }
+
+    /// Move the toggle to what the server holds, without telling it so.
+    fn show_bar(&self, shown: bool) {
+        if self.formatting.is_active() == shown {
+            return;
+        }
+        self.quiet.set(true);
+        self.formatting.set_active(shown);
+        self.quiet.set(false);
+    }
+
     fn wire_attach(&self, button: &gtk::Button) {
         let composer = self.clone();
         button.connect_clicked(move |button| {
@@ -3825,6 +3892,69 @@ fn attach_formatting(view: &gtk::TextView) {
 
 /// Put `marker` round what is selected, or take it off again.
 fn format_selection(view: &gtk::TextView, marker: &str) {
+    reshape(view, |text, start, end| {
+        mm_md::wrap(text, start, end, marker)
+    });
+}
+
+/// Mattermost's formatting bar: the markers the keys offer, and the
+/// line shapes -- heading, lists, quote -- and a link, which have no
+/// key. Each button is a toggle where the markdown allows one, and
+/// none takes the focus, so the selection it works on stays put.
+fn build_formatting_bar(view: &gtk::TextView) -> gtk::Box {
+    type Shape = fn(&str, usize, usize) -> mm_md::Wrapped;
+    /// Each button: its name, its icon (or a label, after `=`), and
+    /// what it does to the text.
+    const BUTTONS: &[(&str, &str, Shape)] = &[
+        ("Bold", "format-text-bold-symbolic", |t, s, e| {
+            mm_md::wrap(t, s, e, "**")
+        }),
+        ("Italic", "format-text-italic-symbolic", |t, s, e| {
+            mm_md::wrap(t, s, e, "*")
+        }),
+        (
+            "Strikethrough",
+            "format-text-strikethrough-symbolic",
+            |t, s, e| mm_md::wrap(t, s, e, "~~"),
+        ),
+        ("Heading", "=H", |t, s, e| {
+            mm_md::prefix_lines(t, s, e, "### ")
+        }),
+        ("Link", "insert-link-symbolic", mm_md::link),
+        ("Code", "=</>", |t, s, e| mm_md::wrap(t, s, e, "`")),
+        ("Bulleted list", "view-list-bullet-symbolic", |t, s, e| {
+            mm_md::prefix_lines(t, s, e, "- ")
+        }),
+        (
+            "Numbered list",
+            "view-list-ordered-symbolic",
+            mm_md::number_lines,
+        ),
+        ("Quote", "format-indent-more-symbolic", |t, s, e| {
+            mm_md::prefix_lines(t, s, e, "> ")
+        }),
+    ];
+    let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    bar.set_margin_start(4);
+    bar.set_margin_bottom(2);
+    for (name, look, shape) in BUTTONS {
+        let button = match look.strip_prefix('=') {
+            Some(label) => gtk::Button::with_label(label),
+            None => gtk::Button::from_icon_name(look),
+        };
+        button.set_tooltip_text(Some(name));
+        button.add_css_class("flat");
+        button.set_focus_on_click(false);
+        let view = view.clone();
+        button.connect_clicked(move |_| reshape(&view, shape));
+        bar.append(&button);
+    }
+    bar
+}
+
+/// Reshape the composer's text round its selection, and select what
+/// the shape says to afterwards.
+fn reshape(view: &gtk::TextView, shape: impl Fn(&str, usize, usize) -> mm_md::Wrapped) {
     let buffer = view.buffer();
     let (from, to) = buffer.selection_bounds().unwrap_or_else(|| {
         (
@@ -3833,7 +3963,7 @@ fn format_selection(view: &gtk::TextView, marker: &str) {
         )
     });
     let offset = |iter: &gtk::TextIter| usize::try_from(iter.offset()).unwrap_or(0);
-    let done = mm_md::wrap(&composer_text(view), offset(&from), offset(&to), marker);
+    let done = shape(&composer_text(view), offset(&from), offset(&to));
 
     buffer.set_text(&done.text);
     let place = |at: usize| buffer.iter_at_offset(i32::try_from(at).unwrap_or(i32::MAX));
@@ -7916,6 +8046,15 @@ impl Ui {
         self.title.set_subtitle("");
     }
 
+    /// Both formatting bars to what the server holds for them.
+    fn refresh_formatting(&self) {
+        let store = self.store.borrow();
+        self.composer
+            .show_bar(!store.formatting_hidden(self.composer.which));
+        self.thread_composer
+            .show_bar(!store.formatting_hidden(self.thread_composer.which));
+    }
+
     /// Apply one engine event.
     ///
     /// `borrow_mut` on the store happens here and nowhere else, which is the
@@ -9757,9 +9896,12 @@ impl Ui {
         if matches!(
             ws,
             mm_api::ws::WsEvent::PreferencesChanged(_) | mm_api::ws::WsEvent::PreferencesDeleted(_)
-        ) && matches!(&*self.pane.borrow(), Pane::Found(mm_core::Found::Saved))
-        {
-            self.commands.send(Command::Saved).ok();
+        ) {
+            // The formatting bar hidden or shown from another client.
+            self.refresh_formatting();
+            if matches!(&*self.pane.borrow(), Pane::Found(mm_core::Found::Saved)) {
+                self.commands.send(Command::Saved).ok();
+            }
         }
         // The Threads badge is not part of what the sidebar compares
         // against, so a thread moving has to say so, the way the threads
@@ -11280,6 +11422,7 @@ impl Ui {
             }
             Event::Preferences(prefs) => {
                 self.store.borrow_mut().apply_preferences(&prefs);
+                self.refresh_formatting();
             }
             Event::SearchResults { .. } | Event::PinnedPosts { .. } | Event::SavedPosts(_) => {
                 self.on_found(event);
