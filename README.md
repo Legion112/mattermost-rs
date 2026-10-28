@@ -186,20 +186,31 @@ on somebody's machine.
 session bus of its own. Faster, and what CI runs, because a runner has no
 desktop to protect.
 
-Either way, it is the real widgets. Not
-screen coordinates: GTK publishes its whole widget tree on the accessibility
-bus, the same one a screen reader uses, so a test says "press the button
-called Leave channel" and means the button. Each scenario then asks the
-*server* whether it actually happened, because a window agreeing with itself
-is not the same as a window being right. It runs headless — `xvfb-run` for a
+Either way, it is the real widgets. GTK publishes its whole widget tree on
+the accessibility bus, the same one a screen reader uses, so a test says
+"press the button called Leave channel" and means the button. What that bus
+cannot do -- Return in a box, a chord, a click into a paragraph, resting the
+pointer on a message, turning the wheel -- the driver puts on the display
+itself over XTEST, the way a keyboard and a mouse would; a widget's place
+comes from its own toplevel's X window, because the bus answers (0, 0) for
+every screen position. Each scenario then asks the *server* whether it
+actually happened, because a window agreeing with itself is not the same as
+a window being right. `--only a,b` runs the named ones, in the container
+too, and the last scenario sweeps every trace the others left so a lab kept
+across runs stays the shape the seed made. It runs headless — `xvfb-run` for a
 display, `dbus-run-session` for the bus the accessibility bus activates off —
 and a failure writes a screenshot of the window into `target/ui-failures/`,
 which CI keeps as an artefact.
 
-Writing those tests found three things nothing else had: a thread's reply
+Writing those tests keeps finding things nothing else had: a thread's reply
 count that depended on which of two requests answered first, a channel menu
-whose button announced its entire contents to a screen reader, and a crash
-when the channel name was activated twice from the keyboard.
+whose button announced its entire contents to a screen reader, a crash when
+the channel name was activated twice from the keyboard; and in one night of
+writing thirty more, a typing frame read from the wrong half of the message,
+a mention arriving live that never raised the badge, a first direct message
+that reached nothing until the next sync, a mention of yourself drawn as
+plain text in a channel you had not spoken in, a "New messages" line above
+your own message, and a webapp draft whose files were dropped on send.
 
 ### What the tests cannot prove
 

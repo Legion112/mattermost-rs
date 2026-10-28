@@ -1707,9 +1707,15 @@ pub async fn contained(
     // messages measure nothing; measuring a switch needs channels to
     // wander through, more than the client keeps drawn.
     let switching = std::env::var("MMRS_PERF_MODE").is_ok_and(|mode| mode == "switch");
+    // `MMRS_LAB_BULK` asks for more channels than are toured, for what a
+    // sidebar of a hundred costs on every redraw.
+    let bulk = std::env::var("MMRS_LAB_BULK")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(TOURED);
     crate::seed::seed_with(
         if perf.is_some() && switching {
-            TOURED
+            bulk.max(TOURED)
         } else {
             0
         },
