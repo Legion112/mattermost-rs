@@ -46,7 +46,10 @@ raised here the same way, so the badge appears with the message rather \
 than with the next sync. Not for the reader's own message, and not twice \
 for a frame replayed after a reconnect. Verified in the lab: a colleague's \
 `@legion` in a channel not open put a 1 on its row, and opening the \
-channel took it off here and left the server counting none."""
+channel took it off here and left the server counting none. The "New messages" line \
+never sits above the reader's own message either -- they were there when \
+they wrote it, whatever the server's view time says -- which the lab's \
+own sent message showed it doing."""
 
 [[feature]]
 id       = "calls"

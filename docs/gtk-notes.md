@@ -516,3 +516,35 @@ A `user_updated` runs `refresh_moods` over the registry, and so does the
 once-a-minute presence poll, which is what catches a status that has
 run out -- there is no event for that. `moods 0.01-0.08ms`, binds
 unchanged.
+
+## Driving it from outside
+
+The lab drives the window over AT-SPI, and two things about that were
+learnt the long way.
+
+**AT-SPI does not know where anything is on the screen.** `GetExtents`
+with the screen coordinate type answers `(0, 0)` for every widget: GTK
+knows a widget's place in its window and nothing true about the
+window's place on the screen, which on X11 without a window manager
+it cannot ask. Ask for the window coordinate type (1) and add where X
+says the toplevel is -- the biggest child of the root, which with no
+window manager is the window itself, mapped where it asked to be. The
+first clicks all landed on the title bar for this reason.
+
+**A click is one gesture on one connection.** Fake input goes through
+XTEST, and a motion on one X connection followed by a press and a
+release on another never reached GTK, while the same three requests
+from xdotool did. xdotool holds one connection for the whole thing:
+motion, press, a twelve-millisecond finger, release, one flush. Done
+that way the click arrives. And before the button goes down the
+toplevel under the pointer is handed the keyboard outright
+(`SetInputFocus`): a click into an inactive window put the caret in
+the box, and GTK gave the focus back to the last focused widget the
+moment the window was activated, so Return went to a button.
+
+**GTK answers `GrabFocus` and `GetRangeExtents` with NotSupported** on
+a label, so a word inside a label cannot be placed for a click; a
+mention at the start of a message is clicked at the label's top-left.
+And a `GtkLabel`'s accessible name is its text, a `GtkTextView`'s is
+nothing unless it is given one -- every text box the lab types into
+carries an accessible label, because a placeholder is not a name.
