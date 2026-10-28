@@ -330,7 +330,8 @@ impl Client {
     fn measuring(home: &Path) -> Result<Self> {
         // Opening the channel has to happen before the sweep starts, and
         // signing in from cold is most of that wait.
-        Self::spawn(home, &[("MMRS_PERF", "1"), ("MMRS_PERF_AFTER", "25")])
+        let mode = std::env::var("MMRS_PERF_MODE").unwrap_or_else(|_| "1".to_owned());
+        Self::spawn(home, &[("MMRS_PERF", &mode), ("MMRS_PERF_AFTER", "25")])
     }
 
     fn stop(&mut self) {

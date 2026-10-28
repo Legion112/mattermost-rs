@@ -65,6 +65,17 @@ pub(crate) fn watching() -> bool {
     std::env::var_os("MMRS_PERF").is_some()
 }
 
+/// `MMRS_PERF=startup` measures the main loop from launch without
+/// touching the scroll position.
+///
+/// A channel that will not open for seven seconds is not waiting on the
+/// network -- the window draws what it already holds before it asks for
+/// anything -- so what is being measured is whether the GUI thread is
+/// free to notice the click at all.
+pub(crate) fn watching_startup() -> bool {
+    std::env::var("MMRS_PERF").is_ok_and(|v| v == "startup")
+}
+
 /// How long to wait before sweeping, so the channel under test can be
 /// opened first.
 pub(crate) fn delay() -> Duration {
@@ -100,6 +111,10 @@ pub(crate) fn bound(took: Duration) {
 /// a channel with a year of history has no top worth reaching.
 pub(crate) fn sweep(scroller: &gtk::ScrolledWindow) {
     if CLAIMED.with(|c| c.replace(true)) {
+        return;
+    }
+    if watching_startup() {
+        watch_startup(scroller);
         return;
     }
     eprintln!("perf: sweeping once {:?} of frames have passed", delay());
@@ -160,6 +175,40 @@ pub(crate) fn sweep(scroller: &gtk::ScrolledWindow) {
         }
         waited.set(0);
         adjustment.set_value(next);
+        glib::ControlFlow::Continue
+    });
+}
+
+/// Record the main loop from launch, scrolling nothing.
+///
+/// Every frame interval while the window starts up, syncs, warms its
+/// channels and draws its sidebar. A frame that takes a second is a
+/// second in which no click is noticed, and that is what a channel
+/// taking seven seconds to open actually is.
+fn watch_startup(scroller: &gtk::ScrolledWindow) {
+    eprintln!(
+        "perf: watching the main loop from launch -- switch between channels \
+         while this runs, and it will report after {FRAMES} frames"
+    );
+    STATE.with_borrow_mut(|state| *state = Some(Run::default()));
+    scroller.add_tick_callback(move |_, clock| {
+        let now = clock.frame_time();
+        let enough = STATE.with_borrow_mut(|state| {
+            let Some(run) = state.as_mut() else {
+                return true;
+            };
+            if let Some(before) = run.last {
+                run.frames.push(Duration::from_micros(
+                    now.saturating_sub(before).unsigned_abs(),
+                ));
+            }
+            run.last = Some(now);
+            run.frames.len() >= FRAMES
+        });
+        if enough {
+            report("startup");
+            return glib::ControlFlow::Break;
+        }
         glib::ControlFlow::Continue
     });
 }

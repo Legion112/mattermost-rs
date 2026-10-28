@@ -45,6 +45,8 @@ COPY target/release/mmlab /usr/bin/mmlab
 
 # A runtime directory of its own, which is the whole point.
 ENV XDG_RUNTIME_DIR=/run/mmrs
+# Which measurement `perf` takes; see crates/mm-gui/src/perf.rs.
+ENV MMRS_PERF_MODE=1
 RUN mkdir -p /run/mmrs && chmod 700 /run/mmrs
 
 # The driver is the entrypoint and the scenarios are the default command,

@@ -8092,6 +8092,10 @@ impl Ui {
 
     /// Go to a channel: what it opens, and what it closes.
     fn open_channel(&self, id: &ChannelId) {
+        crate::perf::marked("open_channel", || self.open_channel_inner(id));
+    }
+
+    fn open_channel_inner(&self, id: &ChannelId) {
         // `refresh_sidebar` rebuilds every row and re-selects the open
         // channel, so the selection handler fires on its own output.
         // Without this guard each WebSocket event -- including a
@@ -8418,6 +8422,10 @@ impl Ui {
     }
 
     fn refresh_sidebar(&self) {
+        crate::perf::marked("refresh_sidebar", || self.refresh_sidebar_inner());
+    }
+
+    fn refresh_sidebar_inner(&self) {
         self.refresh_badge();
         let sections = self.store.borrow().sidebar_sections();
         // Nothing to redraw, and redrawing anyway would destroy the row
@@ -8818,11 +8826,15 @@ impl Ui {
         match event {
             Event::Teams(teams) => self.store.borrow_mut().apply_teams(teams),
             Event::Channels(channels) => {
-                self.store.borrow_mut().apply_channels(channels);
+                crate::perf::marked("apply_channels", || {
+                    self.store.borrow_mut().apply_channels(channels);
+                });
                 self.sidebar_soon();
             }
             Event::Members(members) => {
-                self.store.borrow_mut().apply_members(members);
+                crate::perf::marked("apply_members", || {
+                    self.store.borrow_mut().apply_members(members);
+                });
                 self.sidebar_soon();
             }
             Event::Thread { root, page } => self.on_thread(&root, &page),
@@ -9027,6 +9039,10 @@ impl Ui {
     /// An attached image arrived: decode it over whatever placeholder the
     /// row is showing.
     fn on_file(&self, file: mm_types::FileId, image: Vec<u8>) {
+        crate::perf::marked("on_file", || self.on_file_inner(file, image));
+    }
+
+    fn on_file_inner(&self, file: mm_types::FileId, image: Vec<u8>) {
         let bytes = glib::Bytes::from_owned(image);
         let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
             return;
@@ -9136,6 +9152,10 @@ impl Ui {
     /// avatar is at most 128px and decodes in well under a millisecond,
     /// which is cheaper than the round trip that moving it would cost.
     fn on_avatar(&self, user: UserId, image: Vec<u8>) {
+        crate::perf::marked("on_avatar", || self.on_avatar_inner(user, image));
+    }
+
+    fn on_avatar_inner(&self, user: UserId, image: Vec<u8>) {
         let bytes = glib::Bytes::from_owned(image);
         let Ok(texture) = gdk::Texture::from_bytes(&bytes) else {
             return;
