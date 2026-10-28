@@ -967,6 +967,10 @@ fn channels_and_people_can_be_searched_on_the_server() {
         panic!("expected JSON")
     };
     assert_eq!(body, r#"{"term":"devops"}"#);
+    let Body::Json(archived) = &search_archived_channels(&team, "devops").body else {
+        panic!("expected JSON")
+    };
+    assert_eq!(archived, r#"{"deleted":true,"term":"devops"}"#);
     let found =
         parse_channel_search(&ok(r#"[{"id":"c1","display_name":"DevOps","type":"O"}]"#)).unwrap();
     assert_eq!(found[0].display_name, "DevOps");

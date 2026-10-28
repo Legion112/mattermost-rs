@@ -18,7 +18,9 @@
 //!   resync over REST.
 
 use crate::error::AppError;
-use mm_types::{ChannelId, ChannelMember, Post, PostId, Preference, Reaction, User, UserId};
+use mm_types::{
+    ChannelId, ChannelMember, Post, PostId, Preference, Reaction, Timestamp, User, UserId,
+};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -128,6 +130,16 @@ pub enum WsEvent {
     ThreadUpdated(mm_types::UserThread),
     /// The reader caught up on a thread, here or in another client.
     /// Plain fields, not nested.
+    /// A channel archived, by anybody: it leaves the sidebar, and what it
+    /// holds can still be read.
+    ChannelDeleted {
+        channel_id: ChannelId,
+        delete_at: Timestamp,
+    },
+    /// An archived channel brought back.
+    ChannelRestored {
+        channel_id: ChannelId,
+    },
     /// Preferences written from another client of this account. Saving
     /// a post is one: `flagged_post`, keyed by post id, `"true"`.
     PreferencesChanged(Vec<Preference>),
@@ -394,6 +406,16 @@ fn decode_event(
         "reaction_added" => Ok(WsEvent::ReactionAdded(nested_json(data, "reaction")?)),
         "reaction_removed" => Ok(WsEvent::ReactionRemoved(nested_json(data, "reaction")?)),
         "thread_updated" => Ok(WsEvent::ThreadUpdated(nested_json(data, "thread")?)),
+        // Sent to the whole team, so the broadcast names no channel: the
+        // channel is in the data, with the moment. The broadcast is a
+        // fallback for a server that says it there instead.
+        "channel_deleted" => Ok(WsEvent::ChannelDeleted {
+            channel_id: ChannelId::new(channel_in(data, broadcast)),
+            delete_at: Timestamp(int_field(data, "delete_at")),
+        }),
+        "channel_restored" => Ok(WsEvent::ChannelRestored {
+            channel_id: ChannelId::new(channel_in(data, broadcast)),
+        }),
         // Like `post`: a JSON array inside a JSON string.
         "preferences_changed" => Ok(WsEvent::PreferencesChanged(nested_json(
             data,
@@ -461,6 +483,15 @@ fn decode_event(
         other => Ok(WsEvent::Unknown {
             event: other.to_owned(),
         }),
+    }
+}
+
+/// The channel a frame is about: said in the data when the frame went
+/// to a whole team, on the broadcast when it went to a channel.
+fn channel_in(data: &serde_json::Value, broadcast: &Broadcast) -> String {
+    match str_field(data, "channel_id") {
+        said if said.is_empty() => broadcast.channel_id.clone(),
+        said => said,
     }
 }
 

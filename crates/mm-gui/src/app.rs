@@ -7936,7 +7936,15 @@ impl Ui {
         let unjoined: Vec<&mm_types::Channel> = found
             .channels
             .iter()
-            .filter(|c| !store.my_member.contains_key(&c.id))
+            .filter(|c| !c.is_deleted() && !store.my_member.contains_key(&c.id))
+            .take(SWITCHER_RESULTS)
+            .collect();
+        // The archived, apart and after: they can be read, not joined or
+        // written in, and the row says so.
+        let archived: Vec<&mm_types::Channel> = found
+            .channels
+            .iter()
+            .filter(|c| c.is_deleted())
             .take(SWITCHER_RESULTS)
             .collect();
         if !unjoined.is_empty() {
@@ -7947,6 +7955,17 @@ impl Ui {
                     "#",
                     &channel.display_name,
                     "",
+                ));
+            }
+        }
+        if !archived.is_empty() {
+            list.append(&mention_heading("ARCHIVED"));
+            for channel in archived {
+                list.append(&elsewhere_row(
+                    &format!("archived:{}", channel.id),
+                    "#",
+                    &channel.display_name,
+                    "archived",
                 ));
             }
         }
@@ -7976,7 +7995,23 @@ impl Ui {
     /// reader is already in, `join:` is one they are not, and `dm:` is
     /// a person rather than a place.
     fn switcher_chose(&self, name: &str) {
-        if let Some(channel) = name.strip_prefix("join:") {
+        if let Some(channel) = name.strip_prefix("archived:") {
+            // Found by search, so the store has never held it: it is
+            // taken from the answer, and opens the way any channel does,
+            // read-only -- see `open_channel_inner`.
+            let id = ChannelId::new(channel);
+            let found = self
+                .elsewhere
+                .borrow()
+                .channels
+                .iter()
+                .find(|c| c.id == id)
+                .cloned();
+            if let Some(found) = found {
+                self.store.borrow_mut().apply_channel(found);
+                self.show_channel(&id);
+            }
+        } else if let Some(channel) = name.strip_prefix("join:") {
             self.set_status("joining…");
             self.commands
                 .send(Command::JoinChannel(ChannelId::new(channel)))
@@ -9858,6 +9893,18 @@ impl Ui {
         }));
         crate::perf::marked("open:model", || self.show_model_for(id));
         *self.composer.channel.borrow_mut() = Some(id.clone());
+        // An archived channel can be read and not written in: the box is
+        // greyed, and the status line says why.
+        let archived = self
+            .store
+            .borrow()
+            .channels
+            .get(id)
+            .is_some_and(mm_types::Channel::is_deleted);
+        self.composer_pane.set_sensitive(!archived);
+        if archived {
+            self.set_status("this channel is archived: it can be read, not written in");
+        }
         crate::perf::marked("open:draft", || self.restore_draft(id));
         crate::perf::marked("open:pane", || self.show_pane(&Pane::Channel));
         // Draw what is already held, before asking for anything. A
@@ -11223,7 +11270,13 @@ impl Ui {
                 .map_or_else(|| channel.as_str().to_owned(), |c| c.display_name.clone());
             crate::perf::switch_drew(channel.as_str(), &name, rows.len());
         }
-        self.composer_pane.set_sensitive(true);
+        // Live once there is a channel drawn -- unless the channel is an
+        // archived one, which can be read and not written in.
+        let archived = store
+            .channels
+            .get(channel)
+            .is_some_and(mm_types::Channel::is_deleted);
+        self.composer_pane.set_sensitive(!archived);
 
         // No bottom alignment. Resting a short channel's messages on the
         // composer looked better, but `valign: End` makes ListView ask for

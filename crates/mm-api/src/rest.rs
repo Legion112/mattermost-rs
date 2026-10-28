@@ -274,6 +274,15 @@ pub fn search_channels(team: &TeamId, wanted: &str) -> HttpRequest {
         .json(&serde_json::json!({ "term": wanted }))
 }
 
+/// The archived channels whose name matches: the same route, told to
+/// look among the deleted, which the server allows unless an
+/// administrator has turned viewing archived channels off.
+#[must_use]
+pub fn search_archived_channels(team: &TeamId, wanted: &str) -> HttpRequest {
+    HttpRequest::post(format!("{API}/teams/{team}/channels/search"))
+        .json(&serde_json::json!({ "term": wanted, "deleted": true }))
+}
+
 pub fn parse_channel_search(resp: &HttpResponse) -> Result<Vec<Channel>, ApiError> {
     parse_json(resp, "POST /teams/{team}/channels/search")
 }

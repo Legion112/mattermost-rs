@@ -48,6 +48,7 @@ pub const SCENARIOS: &[&str] = &[
     "jumps-with-the-switcher",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
+    "opens-an-archived-channel",
     "leaves-a-channel",
     "joins-from-the-switcher",
     "tidies-the-lab",
@@ -152,6 +153,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
+        "opens-an-archived-channel" => archived_channel(screen, admin).await,
         "joins-from-the-switcher" => joins_from_switcher(screen, admin).await,
         "tidies-the-lab" => tidies(admin).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
@@ -829,6 +831,77 @@ async fn draft_with_file(screen: &Screen, admin: &Admin) -> Result<()> {
     Err(Error(format!(
         "the sent message does not carry the draft's file {file}"
     )))
+}
+
+/// Whether a label sits in the sidebar, which comes after its CHANNELS
+/// heading in layout order -- the title bar says the open channel's name
+/// too, and comes first.
+fn in_sidebar(tree: &[Node], label: &str) -> bool {
+    let heading = tree
+        .iter()
+        .position(|n| n.role == "label" && n.name == "CHANNELS");
+    let last = tree
+        .iter()
+        .rposition(|n| n.role == "label" && n.name == label);
+    matches!((heading, last), (Some(h), Some(l)) if l > h)
+}
+
+/// A channel archived while the window is open leaves the sidebar at
+/// once; the switcher still finds it among the archived; opening it
+/// shows what it held with the box greyed; and restoring it brings the
+/// row back.
+async fn archived_channel(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ARCHIVE: &str = "archive-practice";
+    const ARCHIVE_LABEL: &str = "Archive Practice";
+    screen.open_channel("Engineering").await?;
+    admin.restore(ARCHIVE).await.ok();
+    screen
+        .until("the channel is in the sidebar to begin with", |tree| {
+            in_sidebar(tree, ARCHIVE_LABEL)
+        })
+        .await?;
+    admin.archive(ARCHIVE).await?;
+    screen
+        .until("the archived channel leaves the sidebar", |tree| {
+            !in_sidebar(tree, ARCHIVE_LABEL)
+        })
+        .await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x6b, &[key::CONTROL])?;
+    let finder = screen
+        .until("the switcher is up", |tree| {
+            tree.has("search box", "Find channel…")
+        })
+        .await?;
+    let entry = finder.find("search box", "Find channel…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "Archive").await?;
+    screen
+        .until("the switcher offers it among the archived", |tree| {
+            tree.has("label", "ARCHIVED") && tree.has("label", ARCHIVE_LABEL)
+        })
+        .await?;
+    screen.press_key(key::RETURN, &[])?;
+    let opened = screen
+        .until("the archived channel is open", |tree| {
+            tree.has("button", &format!("{ARCHIVE_LABEL}, "))
+        })
+        .await?;
+    // The box is greyed through its pane, which AT-SPI does not pass
+    // down to the box's own state; the status line says why, and that
+    // is what is checked.
+    if !opened.has("label", "this channel is archived") {
+        return Err(Error(
+            "the window does not say the channel is archived".to_owned(),
+        ));
+    }
+    admin.restore(ARCHIVE).await?;
+    screen
+        .until("the restored channel is back in the sidebar", |tree| {
+            in_sidebar(tree, ARCHIVE_LABEL)
+        })
+        .await?;
+    screen.open_channel("Engineering").await
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

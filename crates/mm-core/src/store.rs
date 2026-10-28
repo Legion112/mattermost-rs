@@ -1205,6 +1205,20 @@ impl Store {
         vec![Change::Found]
     }
 
+    /// A channel archived -- by anybody, over the socket -- or brought
+    /// back: the sidebar leaves out the archived, and what one holds is
+    /// kept, since it can still be read. Nothing for a channel the store
+    /// does not hold.
+    fn set_channel_archived(&mut self, channel: &ChannelId, at: Timestamp) -> Vec<Change> {
+        match self.channels.get_mut(channel) {
+            Some(held) if held.delete_at != at => {
+                held.delete_at = at;
+                vec![Change::Sidebar]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Preferences changed in another client -- saving a post, mostly,
     /// which is a preference on the wire. Kept in step here the way a
     /// sync would keep it, so the menu offers the right half of save and
@@ -1659,6 +1673,13 @@ impl Store {
                     .map_or(Timestamp::ZERO, |c| c.last_post_at);
                 self.mark_viewed(channel_id, now);
                 vec![Change::ReadState]
+            }
+            WsEvent::ChannelDeleted {
+                channel_id,
+                delete_at,
+            } => self.set_channel_archived(channel_id, *delete_at),
+            WsEvent::ChannelRestored { channel_id } => {
+                self.set_channel_archived(channel_id, Timestamp::ZERO)
             }
             WsEvent::PreferencesChanged(prefs) => self.on_preferences_changed(prefs),
             WsEvent::PreferencesDeleted(prefs) => self.on_preferences_deleted(prefs),

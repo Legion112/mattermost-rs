@@ -91,6 +91,8 @@ const CHANNELS: &[(&str, &str, bool, &[&str])] = &[
         &["grace", "linus"],
     ),
     ("secret-plans", "Secret Plans", true, &["margaret"]),
+    // Exists to be archived and brought back, for the same reason.
+    ("archive-practice", "Archive Practice", false, &["ada"]),
 ];
 
 /// A 16x16 PNG of a flat square, for the custom emoji. Generated rather than
@@ -363,12 +365,25 @@ async fn find_or_make_channel(
     if let Some(channel) = made {
         return id_of(&channel);
     }
+    // Among the archived too: a run that archived a channel and died
+    // before restoring it must not leave the next seed unable to find
+    // it, or to make it, since the name is still taken.
     let found = admin
         .call(&HttpRequest::get(format!(
-            "/api/v4/teams/{team}/channels/name/{name}"
+            "/api/v4/teams/{team}/channels/name/{name}?include_deleted=true"
         )))
         .await?;
-    id_of(&found)
+    let id = id_of(&found)?;
+    if found["delete_at"].as_i64().unwrap_or(0) > 0 {
+        admin
+            .call(&HttpRequest::new(
+                Method::Post,
+                format!("/api/v4/channels/{id}/restore"),
+            ))
+            .await?;
+        println!("restored archived channel {name}");
+    }
+    Ok(id)
 }
 
 /// Upload `:lab:` so the inline custom-emoji path has something to render.
@@ -597,10 +612,12 @@ impl Admin {
     }
 
     async fn channel(&self, name: &str) -> Result<String> {
+        // Among the archived too: a test that archives a channel still
+        // has to find it, to bring it back.
         let found = self
             .api
             .call(&HttpRequest::get(format!(
-                "/api/v4/teams/{}/channels/name/{name}",
+                "/api/v4/teams/{}/channels/name/{name}?include_deleted=true",
                 self.team
             )))
             .await?;
@@ -1058,6 +1075,32 @@ impl Admin {
                 .await?;
         }
         Ok(())
+    }
+
+    /// Archive a channel, as the admin: what sends everybody a
+    /// `channel_deleted`.
+    pub async fn archive(&self, channel: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(&HttpRequest::new(
+                Method::Delete,
+                format!("/api/v4/channels/{id}"),
+            ))
+            .await
+            .map(|_| ())
+    }
+
+    /// Bring an archived channel back, so a test that archives one can
+    /// be run twice.
+    pub async fn restore(&self, channel: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(&HttpRequest::new(
+                Method::Post,
+                format!("/api/v4/channels/{id}/restore"),
+            ))
+            .await
+            .map(|_| ())
     }
 
     /// Put the account back into a channel it was taken out of, so a test

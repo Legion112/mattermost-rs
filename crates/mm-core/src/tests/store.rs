@@ -3773,3 +3773,39 @@ fn the_readers_own_timed_quiet_is_remembered() {
     store.apply_statuses(&[status(ME, "online", 1_730_000_000)]);
     assert_eq!(store.my_dnd_until, None);
 }
+
+/// Archiving over the socket takes the channel out of the sidebar and
+/// keeps what it holds; restoring puts it back. A channel the store
+/// does not hold is nothing to change.
+#[test]
+fn a_channel_archived_over_the_socket_leaves_the_sidebar_until_restored() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    assert!(s.sidebar().iter().any(|r| r.channel == c1));
+    let changes = s.apply_ws(&WsEvent::ChannelDeleted {
+        channel_id: c1.clone(),
+        delete_at: Timestamp(5_000),
+    });
+    assert_eq!(changes, vec![Change::Sidebar]);
+    assert!(!s.sidebar().iter().any(|r| r.channel == c1));
+    assert!(s.channels.contains_key(&c1), "still held, for reading");
+    // Said twice is nothing new.
+    assert!(
+        s.apply_ws(&WsEvent::ChannelDeleted {
+            channel_id: c1.clone(),
+            delete_at: Timestamp(5_000),
+        })
+        .is_empty()
+    );
+    let changes = s.apply_ws(&WsEvent::ChannelRestored {
+        channel_id: c1.clone(),
+    });
+    assert_eq!(changes, vec![Change::Sidebar]);
+    assert!(s.sidebar().iter().any(|r| r.channel == c1));
+    assert!(
+        s.apply_ws(&WsEvent::ChannelRestored {
+            channel_id: ChannelId::new("c-unknown"),
+        })
+        .is_empty()
+    );
+}

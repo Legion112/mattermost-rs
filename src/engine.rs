@@ -637,15 +637,22 @@ async fn find_elsewhere(
     events: &async_channel::Sender<Event>,
 ) {
     let channels = rest::search_channels(team, wanted);
+    let archived = rest::search_archived_channels(team, wanted);
     let people = rest::search_users(team, wanted, ELSEWHERE_PEOPLE);
-    let (channels, people) = tokio::join!(
+    let (channels, archived, people) = tokio::join!(
         fetch(&a.client, &channels, rest::parse_channel_search),
+        fetch(&a.client, &archived, rest::parse_channel_search),
         fetch(&a.client, &people, rest::parse_user_search),
     );
+    // The archived carry their delete_at, which is how the window tells
+    // them apart; a server that refuses to show them answers an error,
+    // which is simply none.
+    let mut channels = channels.unwrap_or_default();
+    channels.extend(archived.unwrap_or_default());
     let _ = events
         .send(Event::Elsewhere {
             term: wanted.to_owned(),
-            channels: channels.unwrap_or_default(),
+            channels,
             people: people.unwrap_or_default(),
         })
         .await;

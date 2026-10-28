@@ -732,3 +732,45 @@ fn preferences_changed_and_deleted_are_decoded_from_the_nested_array() {
         "{out:?}"
     );
 }
+
+/// Archiving puts the channel on the broadcast and the moment in the data;
+/// restoring says only which channel.
+#[test]
+fn a_channel_archived_and_restored_is_decoded() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(
+        r#"{"event":"channel_deleted","data":{"channel_id":"c1","delete_at":1730000000000},
+            "broadcast":{"channel_id":"","team_id":"t1"},"seq":1}"#,
+    );
+    assert_eq!(
+        out[0],
+        WsOutcome::Event(WsEvent::ChannelDeleted {
+            channel_id: ChannelId::new("c1"),
+            delete_at: mm_types::Timestamp(1_730_000_000_000),
+        })
+    );
+    let out = p.on_frame(
+        r#"{"event":"channel_restored","data":{"channel_id":"c1"},"broadcast":{"channel_id":"","team_id":"t1"},"seq":2}"#,
+    );
+    assert_eq!(
+        out[0],
+        WsOutcome::Event(WsEvent::ChannelRestored {
+            channel_id: ChannelId::new("c1"),
+        })
+    );
+}
+
+/// A server that names the channel on the broadcast instead is read too.
+#[test]
+fn a_channel_event_falls_back_to_the_broadcast_channel() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(
+        r#"{"event":"channel_restored","data":{},"broadcast":{"channel_id":"c9"},"seq":1}"#,
+    );
+    assert_eq!(
+        out[0],
+        WsOutcome::Event(WsEvent::ChannelRestored {
+            channel_id: ChannelId::new("c9"),
+        })
+    );
+}

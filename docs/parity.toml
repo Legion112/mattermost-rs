@@ -553,8 +553,13 @@ live account: "test" offered a public channel outside the sidebar, "ale" \
 offered four people, and choosing one opened the conversation. Joining is lab-verified: after leaving a channel, Ctrl+K found it among \
 the ones not joined and Return put the reader back in it, on the server \
 too. **Joining** posts a "user joined the channel" notice that everybody \
-in it sees, so it was built but not tried. NOT built: archived channels, and \
-searching across teams."""
+in it sees, so it was built but not tried. **Archived channels** are found too: the switcher asks the server for \
+the archived whose name matches and lists them apart, under ARCHIVED, \
+and Return opens one read-only -- the box greyed, the status line \
+saying why -- since it can be read and not written in. A channel \
+archived while the window is open leaves the sidebar over the socket \
+(`channel_deleted`) and comes back on `channel_restored`. Verified in \
+the lab, end to end. NOT built: searching across teams."""
 
 [[feature]]
 id       = "posts.link_previews"
