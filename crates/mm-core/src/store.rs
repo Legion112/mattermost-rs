@@ -1222,6 +1222,18 @@ impl Store {
         }
     }
 
+    /// A public channel made private, over the socket: the padlock goes
+    /// on. Nothing for one already private, or one the store does not hold.
+    fn set_channel_private(&mut self, channel: &ChannelId) -> Vec<Change> {
+        match self.channels.get_mut(channel) {
+            Some(held) if held.kind != mm_types::ChannelType::Private => {
+                held.kind = mm_types::ChannelType::Private;
+                vec![Change::Sidebar]
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Preferences changed in another client -- saving a post, mostly,
     /// which is a preference on the wire. Kept in step here the way a
     /// sync would keep it, so the menu offers the right half of save and
@@ -1715,6 +1727,7 @@ impl Store {
             WsEvent::ChannelRestored { channel_id } => {
                 self.set_channel_archived(channel_id, Timestamp::ZERO)
             }
+            WsEvent::ChannelConverted { channel_id } => self.set_channel_private(channel_id),
             WsEvent::PreferencesChanged(prefs) => self.on_preferences_changed(prefs),
             WsEvent::PreferencesDeleted(prefs) => self.on_preferences_deleted(prefs),
             WsEvent::UserUpdated(user) => {

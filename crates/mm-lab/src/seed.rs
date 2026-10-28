@@ -1017,6 +1017,19 @@ impl Admin {
             .await
     }
 
+    /// Make a channel public or private, as the admin: how a test puts a
+    /// channel back the way the seed made it.
+    pub async fn set_privacy(&self, channel: &str, private: bool) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(
+                &HttpRequest::new(Method::Put, format!("/api/v4/channels/{id}/privacy"))
+                    .json(&json!({ "privacy": if private { "P" } else { "O" } })),
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// Whether the signed-in account is in a channel.
     pub async fn am_in(&self, channel: &str) -> Result<bool> {
         let mine = self

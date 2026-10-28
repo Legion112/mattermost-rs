@@ -171,6 +171,9 @@ pub enum Command {
     /// Archive a channel. It leaves the sidebar on the server's word, and
     /// can still be read, and brought back from another client.
     ArchiveChannel(ChannelId),
+    /// Make a channel private. There is no way back here: that needs an
+    /// administrator, and the webapp does not offer it either.
+    MakePrivate(ChannelId),
     /// Mark every followed thread read.
     ReadAllThreads(mm_types::TeamId),
     /// Mark a followed thread read, up to its last reply.

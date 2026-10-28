@@ -820,7 +820,14 @@ On screen: {named:#?}",
 
     async fn press_once(&self, name: &str) -> Result<()> {
         // A toggle and a switch press the same way: one action, the first.
-        const PRESSABLE: [&str; 4] = ["button", "push button", "toggle button", "switch"];
+        const PRESSABLE: [&str; 5] = [
+            "button",
+            "push button",
+            "toggle button",
+            "switch",
+            // GTK's word for a check button, with no space in it.
+            "checkbox",
+        ];
         let tree = self
             .until(&format!("a button called {name:?} is on screen"), |tree| {
                 PRESSABLE.iter().any(|role| tree.has(role, name))

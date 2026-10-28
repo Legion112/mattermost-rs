@@ -1059,8 +1059,12 @@ back to every window, this one included. **Archive channel** asks first \
 and then does what the webapp does. Both lab-verified: a header typed \
 into the dialog was the server's and then the menu's; archiving from the \
 menu left the server holding the channel archived and the sidebar \
-without it. NOT built: converting a channel to private. Membership is \
-its own row: see `channels.membership`."""
+without it. **Make this channel private** is a check in the same editor, offered on \
+a public channel only -- the way back needs an administrator, and the \
+webapp does not offer it either; the socket's `channel_converted` turns \
+the padlock on everywhere. Lab-verified: the check left the server \
+holding the channel private, and the editor then stopped offering it. \
+Membership is its own row: see `channels.membership`."""
 
 [[feature]]
 id       = "channels.membership"

@@ -1413,3 +1413,17 @@ fn the_readers_record_is_patched_with_what_changed() {
         Body::Json(r#"{"first_name":"Ada","last_name":"Lovelace","nickname":""}"#.to_owned())
     );
 }
+
+/// Privacy is a letter on the wire.
+#[test]
+fn a_channels_privacy_is_a_letter() {
+    let c = ChannelId::new("c1");
+    let req = set_channel_privacy(&c, true);
+    assert_eq!(req.method, Method::Put);
+    assert_eq!(req.path, "/api/v4/channels/c1/privacy");
+    assert_eq!(req.body, Body::Json(r#"{"privacy":"P"}"#.to_owned()));
+    assert_eq!(
+        set_channel_privacy(&c, false).body,
+        Body::Json(r#"{"privacy":"O"}"#.to_owned())
+    );
+}

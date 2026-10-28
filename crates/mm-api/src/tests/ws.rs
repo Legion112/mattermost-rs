@@ -797,3 +797,18 @@ fn a_channel_updated_is_decoded_from_the_nested_record() {
         "{out:?}"
     );
 }
+
+/// A channel made private says only which one.
+#[test]
+fn a_channel_converted_is_decoded() {
+    let mut p = WsProtocol::new();
+    let out = p.on_frame(
+        r#"{"event":"channel_converted","data":{"channel_id":"c1"},"broadcast":{"team_id":"t1"},"seq":1}"#,
+    );
+    assert_eq!(
+        out[0],
+        WsOutcome::Event(WsEvent::ChannelConverted {
+            channel_id: ChannelId::new("c1"),
+        })
+    );
+}

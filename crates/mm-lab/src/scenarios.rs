@@ -53,6 +53,7 @@ pub const SCENARIOS: &[&str] = &[
     "refuses-to-leave-town-square",
     "edits-the-channel-header",
     "archives-from-the-menu",
+    "makes-a-channel-private",
     "opens-an-archived-channel",
     "leaves-a-channel",
     "joins-from-the-switcher",
@@ -164,6 +165,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "opens-an-archived-channel" => archived_channel(screen, admin).await,
         "edits-the-channel-header" => edits_header(screen, admin).await,
         "archives-from-the-menu" => archives_from_menu(screen, admin).await,
+        "makes-a-channel-private" => makes_private(screen, admin).await,
         "joins-from-the-switcher" => joins_from_switcher(screen, admin).await,
         "tidies-the-lab" => tidies(admin).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
@@ -1104,6 +1106,81 @@ async fn edits_profile(screen: &Screen, admin: &Admin) -> Result<()> {
     Err(Error(format!(
         "the server holds position {last:?}, not {position:?}"
     )))
+}
+
+/// The editor's check makes a public channel private on the server, and
+/// the socket tells the window; the lab puts it back for next time.
+async fn makes_private(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ARCHIVE: &str = "archive-practice";
+    const ARCHIVE_LABEL: &str = "Archive Practice";
+    admin.set_privacy(ARCHIVE, false).await?;
+    admin.restore(ARCHIVE).await.ok();
+    // The way back to public is announced to nobody, so a window that
+    // signed in while the channel was private still thinks it is: a
+    // reload is how it learns, here and for a person.
+    screen.press("Reload channels").await?;
+    screen.open_channel(ARCHIVE_LABEL).await?;
+    screen.press(ARCHIVE_LABEL).await?;
+    screen.press("Edit channel…").await?;
+    let editor = screen
+        .until("the channel editor is up", |tree| {
+            tree.has("text box", "Header")
+        })
+        .await?;
+    if !editor.has("checkbox", "Make this channel private") {
+        screen.press("Cancel").await?;
+        return Err(Error(
+            "the editor does not offer to make a public channel private".to_owned(),
+        ));
+    }
+    // A check button offers no AT-SPI action; it is clicked, as a
+    // person clicks it.
+    let check = editor
+        .find("checkbox", "Make this channel private")?
+        .clone();
+    if let Err(e) = screen.click_into(&check).await {
+        screen.press("Cancel").await?;
+        return Err(e);
+    }
+    screen.press("Save").await?;
+    let mut kind = String::new();
+    for _ in 0..25 {
+        admin.channel_record(ARCHIVE).await?["type"]
+            .as_str()
+            .unwrap_or_default()
+            .clone_into(&mut kind);
+        if kind == "P" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if kind != "P" {
+        return Err(Error(format!(
+            "the server holds the channel as {kind:?}, not private"
+        )));
+    }
+    // The window heard it: the editor no longer offers the check.
+    screen.press(ARCHIVE_LABEL).await?;
+    screen.press("Edit channel…").await?;
+    screen
+        .until("the editor is up for a private channel", |tree| {
+            tree.has("text box", "Header")
+        })
+        .await?;
+    let offered = screen
+        .tree()
+        .await?
+        .has("check box", "Make this channel private");
+    screen.press("Cancel").await?;
+    admin.set_privacy(ARCHIVE, true).await.ok();
+    admin.set_privacy(ARCHIVE, false).await?;
+    screen.press("Reload channels").await?;
+    if offered {
+        return Err(Error(
+            "the editor still offers to make private a channel that is".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// The bug the lab found on its first day: the thread's reply count came

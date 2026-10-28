@@ -1192,6 +1192,9 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
         Command::ArchiveChannel(channel) => {
             best_effort(a, &rest::archive_channel(&channel), events).await;
         }
+        Command::MakePrivate(channel) => {
+            best_effort(a, &rest::set_channel_privacy(&channel, true), events).await;
+        }
         Command::ReadAllThreads(team) => {
             let user = UserId::new(&a.session.user_id);
             best_effort(a, &rest::read_all_threads(&user, &team), events).await;

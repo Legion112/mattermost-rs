@@ -3869,3 +3869,27 @@ fn a_sidebar_row_knows_it_holds_a_draft() {
     });
     assert!(!row(&s).has_draft);
 }
+
+/// A channel made private over the socket changes its kind, once.
+#[test]
+fn a_channel_converted_over_the_socket_becomes_private() {
+    let mut s = seeded();
+    let c1 = ChannelId::new("c1");
+    let changes = s.apply_ws(&WsEvent::ChannelConverted {
+        channel_id: c1.clone(),
+    });
+    assert_eq!(changes, vec![Change::Sidebar]);
+    assert_eq!(s.channels[&c1].kind, mm_types::ChannelType::Private);
+    assert!(
+        s.apply_ws(&WsEvent::ChannelConverted {
+            channel_id: c1.clone(),
+        })
+        .is_empty()
+    );
+    assert!(
+        s.apply_ws(&WsEvent::ChannelConverted {
+            channel_id: ChannelId::new("c-unknown"),
+        })
+        .is_empty()
+    );
+}

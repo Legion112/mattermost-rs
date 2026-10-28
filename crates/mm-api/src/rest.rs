@@ -424,6 +424,15 @@ pub fn patch_channel(
         .json(&serde_json::Value::Object(body))
 }
 
+/// Make a channel private, or public again: `P` or `O`, as the server
+/// spells the kinds. Only an administrator may go back to public.
+#[must_use]
+pub fn set_channel_privacy(channel: &ChannelId, private: bool) -> HttpRequest {
+    HttpRequest::put(format!("{API}/channels/{channel}/privacy")).json(&serde_json::json!({
+        "privacy": if private { "P" } else { "O" },
+    }))
+}
+
 /// Archive a channel: a `DELETE` that keeps everything, since an
 /// archived channel can still be read and brought back.
 #[must_use]

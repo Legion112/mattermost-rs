@@ -706,6 +706,7 @@ fn describe(event: &mm_api::WsEvent) -> String {
         E::ChannelUpdated(c) => format!("channel {} updated", c.id),
         E::ChannelDeleted { channel_id, .. } => format!("{channel_id} archived"),
         E::ChannelRestored { channel_id } => format!("{channel_id} restored"),
+        E::ChannelConverted { channel_id } => format!("{channel_id} made private"),
         E::PreferencesChanged(prefs) => format!("{} preference(s) changed", prefs.len()),
         E::PreferencesDeleted(prefs) => format!("{} preference(s) deleted", prefs.len()),
         E::Unknown { event } => format!("(unhandled event {event})"),

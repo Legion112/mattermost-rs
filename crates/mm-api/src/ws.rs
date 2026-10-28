@@ -143,6 +143,11 @@ pub enum WsEvent {
     ChannelRestored {
         channel_id: ChannelId,
     },
+    /// A public channel made private, by anybody: the only direction the
+    /// server announces, since the other needs an administrator.
+    ChannelConverted {
+        channel_id: ChannelId,
+    },
     /// Preferences written from another client of this account. Saving
     /// a post is one: `flagged_post`, keyed by post id, `"true"`.
     PreferencesChanged(Vec<Preference>),
@@ -418,6 +423,9 @@ fn decode_event(
             delete_at: Timestamp(int_field(data, "delete_at")),
         }),
         "channel_restored" => Ok(WsEvent::ChannelRestored {
+            channel_id: ChannelId::new(channel_in(data, broadcast)),
+        }),
+        "channel_converted" => Ok(WsEvent::ChannelConverted {
             channel_id: ChannelId::new(channel_in(data, broadcast)),
         }),
         // Like `post`: a JSON array inside a JSON string.

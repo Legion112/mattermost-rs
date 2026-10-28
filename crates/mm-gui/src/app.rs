@@ -1718,15 +1718,25 @@ const RESYNC_PAUSE: std::time::Duration = std::time::Duration::from_secs(5);
 /// The dialog behind "Edit channel…": the name, the header and the
 /// purpose, each sent only if it changed.
 fn open_channel_editor(ui: &Ui, channel: &ChannelId) {
-    let (was_name, was_header, was_purpose) = {
+    let (was_name, was_header, was_purpose, public) = {
         let store = ui.store.borrow();
         store
             .channels
             .get(channel)
             .map_or_else(Default::default, |c| {
-                (c.display_name.clone(), c.header.clone(), c.purpose.clone())
+                (
+                    c.display_name.clone(),
+                    c.header.clone(),
+                    c.purpose.clone(),
+                    c.kind == mm_types::ChannelType::Open,
+                )
             })
     };
+    // Offered on a public channel only: the way back needs an
+    // administrator, and the webapp does not offer it either.
+    let private = gtk::CheckButton::with_label("Make this channel private");
+    private.set_visible(public);
+    name_widget(&private, "Make this channel private");
     let field = |label: &str, was: &str| {
         let entry = gtk::Entry::builder().text(was).hexpand(true).build();
         name_widget(&entry, label);
@@ -1758,6 +1768,7 @@ fn open_channel_editor(ui: &Ui, channel: &ChannelId) {
     column.append(&name_line);
     column.append(&header_line);
     column.append(&purpose_line);
+    column.append(&private);
     column.append(&buttons);
     let layout = gtk::Box::new(gtk::Orientation::Vertical, 8);
     layout.append(&adw::HeaderBar::new());
@@ -1789,6 +1800,9 @@ fn open_channel_editor(ui: &Ui, channel: &ChannelId) {
             let header = changed(&header, &was_header);
             let purpose = changed(&purpose, &was_purpose);
             window.close();
+            if public && private.is_active() {
+                commands.send(Command::MakePrivate(channel.clone())).ok();
+            }
             if display_name.is_none() && header.is_none() && purpose.is_none() {
                 return;
             }
