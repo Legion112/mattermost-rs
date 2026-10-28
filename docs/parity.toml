@@ -614,8 +614,16 @@ and "this week" ends on Sunday here, not on the Saturday an en-US \
 own copy of the user carried the text, and clearing it from the menu \
 left the server with empty fields, which is how it records "none".
 
-NOT built: a do-not-disturb timer, and the status emoji beside the \
-author's name on every message the way the webapp draws it."""
+The emoji is drawn beside the author's name on every message too, the \
+way the webapp draws it, with the text as its tooltip -- read from the \
+store when the pointer rests there, not set per row. A `user_updated` \
+puts it on, or takes it off, the rows on screen without rebuilding \
+them, the way presence and faces are handled; the once-a-minute \
+presence poll is what catches one that has run out. Verified in the \
+lab: a colleague's status set over the API appeared beside her name \
+in the open channel and went when it was cleared.
+
+NOT built: a do-not-disturb timer."""
 
 [[feature]]
 id       = "posts.typing"

@@ -729,7 +729,17 @@ struct RowContext {
 }
 
 /// See `RowContext::gutters`.
-type Gutters = Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, adw::Avatar, gtk::Box)>>>;
+type Gutters = Rc<RefCell<Vec<Gutter>>>;
+
+/// The parts of one row widget that are about its author rather than
+/// its message, and so change without the row changing: the face, the
+/// presence dot and the custom status beside the name.
+struct Gutter {
+    item: glib::WeakRef<gtk::ListItem>,
+    face: adw::Avatar,
+    dot: gtk::Box,
+    mood: gtk::Box,
+}
 
 impl RowContext {
     /// Everything the rows share, made once. The caches start empty and
@@ -4690,15 +4700,64 @@ fn wire_time_tooltip(item: &gtk::ListItem, time: &gtk::Label) {
     });
 }
 
-fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    row.set_margin_start(12);
-    row.set_margin_end(12);
-    row.set_margin_top(4);
-    row.set_margin_bottom(4);
+/// The custom status of whoever a row's face belongs to -- nobody's,
+/// for a webhook under a borrowed name or the server talking -- and
+/// only while it has not run out.
+fn mood_of(data: &PostRow, store: &Rc<RefCell<Store>>) -> Option<mm_types::CustomStatus> {
+    let user = data.avatar_user()?;
+    store
+        .borrow()
+        .users
+        .get(&user)
+        .and_then(|them| them.custom_status(utc_now()))
+}
 
-    let day = build_day_separator();
+/// Put a status's emoji beside a name, when it is not the one there.
+///
+/// The emoji's name is kept on the widget, so a recycled row bound to
+/// another message by the same person -- the common case -- rebuilds
+/// nothing. The text is not here: it is the tooltip, read when asked.
+fn set_mood(mood: &gtk::Box, emoji: &Emoji, status: Option<&mm_types::CustomStatus>) {
+    let name = status.map_or("", |status| status.emoji.as_str());
+    if mood.widget_name() != name {
+        while let Some(old) = mood.first_child() {
+            mood.remove(&old);
+        }
+        if !name.is_empty() {
+            mood.append(&emoji_face(emoji, name));
+        }
+        mood.set_widget_name(name);
+    }
+    mood.set_visible(!name.is_empty());
+}
 
+/// The status text, as the tooltip on its emoji -- read from the
+/// store when the pointer rests there, for the same reason the clock's
+/// is: a tooltip set per bind was the single dearest thing a row did.
+fn wire_mood_tooltip(item: &gtk::ListItem, mood: &gtk::Box, store: &Rc<RefCell<Store>>) {
+    let holder = item.clone();
+    let store = Rc::clone(store);
+    mood.set_has_tooltip(true);
+    mood.connect_query_tooltip(move |_, _, _, _, tip| {
+        let Some(row) = holder.item().and_downcast::<PostRow>() else {
+            return false;
+        };
+        let Some(status) = mood_of(&row, &store) else {
+            return false;
+        };
+        if status.text.is_empty() {
+            return false;
+        }
+        tip.set_text(Some(&status.text));
+        true
+    });
+}
+
+/// A row's author line: the name, a BOT tag, the author's custom status
+/// and the time, in that order -- `RowWidgets::find` and the binds walk
+/// it by position. The name and the status come back too: the name
+/// takes a click, and the status goes in the gutter registry.
+fn build_header(item: &gtk::ListItem, ctx: &RowContext) -> (gtk::Box, gtk::Label, gtk::Box) {
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let author = gtk::Label::builder()
         .xalign(0.0)
@@ -4713,9 +4772,28 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
         .label("BOT")
         .css_classes(["caption-heading", "dim-label"])
         .build();
+    // The author's custom status, as its emoji, the way the webapp puts
+    // it after the name. Filled at bind time from the store and kept
+    // current through `refresh_moods`; the text is the tooltip.
+    let mood = gtk::Box::builder().visible(false).build();
+    wire_mood_tooltip(item, &mood, &ctx.store);
     header.append(&author);
     header.append(&bot);
+    header.append(&mood);
     header.append(&time);
+    (header, author, mood)
+}
+
+fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    row.set_margin_start(12);
+    row.set_margin_end(12);
+    row.set_margin_top(4);
+    row.set_margin_bottom(4);
+
+    let day = build_day_separator();
+
+    let (header, author, mood) = build_header(item, ctx);
     // A box of blocks rather than one label: a code block is a panel and a
     // rule is a line, and neither is expressible as Pango markup.
     let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -4754,7 +4832,12 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     // `adw::Avatar` draws initials when there is no picture, which means a
     // row never has to wait on the network to look finished.
     let (gutter, face, dot) = face_with_dot(32);
-    ctx.gutters.borrow_mut().push((item.downgrade(), face, dot));
+    ctx.gutters.borrow_mut().push(Gutter {
+        item: item.downgrade(),
+        face,
+        dot,
+        mood,
+    });
     let main = gtk::Box::new(gtk::Orientation::Vertical, 2);
     main.set_hexpand(true);
     // Attached images, above the file line that names them. Rebuilt on each
@@ -6095,6 +6178,7 @@ struct RowWidgets {
     dot: gtk::Box,
     main: gtk::Box,
     header: gtk::Box,
+    mood: gtk::Box,
     body: gtk::Box,
     cards: gtk::Box,
     images: gtk::Box,
@@ -6113,6 +6197,12 @@ impl RowWidgets {
         let dot = gutter.last_child().and_downcast::<gtk::Box>()?;
         let main = gutter.next_sibling().and_downcast::<gtk::Box>()?;
         let header = main.first_child().and_downcast::<gtk::Box>()?;
+        // Author, BOT tag, then the status; the time is last.
+        let mood = header
+            .first_child()?
+            .next_sibling()?
+            .next_sibling()
+            .and_downcast::<gtk::Box>()?;
         let body = header.next_sibling().and_downcast::<gtk::Box>()?;
         let cards = body.next_sibling().and_downcast::<gtk::Box>()?;
         let images = cards.next_sibling().and_downcast::<gtk::Box>()?;
@@ -6127,6 +6217,7 @@ impl RowWidgets {
             dot,
             main,
             header,
+            mood,
             body,
             cards,
             images,
@@ -6163,6 +6254,29 @@ fn set_face(face: &adw::Avatar, wanted: Option<&gdk::Texture>) {
     }
 }
 
+/// The face and the dot beside a message, and the margin that stands in
+/// for them.
+///
+/// The face belongs to the message that names its author. A grouped
+/// message keeps the *alignment* but not the gutter widget: an avatar
+/// hidden with opacity still claims its 32 pixels of height, which pushed
+/// every line of a block a row apart and undid the grouping entirely.
+fn bind_gutter(
+    face: &adw::Avatar,
+    dot: &gtk::Box,
+    main: &gtk::Box,
+    data: &PostRow,
+    ctx: &RowContext,
+    grouped: bool,
+) {
+    face.set_visible(!grouped);
+    // From the store, not the row: see `refresh_dots`.
+    let presence = ctx.store.borrow().presence(&data.author_id());
+    set_presence(dot, presence, !grouped, false);
+    main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
+    bind_face(face, data, &ctx.avatars);
+}
+
 fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     let (commands, viewer, links) = (&ctx.commands, &ctx.viewer, &ctx.links);
     let Some(data) = item.item().and_downcast::<PostRow>() else {
@@ -6177,6 +6291,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         dot,
         main,
         header,
+        mood,
         body,
         cards,
         images,
@@ -6204,16 +6319,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     let grouped = data.is_grouped();
     row.set_margin_top(if grouped { 0 } else { 6 });
 
-    // The face belongs to the message that names its author. A grouped
-    // message keeps the *alignment* but not the gutter widget: an avatar
-    // hidden with opacity still claims its 32 pixels of height, which pushed
-    // every line of a block a row apart and undid the grouping entirely.
-    face.set_visible(!grouped);
-    // From the store, not the row: see `refresh_dots`.
-    let presence = ctx.store.borrow().presence(&data.author_id());
-    set_presence(&dot, presence, !grouped, false);
-    main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
-    bind_face(&face, &data, &ctx.avatars);
+    bind_gutter(&face, &dot, &main, &data, ctx, grouped);
 
     let system = data.is_system();
     // Still the same person talking: the author line would just repeat
@@ -6224,6 +6330,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
         // author line.
         bind_author(&author, &data);
     }
+    set_mood(&mood, &ctx.emoji, mood_of(&data, &ctx.store).as_ref());
     if let Some(time) = header.last_child().and_downcast::<gtk::Label>() {
         let said = if relative {
             describe_ago(data.at())
@@ -7184,35 +7291,7 @@ impl Ui {
                 user_id,
                 ..
             }) => self.on_typing(channel_id, UserId::new(&user_id)),
-            Event::Ws(ws) => {
-                self.on_membership(&ws);
-                self.maybe_notify(&ws);
-                let changes = self.store.borrow_mut().apply_ws(&ws);
-                if changes.is_empty() {
-                    return;
-                }
-                // The Threads badge is not part of what the sidebar
-                // compares against, so a thread moving has to say so, the
-                // way the threads list arriving does.
-                if changes.contains(&mm_core::Change::Threads) {
-                    self.sidebar_stale.set(true);
-                    // A reply landing in the thread on screen has been
-                    // seen the moment it is drawn.
-                    if let mm_api::ws::WsEvent::Posted { post, .. } = &ws
-                        && self.thread_root.borrow().as_ref() == Some(&post.root_id)
-                        && self.thread_pane.is_visible()
-                    {
-                        self.read_thread(&post.root_id);
-                    }
-                }
-                // Coalesced, because events arrive in bursts -- a reconnect
-                // replays a queue of them -- and each one would otherwise
-                // redraw the open channel, the sidebar and the thread pane.
-                // A reply to the open thread arrives as an ordinary posted
-                // event, and with collapsed threads it is in no channel
-                // timeline, so the thread pane has to be in that redraw.
-                self.redraw_soon();
-            }
+            Event::Ws(ws) => self.on_ws(&ws),
             Event::ResyncRequired(why) => {
                 self.set_status(&format!("reconnected: {why}"));
                 self.commands.send(Command::Sync).ok();
@@ -8672,13 +8751,13 @@ impl Ui {
     fn refresh_dots(&self) {
         crate::perf::marked("dots", || {
             let store = self.store.borrow();
-            self.row_ctx.gutters.borrow_mut().retain(|(item, _, dot)| {
-                let Some(item) = item.upgrade() else {
+            self.row_ctx.gutters.borrow_mut().retain(|gutter| {
+                let Some(item) = gutter.item.upgrade() else {
                     return false;
                 };
                 if let Some(row) = item.item().and_downcast::<PostRow>() {
                     set_presence(
-                        dot,
+                        &gutter.dot,
                         store.presence(&row.author_id()),
                         !row.is_grouped(),
                         false,
@@ -8687,6 +8766,79 @@ impl Ui {
                 true
             });
         });
+    }
+
+    /// Somebody's custom status changed, or ran out: redraw the emoji
+    /// beside their name on the rows on screen, the way `refresh_dots`
+    /// recolours the dots. Called for a `user_updated` and once a
+    /// minute with the presence poll, which is what catches an expiry.
+    fn refresh_moods(&self) {
+        crate::perf::marked("moods", || {
+            self.row_ctx.gutters.borrow_mut().retain(|gutter| {
+                let Some(item) = gutter.item.upgrade() else {
+                    return false;
+                };
+                if let Some(row) = item.item().and_downcast::<PostRow>() {
+                    set_mood(
+                        &gutter.mood,
+                        &self.row_ctx.emoji,
+                        mood_of(&row, &self.store).as_ref(),
+                    );
+                }
+                true
+            });
+        });
+    }
+
+    /// Where people are, from a sync or the once-a-minute poll.
+    fn on_statuses(&self, statuses: &[mm_types::Status]) {
+        if !self.store.borrow_mut().apply_statuses(statuses).is_empty() {
+            self.refresh_presence();
+            self.refresh_dots();
+            self.redraw_soon();
+        }
+        // Whether or not anybody moved: this is the once-a-minute beat,
+        // and a custom status that has run out has no event.
+        self.refresh_moods();
+    }
+
+    /// A frame from the socket: apply it, and redraw what it touched.
+    fn on_ws(&self, ws: &mm_api::ws::WsEvent) {
+        self.on_membership(ws);
+        self.maybe_notify(ws);
+        let changes = self.store.borrow_mut().apply_ws(ws);
+        if changes.is_empty() {
+            return;
+        }
+        // A person changing -- their custom status, mostly -- is drawn on
+        // the rows on screen without rebuilding them.
+        if changes
+            .iter()
+            .any(|change| matches!(change, mm_core::Change::User(_)))
+        {
+            self.refresh_moods();
+        }
+        // The Threads badge is not part of what the sidebar compares
+        // against, so a thread moving has to say so, the way the threads
+        // list arriving does.
+        if changes.contains(&mm_core::Change::Threads) {
+            self.sidebar_stale.set(true);
+            // A reply landing in the thread on screen has been seen the
+            // moment it is drawn.
+            if let mm_api::ws::WsEvent::Posted { post, .. } = ws
+                && self.thread_root.borrow().as_ref() == Some(&post.root_id)
+                && self.thread_pane.is_visible()
+            {
+                self.read_thread(&post.root_id);
+            }
+        }
+        // Coalesced, because events arrive in bursts -- a reconnect replays
+        // a queue of them -- and each one would otherwise redraw the open
+        // channel, the sidebar and the thread pane. A reply to the open
+        // thread arrives as an ordinary posted event, and with collapsed
+        // threads it is in no channel timeline, so the thread pane has to
+        // be in that redraw.
+        self.redraw_soon();
     }
 
     /// One person's picture has landed: put it on their faces on screen.
@@ -8699,8 +8851,8 @@ impl Ui {
     fn refresh_faces(&self, user: &UserId) {
         crate::perf::marked("faces", || {
             let picture = self.avatars.borrow().get(user).cloned();
-            self.row_ctx.gutters.borrow_mut().retain(|(item, face, _)| {
-                let Some(item) = item.upgrade() else {
+            self.row_ctx.gutters.borrow_mut().retain(|gutter| {
+                let Some(item) = gutter.item.upgrade() else {
                     return false;
                 };
                 if item
@@ -8708,7 +8860,7 @@ impl Ui {
                     .and_downcast::<PostRow>()
                     .is_some_and(|row| row.avatar_user().as_ref() == Some(user))
                 {
-                    set_face(face, picture.as_ref());
+                    set_face(&gutter.face, picture.as_ref());
                 }
                 true
             });
@@ -10008,13 +10160,7 @@ impl Ui {
             Event::Elsewhere { .. } | Event::Joined { .. } | Event::Opened(_) => {
                 self.on_elsewhere(event);
             }
-            Event::Statuses(statuses) => {
-                if !self.store.borrow_mut().apply_statuses(&statuses).is_empty() {
-                    self.refresh_presence();
-                    self.refresh_dots();
-                    self.redraw_soon();
-                }
-            }
+            Event::Statuses(statuses) => self.on_statuses(&statuses),
             Event::CustomEmoji(_) | Event::EmojiImage { .. } => self.on_emoji(event),
             Event::MentionsLike { .. } => self.on_mentions_like(event),
             Event::ChannelRoster { channel, users } => {

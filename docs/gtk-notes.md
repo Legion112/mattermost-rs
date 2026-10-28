@@ -506,3 +506,13 @@ avatar` on the first draw of a channel, once per author per channel,
 each one a row rebuilt for a 32-pixel circle. Now it is `faces 0.03ms`
 and no splice; the first draw of the lab's Long channel went from 45
 to 31ms after the click.
+
+The custom status beside the name is the third thing in that registry
+(`Gutter { item, face, dot, mood }`). It is a box holding the emoji,
+named for the emoji it holds so a recycled row bound to another message
+by the same person rebuilds nothing; the text is a `query-tooltip`
+handler that reads the store when asked, for the reason the clock's is.
+A `user_updated` runs `refresh_moods` over the registry, and so does the
+once-a-minute presence poll, which is what catches a status that has
+run out -- there is no event for that. `moods 0.01-0.08ms`, binds
+unchanged.

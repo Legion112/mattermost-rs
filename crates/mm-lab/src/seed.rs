@@ -538,6 +538,29 @@ pub async fn set_status(username: &str, status: &str) -> Result<()> {
     .map(|_| ())
 }
 
+/// Set a seeded account's custom status, as that account: what makes
+/// the server send everybody a `user_updated` carrying the prop.
+pub async fn set_custom_status(username: &str, emoji: &str, text: &str) -> Result<()> {
+    let them = Api::as_token(&token_for(username).await?)?;
+    them.call(
+        &HttpRequest::new(Method::Put, "/api/v4/users/me/status/custom")
+            .json(&json!({ "emoji": emoji, "text": text })),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Clear it again, as that account.
+pub async fn clear_custom_status(username: &str) -> Result<()> {
+    let them = Api::as_token(&token_for(username).await?)?;
+    them.call(&HttpRequest::new(
+        Method::Delete,
+        "/api/v4/users/me/status/custom",
+    ))
+    .await
+    .map(|_| ())
+}
+
 /// Log in as a seeded account and hand back the token.
 ///
 /// For the lab's own tools, which need to be somebody to watch a socket.

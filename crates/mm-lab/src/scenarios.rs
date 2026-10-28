@@ -168,7 +168,26 @@ async fn custom_status(screen: &Screen, admin: &Admin) -> Result<()> {
         })
         .await?;
     screen.press("Clear custom status").await?;
-    server_holds(admin, None).await
+    server_holds(admin, None).await?;
+
+    // And somebody else's is drawn beside their name on every message
+    // of theirs, arriving over the socket without the rows being
+    // rebuilt -- and leaving the same way when it is cleared. Ada, not
+    // grace: grace speaks only in replies, which are in the thread.
+    crate::seed::set_custom_status("ada", "palm_tree", "On a beach").await?;
+    screen.open_channel("Engineering").await?;
+    screen
+        .until("ada's status shows beside her name", |tree| {
+            tree.has("label", "🌴")
+        })
+        .await?;
+    crate::seed::clear_custom_status("ada").await?;
+    screen
+        .until("ada's status is gone from beside her name", |tree| {
+            !tree.has("label", "🌴")
+        })
+        .await
+        .map(|_| ())
 }
 
 /// Wait, briefly, for the server's copy of the admin's custom status to
