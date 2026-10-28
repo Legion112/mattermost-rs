@@ -266,7 +266,19 @@ async fn new_reply_in_threads(screen: &Screen, admin: &Admin) -> Result<()> {
     let expected = format!("{} replies", before + 1);
     screen
         .until("the thread shows the new reply", move |tree| {
-            tree.has("label", &expected)
+            tree.has("label", &expected) && tree.has("button", "Mark this thread read")
+        })
+        .await?;
+
+    // And opening the thread is reading it: the dot goes, the way it
+    // does in every other client, without the mark-read button being
+    // pressed. Opened by its reply count, which is a button on the row
+    // the way it is under a message.
+    let expected = format!("{} replies", before + 1);
+    screen.press(&expected).await?;
+    screen
+        .until("opening the thread marks it read", |tree| {
+            !tree.has("button", "Mark this thread read")
         })
         .await
         .map(|_| ())

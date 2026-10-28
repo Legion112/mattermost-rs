@@ -382,6 +382,28 @@ impl Screen {
     /// how a list box is used, and it is the same signal a mouse would
     /// raise.
     pub async fn open_channel(&self, label: &str) -> Result<()> {
+        self.select_row(label).await?;
+        // The header button's name is the channel's name *and* its
+        // subtitle -- "Engineering 4 members" -- so this is a prefix
+        // rather than an equality, and that subtitle is itself worth
+        // asserting on later.
+        self.until(&format!("{label} is open"), |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with(label))
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Select the list row carrying `label`, the way a click does, and
+    /// wait for nothing: what selecting it opens is the caller's to
+    /// check.
+    ///
+    /// Selected and then activated, because that is what a click is.
+    /// Selecting a row that is already selected tells the window
+    /// nothing at all, and a reader who clicks the highlighted channel
+    /// to come back from Threads is doing exactly that.
+    pub async fn select_row(&self, label: &str) -> Result<()> {
         let tree = self.tree().await?;
         // Every list, not the first one: an open popover puts its own list
         // of members in the tree ahead of the sidebar, and "the first list"
@@ -402,26 +424,30 @@ impl Screen {
                     continue;
                 }
                 let index = i32::try_from(index).unwrap_or(0);
-                let done: bool = self
+                // Two halves of a click. A list that selects -- the
+                // sidebar -- answers the first; a list that does not,
+                // like the Threads view's, answers only the second; and a
+                // row that is selected already answers only the second
+                // too, since selecting it again is nothing.
+                let selected: bool = self
                     .proxy(list, SELECTION)
                     .await?
                     .call("SelectChild", &(index))
                     .await
-                    .map_err(|e| Error(format!("selecting {label:?}: {e}")))?;
-                if !done {
-                    return Err(Error(format!("the sidebar refused to select {label:?}")));
+                    .unwrap_or(false);
+                let activated = match self.proxy(row, ACTION).await {
+                    Ok(action) => action
+                        .call::<_, _, bool>("DoAction", &(0_i32))
+                        .await
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
+                if !selected && !activated {
+                    return Err(Error(format!(
+                        "the list would neither select nor activate {label:?}"
+                    )));
                 }
-                // The header button's name is the channel's name *and* its
-                // subtitle -- "Engineering 4 members" -- so this is a prefix
-                // rather than an equality, and that subtitle is itself worth
-                // asserting on later.
-                return self
-                    .until(&format!("{label} is open"), |tree| {
-                        tree.iter()
-                            .any(|n| n.role == "button" && n.name.starts_with(label))
-                    })
-                    .await
-                    .map(|_| ());
+                return Ok(());
             }
         }
         seen.sort();

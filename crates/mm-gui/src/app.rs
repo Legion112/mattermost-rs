@@ -1805,15 +1805,28 @@ fn view_row(row: &ViewRow<'_>) -> gtk::ListBoxRow {
             avatar.set_custom_image(face.as_ref());
             foot.append(&avatar);
         }
-        if !row.footer.is_empty() {
-            foot.append(
-                &gtk::Label::builder()
-                    .label(row.footer)
-                    .css_classes(["dim-label", "caption"])
-                    .build(),
-            );
-        }
+        let opener = (!row.footer.is_empty()).then(|| {
+            // A button, the way "6 replies" under a message is one: it
+            // opens the same thing the row does. The row itself has no
+            // action a screen reader -- or the lab's driver -- can ask
+            // for; this gives it one.
+            let open = gtk::Button::builder()
+                .label(row.footer)
+                .css_classes(["flat", "caption"])
+                .can_focus(false)
+                .build();
+            foot.append(&open);
+            open
+        });
         column.append(&foot);
+        let list_row = gtk::ListBoxRow::builder().child(&column).build();
+        if let Some(open) = opener {
+            let row = list_row.clone();
+            open.connect_clicked(move |_| {
+                row.activate();
+            });
+        }
+        return list_row;
     }
 
     gtk::ListBoxRow::builder().child(&column).build()
@@ -3841,23 +3854,44 @@ fn wire_categories(ui: &Ui, sidebar: &gtk::ListBox) {
 
 /// Connect choosing a channel: what it opens, and what it closes.
 fn wire_selection(ui: &Ui, sidebar: &gtk::ListBox) {
+    {
+        let ui = ui.clone();
+        sidebar.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return };
+            let name = row.widget_name();
+            // The two views sit in the same list as the channels and are
+            // selected the same way, but they open something else.
+            if name == THREADS_ROW {
+                ui.show_pane(&Pane::Threads);
+                ui.set_title("Threads", "");
+                return;
+            }
+            if name == DRAFTS_ROW {
+                ui.show_pane(&Pane::Drafts);
+                ui.set_title("Drafts", "");
+                return;
+            }
+            ui.open_channel(&ChannelId::new(name.to_string()));
+        });
+    }
+
+    // A click on the row that is already selected. `row-selected` does
+    // not fire for it -- nothing was selected -- but it is how a reader
+    // looking at Threads or Drafts comes back to the channel they were
+    // in, whose row stayed highlighted the whole time. Found by a
+    // scenario that opened Threads and then could not open the channel
+    // it had left.
     let ui = ui.clone();
-    sidebar.connect_row_selected(move |_, row| {
-        let Some(row) = row else { return };
+    sidebar.connect_row_activated(move |_, row| {
         let name = row.widget_name();
-        // The two views sit in the same list as the channels and are
-        // selected the same way, but they open something else.
-        if name == THREADS_ROW {
-            ui.show_pane(&Pane::Threads);
-            ui.set_title("Threads", "");
+        if name == THREADS_ROW || name == DRAFTS_ROW {
             return;
         }
-        if name == DRAFTS_ROW {
-            ui.show_pane(&Pane::Drafts);
-            ui.set_title("Drafts", "");
-            return;
+        let id = ChannelId::new(name.to_string());
+        if ui.selected.borrow().as_ref() == Some(&id) && *ui.pane.borrow() != Pane::Channel {
+            ui.show_pane(&Pane::Channel);
+            ui.refresh_posts(&id);
         }
-        ui.open_channel(&ChannelId::new(name.to_string()));
     });
 }
 
@@ -6844,6 +6878,14 @@ impl Ui {
                 // way the threads list arriving does.
                 if changes.contains(&mm_core::Change::Threads) {
                     self.sidebar_stale.set(true);
+                    // A reply landing in the thread on screen has been
+                    // seen the moment it is drawn.
+                    if let mm_api::ws::WsEvent::Posted { post, .. } = &ws
+                        && self.thread_root.borrow().as_ref() == Some(&post.root_id)
+                        && self.thread_pane.is_visible()
+                    {
+                        self.read_thread(&post.root_id);
+                    }
                 }
                 // Coalesced, because events arrive in bursts -- a reconnect
                 // replays a queue of them -- and each one would otherwise
@@ -8545,12 +8587,6 @@ impl Ui {
         if !thread.is_unread() {
             return None;
         }
-        let team = self
-            .store
-            .borrow()
-            .teams
-            .first()
-            .map(|team| team.id.clone())?;
         let button = gtk::Button::from_icon_name("mail-mark-read-symbolic");
         button.add_css_class("flat");
         button.set_tooltip_text(Some("Mark this thread read"));
@@ -8559,22 +8595,44 @@ impl Ui {
         button.set_can_focus(false);
         let ui = self.clone();
         let root = thread.id.clone();
-        let upto = thread.last_reply_at;
-        button.connect_clicked(move |_| {
-            if !ui.store.borrow_mut().read_thread_locally(&root).is_empty() {
-                ui.sidebar_stale.set(true);
-                ui.refresh_threads_view();
-                ui.sidebar_soon();
-            }
-            ui.commands
-                .send(Command::ReadThread {
-                    team: team.clone(),
-                    root: root.clone(),
-                    upto,
-                })
-                .ok();
-        });
+        button.connect_clicked(move |_| ui.read_thread(&root));
         Some(button)
+    }
+
+    /// Mark a followed thread read up to its newest reply, here and on
+    /// the server.
+    ///
+    /// What the button on a Threads row does, and what opening a thread
+    /// does: the row's dot went on staying after the thread had been
+    /// read, which every other client clears on sight.
+    fn read_thread(&self, root: &PostId) {
+        let (team, upto) = {
+            let store = self.store.borrow();
+            let Some(thread) = store.threads.iter().find(|held| held.id == *root) else {
+                return;
+            };
+            if !thread.is_unread() {
+                return;
+            }
+            let Some(team) = store.teams.first().map(|team| team.id.clone()) else {
+                return;
+            };
+            (team, thread.last_reply_at)
+        };
+        if !self.store.borrow_mut().read_thread_locally(root).is_empty() {
+            self.sidebar_stale.set(true);
+            if *self.pane.borrow() == Pane::Threads {
+                self.refresh_threads_view();
+            }
+            self.sidebar_soon();
+        }
+        self.commands
+            .send(Command::ReadThread {
+                team,
+                root: root.clone(),
+                upto,
+            })
+            .ok();
     }
 
     /// Whose face is drawn anywhere right now.
@@ -8700,12 +8758,13 @@ impl Ui {
         // network, rebuilt the post list and wrote a mark-read. Only a
         // real change of channel is a user action.
         if self.selected.borrow().as_ref() == Some(id) {
-            // Unless the reader is looking at Threads or Drafts, where
-            // the channel is still the selected row and clicking it is
-            // how they come back to it. Found by a scenario that opened
-            // Threads and then could not open the channel it had left.
+            // Unless the reader is looking at Threads or Drafts: their
+            // channel's row is the one they click to come back, and the
+            // sidebar keeps the view's own row selected while a view is
+            // up, so this selection can only be theirs.
             if *self.pane.borrow() != Pane::Channel {
                 self.show_pane(&Pane::Channel);
+                self.refresh_posts(id);
             }
             return;
         }
@@ -9171,6 +9230,26 @@ impl Ui {
             return;
         }
 
+        // While Threads or Drafts is up, that view's row is the one to
+        // keep selected -- it is what is on screen -- and the channel's
+        // row is then free to mean something when clicked: coming back.
+        // Re-selecting the channel here fired its handler on every
+        // rebuild, and the handler could not tell that from a click.
+        let view_row = match &*self.pane.borrow() {
+            Pane::Threads => Some(THREADS_ROW),
+            Pane::Drafts => Some(DRAFTS_ROW),
+            Pane::Channel | Pane::Found(_) => None,
+        };
+        if let Some(name) = view_row {
+            let row = (0..)
+                .map_while(|i| self.sidebar.row_at_index(i))
+                .find(|row| row.widget_name() == name);
+            if let Some(row) = row {
+                self.sidebar.select_row(Some(&row));
+                return;
+            }
+        }
+
         match to_select {
             Some(row) => self.sidebar.select_row(Some(&row)),
             // Nothing known yet: open the first channel rather than
@@ -9474,6 +9553,8 @@ impl Ui {
         *self.thread_root.borrow_mut() = Some(root.clone());
         self.restore_thread_draft(root);
         self.refresh_thread();
+        // Opening it is reading it.
+        self.read_thread(root);
     }
 
     fn on_data(&self, event: Event) {
