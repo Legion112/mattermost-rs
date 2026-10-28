@@ -20,17 +20,24 @@
 //!   of channels, a thread, a reaction, an attachment and a custom emoji —
 //!   over the same `mm_api` builders the client uses, so a route the server
 //!   has changed breaks the seed in the same place it breaks the client.
-//! - The `mmlab` binary drives both, and launches the client against the lab
-//!   with its own `XDG_STATE_HOME` so the session you use all day is
-//!   untouched.
+//! - [`ui`] and [`scenarios`] drive the client's **real widgets** over the
+//!   accessibility bus -- the same tree a screen reader reads -- and then
+//!   ask the server whether what the window claims happened actually did.
+//!   A failure writes a screenshot through [`shot`].
+//! - The `mmlab` binary drives all of it, and launches the client against
+//!   the lab with its own `XDG_STATE_HOME` so the session you use all day
+//!   is untouched.
 //!
 //! The containers are Rust values rather than a compose file so that the
 //! definitions, the readiness probe and the seeding cannot drift apart from
 //! each other.
 
 mod docker;
+pub mod scenarios;
 pub mod seed;
+pub mod shot;
 pub mod stack;
+pub mod ui;
 pub mod watch;
 
 /// Anything that went wrong in the lab, as a sentence worth printing.

@@ -218,6 +218,18 @@ lab-status: ## What the lab is doing, and its URL
 lab-logs: ## The lab server's log, where a failed boot says why
 	$(MMLAB) logs
 
+.PHONY: ui-test
+ui-test: release ## Drive the client's real widgets against a fresh lab
+	@# xvfb-run for a display and dbus-run-session for a session bus: on a
+	@# workstation both already exist and the nesting is harmless, while on
+	@# a CI runner neither does and nothing starts without them.
+	xvfb-run -a --server-args="-screen 0 1600x1200x24" \
+		dbus-run-session -- $(MMLAB) ui
+
+.PHONY: ui-test-here
+ui-test-here: release ## ui-test on the display you are looking at
+	$(MMLAB) ui
+
 .PHONY: lab-down
 lab-down: ## Stop and delete the lab, data included
 	$(MMLAB) down

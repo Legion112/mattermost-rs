@@ -237,6 +237,19 @@ struct Ui {
     refill_switcher: Rc<RefCell<Option<Refill>>>,
     /// The window, and where to write down how it was left.
     window: adw::ApplicationWindow,
+    /// The channel's name in the header, which is also the button the
+    /// channel menu hangs off. Held so its accessible name can be set from
+    /// the channel rather than computed from the menu inside it.
+    title_button: gtk::Button,
+    /// The channel menu, while one is open.
+    ///
+    /// A popover grabs the pointer, so a mouse click on the title button
+    /// while the menu is up is spent dismissing it and never reaches the
+    /// button -- which is why pressing the name twice looked like a toggle
+    /// without being one. Anything that activates the button *without* a
+    /// pointer, a keyboard or a screen reader, got a second menu stacked on
+    /// the first instead.
+    open_menu: Rc<RefCell<Option<gtk::Popover>>>,
     remember: Rc<dyn Fn(mm_desktop::Restored)>,
     /// Who has already been asked for. Without this, every redraw of a
     /// channel would re-request every face in it.
@@ -1061,6 +1074,8 @@ fn build(
         elsewhere: Rc::new(RefCell::new(Elsewhere::default())),
         refill_switcher: Rc::new(RefCell::new(None)),
         window: window.clone(),
+        title_button: channel_menu.clone(),
+        open_menu: Rc::new(RefCell::new(None)),
         remember: Rc::clone(remember),
         avatars: Rc::clone(&rows.avatars),
         typing: Rc::new(RefCell::new(HashMap::new())),
@@ -6703,6 +6718,16 @@ impl Ui {
     /// channel and the roster was fetched when it opened, so the menu
     /// opens on the click rather than after a round trip.
     fn open_channel_menu(&self, at: &gtk::Widget) {
+        // Taken out first, and the borrow let go before `popdown`: closing
+        // a popover fires `closed` *synchronously*, that handler clears
+        // this same cell, and a RefCell borrowed twice panics inside a GTK
+        // callback -- which cannot unwind, so the process aborts. The UI
+        // test found it within a minute of this toggle being written.
+        let open = self.open_menu.borrow_mut().take();
+        if let Some(open) = open {
+            open.popdown();
+            return;
+        }
         let Some(channel) = self.selected.borrow().clone() else {
             return;
         };
@@ -6787,7 +6812,12 @@ impl Ui {
             column.append(&self.leave_button(&channel, &menu));
         }
         menu.set_parent(at);
-        menu.connect_closed(gtk::Popover::unparent);
+        let held = Rc::clone(&self.open_menu);
+        menu.connect_closed(move |menu| {
+            held.borrow_mut().take();
+            menu.unparent();
+        });
+        self.open_menu.replace(Some(menu.clone()));
         menu.popup();
     }
 
@@ -7009,6 +7039,14 @@ impl Ui {
         let entry = gtk::SearchEntry::builder()
             .placeholder_text("Name or username")
             .build();
+        {
+            // A placeholder is not a name: GTK does not expose it as one, so
+            // without this the field announces itself as nothing at all.
+            use gtk::prelude::AccessibleExtManual as _;
+            entry.update_property(&[gtk::accessible::Property::Label(
+                "Add somebody to this channel",
+            )]);
+        }
         column.append(&entry);
 
         let found = gtk::ListBox::builder()
@@ -9093,6 +9131,28 @@ impl Ui {
     fn set_title(&self, name: &str, under: &str) {
         self.title.set_title(name);
         self.title.set_subtitle(under);
+        self.name_the_title_button(name, under);
+    }
+
+    /// Say what the title button is, rather than letting GTK work it out.
+    ///
+    /// The channel menu is a popover **parented to this button**, so it is
+    /// part of the button's widget subtree -- and GTK builds an accessible
+    /// name out of every label it finds there. Left alone, focusing the
+    /// channel's name makes a screen reader read the entire menu aloud:
+    /// the mute line, all four notification levels, every member, and the
+    /// Leave button. Found by the UI tests, which could not tell two
+    /// channels' buttons apart for the same reason.
+    fn name_the_title_button(&self, name: &str, under: &str) {
+        use gtk::prelude::AccessibleExtManual as _;
+
+        let said = if under.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name}, {under}")
+        };
+        self.title_button
+            .update_property(&[gtk::accessible::Property::Label(&said)]);
     }
 
     fn refresh_heading(&self, channel: &ChannelId) {
@@ -9114,6 +9174,7 @@ impl Ui {
             .collect::<Vec<_>>()
             .join("  ·  ");
         self.title.set_subtitle(&subtitle);
+        self.name_the_title_button(&heading.name, &subtitle);
     }
 
     fn refresh_posts(&self, channel: &ChannelId) {

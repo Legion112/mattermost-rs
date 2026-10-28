@@ -111,6 +111,7 @@ fn swatch_png() -> Vec<u8> {
 }
 
 /// A client bound to the lab, optionally carrying somebody's token.
+#[derive(Debug)]
 struct Api(mm_http::Client);
 
 impl Api {
@@ -512,4 +513,83 @@ pub async fn token_for(username: &str) -> Result<String> {
         .login(username)
         .await
         .map(|(token, _)| token)
+}
+
+/// What the *server* says, for a test to check the window against.
+///
+/// A UI test that only reads the window proves the window is
+/// self-consistent, which is not the same as right: the whole class of bug
+/// where a button updates the screen and never reaches the server would
+/// pass. These are the second opinion.
+#[derive(Debug)]
+pub struct Admin {
+    api: Api,
+    team: String,
+    me: String,
+}
+
+impl Admin {
+    pub async fn connect() -> Result<Self> {
+        let anon = Api::anonymous()?;
+        let (token, me) = anon.login(ADMIN).await?;
+        let api = Api::as_token(&token)?;
+        let team = id_of(
+            &api.call(&HttpRequest::get(format!("/api/v4/teams/name/{TEAM}")))
+                .await?,
+        )?;
+        Ok(Self { api, team, me })
+    }
+
+    async fn channel(&self, name: &str) -> Result<String> {
+        let found = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/teams/{}/channels/name/{name}",
+                self.team
+            )))
+            .await?;
+        id_of(&found)
+    }
+
+    /// How many people the server has in a channel.
+    pub async fn members(&self, channel: &str) -> Result<usize> {
+        let id = self.channel(channel).await?;
+        let list = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/members?per_page=200"
+            )))
+            .await?;
+        Ok(list.as_array().map_or(0, Vec::len))
+    }
+
+    /// Whether the signed-in account is in a channel.
+    pub async fn am_in(&self, channel: &str) -> Result<bool> {
+        let mine = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/me/teams/{}/channels",
+                self.team
+            )))
+            .await?;
+        Ok(mine
+            .as_array()
+            .is_some_and(|list| list.iter().any(|c| c["name"] == *channel)))
+    }
+
+    /// Put the account back into a channel it was taken out of, so a test
+    /// that leaves one can be run twice.
+    pub async fn rejoin(&self, channel: &str) -> Result<()> {
+        if self.am_in(channel).await? {
+            return Ok(());
+        }
+        let id = self.channel(channel).await?;
+        self.api
+            .call(
+                &HttpRequest::new(Method::Post, format!("/api/v4/channels/{id}/members"))
+                    .json(&json!({ "user_id": self.me })),
+            )
+            .await
+            .map(|_| ())
+    }
 }

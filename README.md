@@ -161,18 +161,43 @@ coverage gate is `make cover-gate`, and it is gated on **lines**, not regions �
 that no passing test can reach, so 100% regions would mean assertions with no
 failure messages.
 
-Beyond that there is a Docker lab (`make lab`, from P1) that runs a real
-Mattermost server and drives `mm-headless` against it, and a golden suite
-replaying traces recorded from a live server.
+Beyond that there is a **Docker lab**: `make lab-up` brings a Postgres and a
+Mattermost up on loopback in about sixteen seconds, and `make lab-seed` fills
+it with a team, five colleagues, a thread, an attachment and a custom emoji.
+`make lab-run` points the client at it with a stored session of its own, so
+the one you use all day stays signed in to your real server. It exists because
+several things — leaving a channel, adding somebody, removing them — post a
+system message into a channel other people are reading, and so cannot honestly
+be tried anywhere else.
+
+`make ui-test` drives the client's **real widgets** against that lab. Not
+screen coordinates: GTK publishes its whole widget tree on the accessibility
+bus, the same one a screen reader uses, so a test says "press the button
+called Leave channel" and means the button. Each scenario then asks the
+*server* whether it actually happened, because a window agreeing with itself
+is not the same as a window being right. It runs headless — `xvfb-run` for a
+display, `dbus-run-session` for the bus the accessibility bus activates off —
+and a failure writes a screenshot of the window into `target/ui-failures/`,
+which CI keeps as an artefact.
+
+Writing those tests found three things nothing else had: a thread's reply
+count that depended on which of two requests answered first, a channel menu
+whose button announced its entire contents to a screen reader, and a crash
+when the channel name was activated twice from the keyboard.
 
 ### What the tests cannot prove
 
 Worth stating, because the failure mode is believing a green check means more
 than it does:
 
-- **Any pixel.** The row projection and all boundary logic are pure and gated,
-  but nothing in CI renders a frame. A GUI that draws unread badges in the
-  wrong place passes everything.
+- **Any pixel.** The UI tests read the widget tree, not the screen: a widget
+  can be correct there and invisible, behind another one, or three pixels
+  wide. Nothing in CI looks at a frame, so a window that draws unread badges
+  in the wrong place passes everything.
+- **Anything a pointer does.** The UI tests activate widgets through the
+  accessibility bus, which bypasses pointer grabs — so the bug where "Leave"
+  needed two clicks, because an open popover ate the first one, would pass
+  them. That class of thing still wants a human and a mouse.
 - **That a notification is delivered.** The tests assert the `Notifier` trait
   was called with the right content, not that GNOME accepted it.
 - **The tray.** GNOME dropped StatusNotifierItem support; whether a tray icon

@@ -17,10 +17,20 @@ usage: cargo run -p mm-lab --bin mmlab -- <command>
   seed                fill a running lab with a team, colleagues, channels
                       and a conversation; safe to run twice
   reset               throw the lab away and build a fresh seeded one
+  ui [--only <name>] [--shots <dir>] [--keep-data]
+                      drive the client's own widgets against the lab and
+                      check the server agrees; a failure writes a screenshot.
+                      Builds a fresh server first unless --keep-data
   down [--keep-data]  stop and delete the lab; --keep-data keeps the volumes
   status              what is running, and the URL
   watch [as]          print every WebSocket frame the lab sends, as the
                       named account (default: the admin)
+  shot [--out <dir>]  photograph the running lab window, which is what a
+                      failing UI scenario does for itself
+  dump [--interfaces] [--menu <channel>]
+                      print the running lab window's widget tree, which is
+                      what the UI tests find their buttons in; --menu opens
+                      that channel's menu first
   logs [--lines N]    the server's log, where a failed boot says why
   run [--release] [-- args]
                       run the client against the lab, with its own stored
@@ -40,8 +50,19 @@ async fn main() -> ExitCode {
         "up" => mm_lab::stack::up().await,
         "seed" => mm_lab::seed::seed().await,
         "reset" => reset().await,
+        "ui" => {
+            let shots = flag(rest, "--shots").unwrap_or_else(|| "target/ui-failures".into());
+            mm_lab::scenarios::run(
+                flag(rest, "--only").as_deref(),
+                std::path::Path::new(&shots),
+                rest.iter().any(|a| a == "--keep-data"),
+            )
+            .await
+        }
         "down" => mm_lab::stack::down(rest.iter().any(|a| a == "--keep-data")),
         "status" => mm_lab::stack::status().map(|s| print!("{s}")),
+        "shot" => shot(flag(rest, "--out")).await,
+        "dump" => dump(rest).await,
         "watch" => {
             mm_lab::watch::watch(rest.first().map_or(mm_lab::seed::ADMIN, String::as_str)).await
         }
@@ -59,6 +80,60 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Print the lab window's widget tree.
+async fn dump(args: &[String]) -> mm_lab::Result<()> {
+    let interfaces = args.iter().any(|a| a == "--interfaces");
+    let screen = mm_lab::ui::Screen::attach("mmrs.lab").await?;
+    if let Some(channel) = flag(args, "--menu") {
+        screen.open_channel(&channel).await?;
+        screen.press(&channel).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    }
+    if let Some(button) = flag(args, "--press") {
+        screen.press(&button).await?;
+    }
+    // A popover takes a moment to reach the accessibility tree, and a dump
+    // is read by eye rather than polled.
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    let states = args.iter().any(|a| a == "--states");
+    for node in screen.tree().await? {
+        let extra = if states {
+            screen
+                .states(&node)
+                .await
+                .iter()
+                .map(|w| format!("{w:#034b}"))
+                .collect()
+        } else if interfaces {
+            screen.interfaces(&node).await
+        } else {
+            screen.actions(&node).await
+        };
+        if extra.is_empty() {
+            println!("{node}");
+        } else {
+            println!("{node}  <- {}", extra.join(", "));
+        }
+    }
+    Ok(())
+}
+
+/// Photograph the lab window, the way a failing scenario does.
+async fn shot(out: Option<String>) -> mm_lab::Result<()> {
+    let screen = mm_lab::ui::Screen::attach("mmrs.lab").await?;
+    let area = screen.window_area().await;
+    let out = out.unwrap_or_else(|| "target/ui-failures".into());
+    let path = mm_lab::shot::capture(std::path::Path::new(&out), "by-hand", area)?;
+    println!("area {area:?} -> {}", path.display());
+    Ok(())
+}
+
+/// Pull a `--flag value` pair out of an argument list.
+fn flag(args: &[String], name: &str) -> Option<String> {
+    let at = args.iter().position(|a| a == name)?;
+    args.get(at + 1).cloned()
 }
 
 fn lines(args: &[String]) -> mm_lab::Result<u32> {

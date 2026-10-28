@@ -38,6 +38,18 @@ const PACKAGES: &[(&str, &str)] = &[
     ),
     ("hunspell-en-us", "spell-checking the composer in English"),
     ("hunspell-ru", "and in Russian"),
+    // The UI tests drive the client's real widgets over the accessibility
+    // bus, inside a display server nobody is looking at. None of the three
+    // is needed to build or to run the client by hand.
+    ("xvfb", "a display for `make ui-test` to run the client in"),
+    (
+        "at-spi2-core",
+        "the accessibility bus the UI tests drive the widgets over",
+    ),
+    (
+        "dbus-daemon",
+        "a session bus for the accessibility bus to sit on",
+    ),
 ];
 
 pub(crate) fn run() -> Result<(), String> {

@@ -1001,7 +1001,10 @@ than a row that stays in the sidebar until the next restart.
 
 Verified against a lab server at 12.0.1 rather than a live one, which \
 is the whole reason the lab exists: every one of these writes posts a \
-system message into a channel that other people are reading. Adding \
+system message into a channel that other people are reading. Three of \
+the four are now checked by `make ui-test` on every run -- the real \
+buttons, driven over the accessibility bus, with the server asked \
+afterwards whether it agrees. Adding \
 linus to Engineering took the header from 4 to 5, put the system notice \
 in the conversation, and the server's member list agreed; removing him \
 put it back. Leaving took the row out of the sidebar and moved the \
