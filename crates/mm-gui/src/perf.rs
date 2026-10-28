@@ -397,6 +397,10 @@ struct Switch {
 /// more show whether it settled or kept moving.
 const CHANGES_SHOWN: u32 = 3;
 
+/// How long after a click a channel has had its say. Past this it is
+/// answering the background rather than the reader.
+const SETTLED: Duration = Duration::from_secs(6);
+
 /// A channel was clicked.
 pub(crate) fn switch_began(channel: &str) {
     if !watching_switch() {
@@ -437,6 +441,27 @@ pub(crate) fn switch_began(channel: &str) {
             name: channel.to_owned(),
             began: Instant::now(),
             drawn: 0,
+        });
+    });
+    // And again once it has had time to settle, so that a channel
+    // somebody opens and then reads -- which is most of them -- says
+    // where its time went without waiting for the next click.
+    glib::timeout_add_local_once(SETTLED, || {
+        SWITCH.with_borrow(|switch| {
+            let Some(open) = switch.as_ref() else {
+                return;
+            };
+            eprintln!(
+                "  ({} settled after {} redraws)",
+                open.name,
+                open.drawn.saturating_sub(1)
+            );
+        });
+        STATE.with_borrow_mut(|state| {
+            if let Some(run) = state.as_mut() {
+                report_marks(&run.marks);
+                run.marks.clear();
+            }
         });
     });
 }

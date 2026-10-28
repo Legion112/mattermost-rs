@@ -2039,7 +2039,7 @@ fn face_with_dot(size: i32) -> (gtk::Overlay, adw::Avatar, gtk::Box) {
 /// goes with the face and never without it: a grouped message hides the
 /// face, and hiding one without the other left a green dot floating on
 /// its own in the gutter beside the text.
-fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool) {
+fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool, told: bool) {
     for state in mm_types::Presence::ALL {
         dot.remove_css_class(state.as_str());
     }
@@ -2048,7 +2048,14 @@ fn set_presence(dot: &gtk::Box, presence: mm_types::Presence, shown: bool) {
         return;
     }
     dot.add_css_class(presence.as_str());
-    dot.set_tooltip_text(Some(presence.label()));
+    // Only where it is not being set over and over. A message row binds
+    // this on every pass, and `set_tooltip_text` costs 5.79ms on a real
+    // desktop -- see the chips in `setup_post_row`, which answer for
+    // themselves instead. The dots that keep a tooltip are the ones on
+    // a profile card or a roster row, set once when it is opened.
+    if told {
+        dot.set_tooltip_text(Some(presence.label()));
+    }
     dot.set_visible(true);
 }
 
@@ -2471,7 +2478,7 @@ fn profile_card(
     let (gutter, face, dot) = face_with_dot(96);
     face.set_text(Some(user.display_name()));
     face.set_custom_image(avatars.borrow().get(&user.id));
-    set_presence(&dot, store.borrow().presence(&user.id), true);
+    set_presence(&dot, store.borrow().presence(&user.id), true, true);
     gutter.set_halign(gtk::Align::Center);
     gutter.set_margin_bottom(10);
     column.append(&gutter);
@@ -4322,6 +4329,25 @@ fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -
     tools
 }
 
+/// The day behind "17:01", asked for when the pointer stops on it.
+///
+/// Rather than written in on every bind: `set_tooltip_text` costs
+/// 5.79ms on a real desktop -- measured, and it was a third of what
+/// binding a row cost there against 0.1ms in the test container. The
+/// `ListItem` outlives every row that passes through this widget, so it
+/// is the one handle to whatever the widget is showing now.
+fn wire_time_tooltip(item: &gtk::ListItem, time: &gtk::Label) {
+    let holder = item.clone();
+    time.set_has_tooltip(true);
+    time.connect_query_tooltip(move |_, _, _, _, tip| {
+        let Some(row) = holder.item().and_downcast::<PostRow>() else {
+            return false;
+        };
+        tip.set_text(Some(&row.full_time()));
+        true
+    });
+}
+
 fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     let row = gtk::Box::new(gtk::Orientation::Vertical, 2);
     row.set_margin_start(12);
@@ -4340,6 +4366,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
         .xalign(0.0)
         .css_classes(["dim-label", "caption"])
         .build();
+    wire_time_tooltip(item, &time);
     let bot = gtk::Label::builder()
         .label("BOT")
         .css_classes(["caption-heading", "dim-label"])
@@ -4361,6 +4388,24 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     // carry none one moment and four the next, and four buttons is cheap.
     let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     reactions.set_margin_top(2);
+    // One tooltip for the whole row of chips, answered when the pointer
+    // is actually over one.
+    //
+    // A tooltip per chip was 5.79ms *each* on a real desktop -- not the
+    // button, not the emoji, the `set_tooltip_text` call itself -- and a
+    // channel of ninety-four chips spent 544ms of its draw in it. In the
+    // test container the same call is 0.1ms, which is why this stood for
+    // months. Set once per row widget here, and those are recycled.
+    reactions.set_has_tooltip(true);
+    reactions.connect_query_tooltip(|row, x, y, _, tip| {
+        let Some(chip) = chip_at(row, x, y) else {
+            return false;
+        };
+        // The chip was named for its emoji when it was built, because a
+        // widget carries no other place to put it.
+        tip.set_text(Some(&format!(":{}:", chip.widget_name())));
+        true
+    });
 
     // The message itself sits beside a fixed gutter holding the author's
     // face, so grouped messages line up under the one that named them.
@@ -5814,7 +5859,7 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
     // hidden with opacity still claims its 32 pixels of height, which pushed
     // every line of a block a row apart and undid the grouping entirely.
     face.set_visible(!grouped);
-    set_presence(&dot, data.presence(), !grouped);
+    set_presence(&dot, data.presence(), !grouped, false);
     main.set_margin_start(if grouped { AVATAR_GUTTER } else { 0 });
     bind_face(&face, &data);
 
@@ -5834,8 +5879,6 @@ fn bind_post_row(item: &gtk::ListItem, ctx: &RowContext, relative: bool) {
             data.time()
         };
         time.set_text(&said);
-        // The clock is short either way, so the whole date lives here.
-        time.set_tooltip_text(Some(&data.full_time()));
     }
 
     // Everything below here builds widgets, and it is most of what a
@@ -6230,11 +6273,38 @@ fn section_header(section: &mm_core::SidebarSection) -> gtk::ListBoxRow {
 }
 
 /// One reaction, as a button that toggles the signed-in user's own.
+/// Which chip in a row of them is under this point.
+///
+/// Walked rather than hit-tested by GTK, because `query-tooltip` hands
+/// over coordinates in the row's own space and nothing else. A row
+/// carries a handful of chips, and this runs once when the pointer
+/// stops moving.
+fn chip_at(row: &gtk::Box, x: i32, y: i32) -> Option<gtk::Widget> {
+    // A pointer position inside one row of chips: tens of pixels, never
+    // anywhere near where `f32` starts rounding.
+    #[allow(clippy::cast_precision_loss)]
+    let at = gtk::graphene::Point::new(x as f32, y as f32);
+    let mut child = row.first_child();
+    while let Some(chip) = child {
+        if chip
+            .compute_bounds(row)
+            .is_some_and(|bounds| bounds.contains_point(&at))
+        {
+            return Some(chip);
+        }
+        child = chip.next_sibling();
+    }
+    None
+}
+
 fn reaction_chip(post: &str, summary: &mm_core::ReactionSummary, emoji: &Emoji) -> gtk::Button {
     let commands = &emoji.commands;
+    // Named rather than given a tooltip: the row of chips answers for
+    // all of them, and the name is how it knows which. See the
+    // `query-tooltip` handler in `setup_post_row`.
     let chip = gtk::Button::builder()
         .css_classes(["flat", "caption"])
-        .tooltip_text(format!(":{}:", summary.emoji))
+        .name(&summary.emoji)
         .build();
     // One of the server's own, with its picture here: the chip is the
     // image and the count side by side. Otherwise a label -- the glyph
@@ -7289,7 +7359,7 @@ impl Ui {
         let (gutter, face, dot) = face_with_dot(24);
         face.set_text(Some(user.display_name()));
         face.set_custom_image(self.avatars.borrow().get(&user.id));
-        set_presence(&dot, self.store.borrow().presence(&user.id), true);
+        set_presence(&dot, self.store.borrow().presence(&user.id), true, true);
         line.append(&gutter);
         line.append(
             &gtk::Label::builder()
@@ -7463,7 +7533,7 @@ impl Ui {
         let (gutter, face, dot) = face_with_dot(24);
         face.set_text(Some(user.display_name()));
         face.set_custom_image(self.avatars.borrow().get(&user.id));
-        set_presence(&dot, self.store.borrow().presence(&user.id), true);
+        set_presence(&dot, self.store.borrow().presence(&user.id), true, true);
         line.append(&gutter);
         line.append(
             &gtk::Label::builder()
@@ -9606,7 +9676,7 @@ impl Ui {
             face.set_custom_image(self.avatars.borrow().get(user));
             // The sidebar is the one place presence is actually used for
             // a decision: it is where the reader picks who to ask.
-            set_presence(&dot, self.store.borrow().presence(user), true);
+            set_presence(&dot, self.store.borrow().presence(user), true, true);
             return gutter.upcast();
         }
         // Icon names are not checked at build time: a name the theme does
