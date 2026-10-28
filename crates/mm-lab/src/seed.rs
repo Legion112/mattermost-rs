@@ -727,6 +727,44 @@ impl Admin {
         i64::try_from(before).map_err(|e| Error(e.to_string()))
     }
 
+    /// Delete the add/remove notices a test left in a channel, so a lab
+    /// kept across runs does not fill the channel with them: forty of
+    /// those push the seeded thread above the rows the window builds,
+    /// and the reply-count test then finds nothing to count.
+    pub async fn sweep_membership_notices(&self, channel: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=200"
+            )))
+            .await?;
+        let notices: Vec<String> = page["posts"]
+            .as_object()
+            .map(|posts| {
+                posts
+                    .values()
+                    .filter(|p| {
+                        matches!(
+                            p["type"].as_str(),
+                            Some("system_add_to_channel" | "system_remove_from_channel")
+                        )
+                    })
+                    .filter_map(|p| p["id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for post in notices {
+            self.api
+                .call(&HttpRequest::new(
+                    Method::Delete,
+                    format!("/api/v4/posts/{post}"),
+                ))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Put the account back into a channel it was taken out of, so a test
     /// that leaves one can be run twice.
     pub async fn rejoin(&self, channel: &str) -> Result<()> {

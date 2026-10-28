@@ -300,7 +300,9 @@ async fn add_and_remove(screen: &Screen, admin: &Admin) -> Result<()> {
             "the window removed linus but the server has {back} member(s), not {before}"
         )));
     }
-    screen.close_menu("Engineering").await
+    screen.close_menu("Engineering").await?;
+    // Tidy up after ourselves: see `sweep_membership_notices`.
+    admin.sweep_membership_notices("engineering").await
 }
 
 /// The default channel cannot be left, and the button has to say so rather
