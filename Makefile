@@ -226,6 +226,15 @@ ui-test: release ## Drive the client's real widgets against a fresh lab
 	@# directory, so sharing it takes down the one the desktop is using.
 	$(MMLAB) ui --headless
 
+.PHONY: ui-test-docker
+ui-test-docker: deb ## ui-test inside a container, touching nothing of yours
+	@# The strongest isolation: the client, its display, its session bus
+	@# and its accessibility bus are all inside the container. Installs
+	@# the .deb this repository builds, so the package's dependency list
+	@# is under test too.
+	$(CARGO) build --release --locked -p mm-lab --bin mmlab
+	$(MMLAB) ui --contained
+
 .PHONY: ui-test-here
 ui-test-here: release ## ui-test on the display you are looking at
 	$(MMLAB) ui

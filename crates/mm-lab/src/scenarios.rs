@@ -35,7 +35,7 @@ pub const SCENARIOS: &[&str] = &[
 const PRACTICE: &str = "leaving-practice";
 const PRACTICE_LABEL: &str = "Leaving Practice";
 
-pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool) -> Result<()> {
+pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool) -> Result<()> {
     // A fresh server unless told otherwise, and this is not fussiness.
     // Every run of `adds-and-removes-somebody` leaves two system notices in
     // Engineering -- "linus added", "linus removed" -- and after enough runs
@@ -43,11 +43,18 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool) -> Result<()
     // point `shows-a-thread-reply-count` starts failing for a reason that
     // has nothing to do with reply counts. A test whose result depends on
     // how many times it has been run before is not a test.
-    if !keep_data {
-        crate::stack::down(false)?;
+    // A guest is inside the lab's own network namespace with no Docker to
+    // call: the server is already up and seeded by whoever started this
+    // container, and `localhost:8065` is it.
+    if guest {
+        crate::stack::wait_ready().await?;
+    } else {
+        if !keep_data {
+            crate::stack::down(false)?;
+        }
+        crate::stack::up().await?;
+        crate::seed::seed().await?;
     }
-    crate::stack::up().await?;
-    crate::seed::seed().await?;
     let admin = Admin::connect().await?;
     // Only matters with --keep-data: put back what a previous run left
     // changed, so this one starts where that one did.
@@ -270,16 +277,23 @@ struct Client(Child);
 
 impl Client {
     fn start(home: &Path) -> Result<Self> {
-        let binary = ["target/release", "target/debug"]
-            .into_iter()
-            .map(|dir| repo_root().join(dir).join("mattermost-rs"))
-            .find(|p| p.is_file())
-            .ok_or_else(|| {
-                Error(
-                    "no client to test: run `cargo build --release --bin mattermost-rs` first"
-                        .to_owned(),
-                )
-            })?;
+        // The build tree first, then the installed one. Inside the test
+        // container there is no build tree at all -- the client is there
+        // because the .deb put it in /usr/bin, which is the whole point of
+        // testing against the package.
+        let binary = [
+            repo_root().join("target/release/mattermost-rs"),
+            repo_root().join("target/debug/mattermost-rs"),
+            PathBuf::from("/usr/bin/mattermost-rs"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            Error(
+                "no client to test: run `cargo build --release --bin mattermost-rs`, or                  install the package"
+                    .to_owned(),
+            )
+        })?;
         for dir in ["state", "cache", "data"] {
             std::fs::create_dir_all(home.join(dir))
                 .map_err(|e| Error(format!("cannot create {}: {e}", home.display())))?;
@@ -312,8 +326,19 @@ impl Client {
     }
 }
 
+/// Where the client under test keeps its session.
+///
+/// Under `target/` in a build tree, so `cargo clean` throws it away and
+/// nothing lands in the developer's real `~/.local/state`. Inside the test
+/// container there is no build tree, and anywhere writable will do --
+/// the container is thrown away after the run.
 fn lab_home() -> PathBuf {
-    repo_root().join("target/lab-home")
+    let built = repo_root().join("target");
+    if built.is_dir() {
+        built.join("lab-home")
+    } else {
+        std::env::temp_dir().join("mmrs-lab-home")
+    }
 }
 
 fn repo_root() -> PathBuf {
@@ -388,4 +413,91 @@ fn make_private(at: &Path) -> Result<()> {
         .map_err(|e| Error(format!("cannot create {}: {e}", at.display())))?;
     std::fs::set_permissions(at, std::fs::Permissions::from_mode(0o700))
         .map_err(|e| Error(format!("cannot lock down {}: {e}", at.display())))
+}
+
+/// Run the whole thing inside a container of its own.
+///
+/// The strongest isolation available, and the reason to prefer it on a
+/// machine somebody is using: the client, its display, its session bus and
+/// its accessibility bus are all inside, and none of them is the
+/// developer's. Nothing this does can reach the desktop.
+///
+/// The container shares the **lab server's** network namespace rather than
+/// joining its network, so `http://localhost:8065` inside the container is
+/// the server -- which means the client needs no different address, and
+/// the server's own `SiteURL` still matches what the client connects to.
+/// Joining the network by name instead would make the WebSocket's origin
+/// disagree with `SiteURL`, and the socket would be refused.
+pub async fn contained(shots: &Path, keep_data: bool) -> Result<()> {
+    // The server first, from out here, because there is no Docker inside.
+    if !keep_data {
+        crate::stack::down(false)?;
+    }
+    crate::stack::up().await?;
+    crate::seed::seed().await?;
+
+    build_image()?;
+    std::fs::create_dir_all(shots)
+        .map_err(|e| Error(format!("cannot create {}: {e}", shots.display())))?;
+    let out = shots
+        .canonicalize()
+        .map_err(|e| Error(format!("cannot resolve {}: {e}", shots.display())))?;
+
+    println!("running the scenarios inside {IMAGE}");
+    let status = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--network",
+            "container:mmrs-lab-app",
+            "--volume",
+        ])
+        .arg(format!("{}:/out", out.display()))
+        .arg(IMAGE)
+        .status()
+        .map_err(|e| Error(format!("could not run docker: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error(format!(
+            "the contained run exited {status}. Screenshots, if any, are in {}",
+            out.display()
+        )))
+    }
+}
+
+const IMAGE: &str = "mmrs-ui:latest";
+
+/// Build the image the scenarios run in.
+///
+/// Every time, not only when it is missing: the whole point is to test
+/// the binary as it is now, and `docker build` is a few seconds when
+/// nothing but the last two layers changed.
+fn build_image() -> Result<()> {
+    let root = repo_root();
+    for needed in ["dist", "target/release/mmlab"] {
+        if !root.join(needed).exists() {
+            return Err(Error(format!(
+                "{needed} is missing. `make deb` builds the package the image installs, and                  `cargo build --release -p mm-lab` builds the driver it runs."
+            )));
+        }
+    }
+    println!("building {IMAGE}");
+    let status = Command::new("docker")
+        .args([
+            "build",
+            "--file",
+            "docker/ui.Dockerfile",
+            "--tag",
+            IMAGE,
+            ".",
+        ])
+        .current_dir(&root)
+        .status()
+        .map_err(|e| Error(format!("could not run docker build: {e}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error(format!("docker build failed with {status}")))
+    }
 }

@@ -19,7 +19,7 @@ usage: cargo run -p mm-lab --bin mmlab -- <command>
                       further channels, for measuring anything that scales
                       with how many an account is in
   reset               throw the lab away and build a fresh seeded one
-  ui [--headless] [--only <name>] [--shots <dir>] [--keep-data]
+  ui [--contained|--headless] [--only <name>] [--shots <dir>] [--keep-data]
                       drive the client's own widgets against the lab and
                       check the server agrees; a failure writes a screenshot.
                       Builds a fresh server first unless --keep-data
@@ -57,6 +57,14 @@ async fn main() -> ExitCode {
             mm_lab::seed::seed_with(bulk).await
         }
         "reset" => reset().await,
+        "ui" if rest.iter().any(|a| a == "--contained") => {
+            let shots = flag(rest, "--shots").unwrap_or_else(|| "target/ui-failures".into());
+            mm_lab::scenarios::contained(
+                std::path::Path::new(&shots),
+                rest.iter().any(|a| a == "--keep-data"),
+            )
+            .await
+        }
         "ui" if rest.iter().any(|a| a == "--headless") => mm_lab::scenarios::headless(rest),
         "ui" => {
             let shots = flag(rest, "--shots").unwrap_or_else(|| "target/ui-failures".into());
@@ -64,6 +72,7 @@ async fn main() -> ExitCode {
                 flag(rest, "--only").as_deref(),
                 std::path::Path::new(&shots),
                 rest.iter().any(|a| a == "--keep-data"),
+                rest.iter().any(|a| a == "--guest"),
             )
             .await
         }

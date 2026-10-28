@@ -170,7 +170,23 @@ several things — leaving a channel, adding somebody, removing them — post a
 system message into a channel other people are reading, and so cannot honestly
 be tried anywhere else.
 
-`make ui-test` drives the client's **real widgets** against that lab. Not
+`make ui-test-docker` drives the client's **real widgets** against that lab,
+with the client, its display, its session bus and its accessibility bus all
+inside a container of their own. Use this one on a machine you are working
+at: `at-spi-bus-launcher` is a singleton keyed by `XDG_RUNTIME_DIR`, and a
+test run that shares the desktop's takes it down — which, if you use a
+screen reader, means your screen reader stops. The container shares the lab
+server's network namespace, so `localhost:8065` inside it is the server and
+the client needs no special address; and it installs the `.deb` this
+repository builds, so the package's dependency list is under test too — a
+missing `Depends` shows up as a window that will not start, here rather than
+on somebody's machine.
+
+`make ui-test` does the same without the container, in an Xvfb display and a
+session bus of its own. Faster, and what CI runs, because a runner has no
+desktop to protect.
+
+Either way, it is the real widgets. Not
 screen coordinates: GTK publishes its whole widget tree on the accessibility
 bus, the same one a screen reader uses, so a test says "press the button
 called Leave channel" and means the button. Each scenario then asks the
