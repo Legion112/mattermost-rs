@@ -595,7 +595,10 @@ a thread fetches its channel's roster now as well. And in the thread box \
 the people in the thread come before the rest of the channel, the later \
 speaker first. Lab-verified by `ranks-thread-people-first`: `@` in the \
 seeded thread's reply box lists its people under CHANNEL MEMBERS before \
-anyone who is not in it; the ranking with no roster at all is unit-tested."""
+anyone who is not in it; the ranking with no roster at all is unit-tested. \
+The keys scroll the popup: a selection moved by Down or Up is brought into \
+view, where before only the wheel could follow it past the first screenful \
+(`scrolls-the-mention-popup-with-the-keys`)."""
 
 [[feature]]
 id       = "posts.warm_channels"

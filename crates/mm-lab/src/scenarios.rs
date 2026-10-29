@@ -74,6 +74,7 @@ pub const SCENARIOS: &[&str] = &[
     "pastes-text-over-a-selection",
     "completes-a-mention-with-tab",
     "dismisses-the-mention-popup",
+    "scrolls-the-mention-popup-with-the-keys",
     "completes-a-mention-in-the-thread-box",
     "ranks-thread-people-first",
     "completes-an-emoji-with-tab",
@@ -241,6 +242,9 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "cancels-a-custom-status" => cancels_custom_status(screen, admin).await,
         "keeps-the-header-on-cancel" => keeps_header_on_cancel(screen, admin).await,
         "dismisses-the-mention-popup" => dismisses_mention_popup(screen).await,
+        "scrolls-the-mention-popup-with-the-keys" => {
+            scrolls_the_mention_popup_with_the_keys(screen).await
+        }
         "keeps-the-profile-on-cancel" => keeps_profile_on_cancel(screen, admin).await,
         "keeps-the-message-on-keep" => keeps_message_on_keep(screen, admin).await,
         "keeps-the-message-on-edit-cancel" => keeps_message_on_edit_cancel(screen, admin).await,
@@ -3302,6 +3306,42 @@ async fn ranks_thread_people_first(screen: &Screen, admin: &Admin) -> Result<()>
         ))),
         _ => Ok(()),
     }
+}
+
+/// Down in the `@` popup moves the selection, and the list scrolls to
+/// keep it in view: the rows move up as the selection goes past the
+/// first screenful, where before only the wheel could follow it.
+async fn scrolls_the_mention_popup_with_the_keys(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "@").await?;
+    let tree = screen
+        .until("the popup lists the channel's people", |tree| {
+            tree.iter()
+                .any(|n| n.role == "label" && n.name == "CHANNEL MEMBERS")
+        })
+        .await?;
+    // The last person offered: a row's label is exactly "@name", where
+    // a message naming somebody goes on after the name.
+    let last = tree
+        .iter()
+        .rfind(|n| n.role == "label" && n.name.starts_with('@') && !n.name.contains(' '))
+        .cloned()
+        .ok_or_else(|| Error("no person is offered".to_owned()))?;
+    let (_, before, _, _) = screen.extents(&last).await?;
+    for _ in 0..14 {
+        screen.press_key(key::DOWN, &[])?;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (_, after, _, height) = screen.extents(&last).await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen.type_into(&composer, "").await?;
+    if after > before - height / 2 {
+        return Err(Error(format!(
+            "after fourteen Downs the last row is still at {after}px, from {before}px: the list did not scroll with the keys"
+        )));
+    }
+    Ok(())
 }
 
 /// The root of the open thread deleted from elsewhere goes from the

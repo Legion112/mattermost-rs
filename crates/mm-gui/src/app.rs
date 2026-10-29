@@ -2540,7 +2540,7 @@ fn switcher_keys(
                 at - 1
             };
             if let Some(row) = list.row_at_index(next.max(0)) {
-                list.select_row(Some(&row));
+                select_in_view(&list, &row);
             }
             glib::Propagation::Stop
         }
@@ -4516,7 +4516,7 @@ fn completion_keys(
                 let at = list.selected_row().map_or(0, |r| r.index());
                 let step = if key == gdk::Key::Down { 1 } else { -1 };
                 if let Some(row) = first_selectable(&list, at + step, step) {
-                    list.select_row(Some(&row));
+                    select_in_view(&list, &row);
                 }
                 glib::Propagation::Stop
             }
@@ -4667,6 +4667,36 @@ fn mention_row(ui: &Ui, user: &mm_types::User) -> gtk::ListBoxRow {
 /// The first row at or after `from` that can hold the selection, walking
 /// in `step`'s direction. The section headings sit in the same list, so
 /// stepping by one would land the selection on a label.
+/// Select a row and bring it into view.
+///
+/// A selection moved by the keys does not scroll the list the way a
+/// focused row would, and the list in a completion popup never has the
+/// focus -- the caret stays in the box -- so past the first screenful
+/// the arrows moved a selection nobody could see, and only the wheel
+/// could follow it. Reported from the `@` popup.
+fn select_in_view(list: &gtk::ListBox, row: &gtk::ListBoxRow) {
+    list.select_row(Some(row));
+    let Some(scroller) = list
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .and_downcast::<gtk::ScrolledWindow>()
+    else {
+        return;
+    };
+    let Some(bounds) = row.compute_bounds(list) else {
+        return;
+    };
+    let adjustment = scroller.vadjustment();
+    let top = f64::from(bounds.y());
+    let bottom = top + f64::from(bounds.height());
+    let shown = adjustment.value();
+    let page = adjustment.page_size();
+    if top < shown {
+        adjustment.set_value(top);
+    } else if bottom > shown + page {
+        adjustment.set_value(bottom - page);
+    }
+}
+
 fn first_selectable(list: &gtk::ListBox, from: i32, step: i32) -> Option<gtk::ListBoxRow> {
     let mut at = from;
     while at >= 0 {
