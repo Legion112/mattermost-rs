@@ -23,6 +23,11 @@ const DEPENDS: &[&str] = &[
     // where the whole toolbar was placeholders. A desktop has it; a
     // container or a bare server does not.
     "adwaita-icon-theme",
+    // The theme's icons are SVGs, and GTK loads them through the pixbuf
+    // SVG loader, which is this package: without it every icon from the
+    // theme is the same placeholder while GTK's own bundled ones draw,
+    // which is what the lab's container showed with the theme installed.
+    "librsvg2-common",
 ];
 
 /// What makes it work properly, without which it still runs.

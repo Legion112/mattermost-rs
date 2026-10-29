@@ -29,10 +29,12 @@ FROM ubuntu:24.04
 #   fonts-dejavu-core  or every screenshot of a failure is a grid of boxes
 #   adwaita-icon-theme  or every icon in those screenshots is the broken-image
 #                       placeholder, and a wrong icon name can never be seen
+#   librsvg2-common  the SVG loader the theme's icons need; without it the
+#                    theme is installed and the placeholders stay
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       xvfb at-spi2-core dbus-daemon dbus-x11 ca-certificates fonts-dejavu-core \
-      adwaita-icon-theme \
+      adwaita-icon-theme librsvg2-common \
  && rm -rf /var/lib/apt/lists/*
 
 # The package and its dependencies. Copied separately from the apt layer

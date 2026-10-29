@@ -826,9 +826,12 @@ it off again when they all have it, a numbered list renumbering itself, and \
 the link puts `[what was selected](url)` in with the address selected to be \
 typed over. The arithmetic is in `mm_md` beside `wrap`, settled by tests. \
 Each button asks the icon theme first and is a label -- B, I, S, Link, \
-• List, 1. List, Quote -- where the theme has no such icon: newer Adwaita \
-dropped most of the editing icons, and GTK draws a broken-image \
-placeholder for a name it cannot find, which the lab's screenshots showed. \
+• List, 1. List, Quote -- where the theme has no such icon, since GTK draws \
+a broken-image placeholder for a name it cannot find and themes drop names \
+between releases. The placeholders the lab's screenshots showed had another \
+cause, found by listing the container's theme: every icon was there but \
+the pixbuf SVG loader was not, so the theme's SVGs could not be drawn while \
+GTK's own bundled PNG icons could. `librsvg2-common` is a `Depends` now. \
 For somebody who types code into chat all day a row of buttons is height \
 taken from the conversation, so the `Aa` toggle beside the smiley hides it, \
 and that choice is kept as the webapp's own `advanced_text_editor` \
@@ -1507,11 +1510,11 @@ clone and an artefact.
 The control stanza is rendered in `mm-desktop`, inside the coverage gate, \
 because what a package claims about itself is a decision and a wrong one \
 fails at install time on somebody else's machine with a dependency solver's \
-error message. GTK, libadwaita, GtkSourceView and the Adwaita icon theme are \
-`Depends` -- the theme because every button in the window is one of its \
-symbolic icons, and GTK draws a broken-image placeholder for an icon it \
-cannot find, which is what the lab's container showed before the theme \
-was put in it; the \
+error message. GTK, libadwaita, GtkSourceView, the Adwaita icon theme and the pixbuf SVG \
+loader are `Depends` -- the theme because every button in the window is \
+one of its symbolic icons, the loader because they are SVGs and GTK cannot \
+draw one without it; the lab's container showed a window of broken-image \
+placeholders first without the theme and then without the loader; the \
 dictionaries and the GNOME `AppIndicator` extension are `Recommends`, since \
 without them the client still runs -- it just draws no spelling underlines \
 and has no tray. Dependencies are named rather than derived with \

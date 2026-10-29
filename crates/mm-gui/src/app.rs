@@ -3911,9 +3911,9 @@ fn format_selection(view: &gtk::TextView, marker: &str) {
 fn build_formatting_bar(view: &gtk::TextView) -> gtk::Box {
     type Shape = fn(&str, usize, usize) -> mm_md::Wrapped;
     /// Each button: its name, its icon, the label drawn instead where the
-    /// icon theme has no such icon -- newer Adwaita dropped most of the
-    /// editing icons, and GTK draws a broken-image placeholder for a name
-    /// it cannot find -- and what it does to the text.
+    /// icon theme has no such icon -- GTK draws a broken-image placeholder
+    /// for a name it cannot find, and icon themes drop names between
+    /// releases -- and what it does to the text.
     const BUTTONS: &[(&str, &str, &str, Shape)] = &[
         ("Bold", "format-text-bold-symbolic", "B", |t, s, e| {
             mm_md::wrap(t, s, e, "**")
@@ -10442,7 +10442,7 @@ impl Ui {
         if !thread.is_unread() {
             return None;
         }
-        let button = gtk::Button::from_icon_name("mail-mark-read-symbolic");
+        let button = gtk::Button::from_icon_name("mail-read-symbolic");
         button.add_css_class("flat");
         button.set_tooltip_text(Some("Mark this thread read"));
         // Or the click reaches the row underneath and opens the very
