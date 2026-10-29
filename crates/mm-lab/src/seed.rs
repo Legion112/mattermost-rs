@@ -757,6 +757,18 @@ impl Admin {
         .map(|_| ())
     }
 
+    /// Take a colleague's reaction off a post, as them.
+    pub async fn unreact_as(&self, username: &str, post_id: &str, emoji: &str) -> Result<()> {
+        let them = Api::as_token(&token_for(username).await?)?;
+        let me = self.user_id(username).await?;
+        them.call(&HttpRequest::new(
+            Method::Delete,
+            format!("/api/v4/users/{me}/posts/{post_id}/reactions/{emoji}"),
+        ))
+        .await
+        .map(|_| ())
+    }
+
     /// Change what a colleague's post says, as them.
     pub async fn edit_as(&self, username: &str, post_id: &str, text: &str) -> Result<()> {
         let them = Api::as_token(&token_for(username).await?)?;

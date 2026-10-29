@@ -514,7 +514,10 @@ who reacted -- "you, ada and grace reacted with :+1:", the reader first \
 -- read from the store when asked, the way every row tooltip is. The \
 toolbar's one-click reactions are lab-verified by \
 `reacts-from-the-hover-toolbar`: a press reaches the server's reaction list \
-for the post and a second press takes it back."""
+for the post and a second press takes it back. One chip counts the people \
+behind it (`counts-reactions-from-two-people`): two colleagues reacting with \
+the same emoji from the API made it a 2, each taking theirs back took one \
+off, and the last took the chip away."""
 
 [[feature]]
 id       = "files.inline_images"

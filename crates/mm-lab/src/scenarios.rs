@@ -40,6 +40,7 @@ pub const SCENARIOS: &[&str] = &[
     "filters-threads-to-unreads",
     "shows-who-is-typing",
     "follows-edits-reactions-and-deletions",
+    "counts-reactions-from-two-people",
     "loses-a-thread-root-deleted-elsewhere",
     "shows-an-unread-and-clears-it",
     "filters-the-sidebar-to-unreads",
@@ -312,6 +313,7 @@ async fn more(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
         "shows-who-is-typing" => who_is_typing(screen, admin).await,
         "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
+        "counts-reactions-from-two-people" => counts_reactions_from_two_people(screen, admin).await,
         "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
         "filters-the-sidebar-to-unreads" => filters_sidebar_to_unreads(screen, admin).await,
         "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
@@ -3081,6 +3083,50 @@ async fn opens_search_with_the_keys(screen: &Screen) -> Result<()> {
         })
         .await?;
     screen.open_channel("Engineering").await
+}
+
+/// One chip counts the people behind it: two colleagues reacting with
+/// the same emoji make a 2, and each taking theirs back takes one off,
+/// down to no chip at all.
+async fn counts_reactions_from_two_people(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let said = format!(
+        "Sent from the lab for two reactions at {}",
+        crate::seed::stamp()
+    );
+    let post = admin.say_as("ada", "engineering", &said).await?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    admin.react_as("ada", &post, "thumbsup").await?;
+    screen
+        .until("one reaction makes a chip of 1", |tree| {
+            tree.has("button", "👍 1")
+        })
+        .await?;
+    admin.react_as("grace", &post, "thumbsup").await?;
+    screen
+        .until("a second person makes it 2", |tree| {
+            tree.has("button", "👍 2") && !tree.has("button", "👍 1")
+        })
+        .await?;
+    admin.unreact_as("ada", &post, "thumbsup").await?;
+    screen
+        .until("one taken back makes it 1 again", |tree| {
+            tree.has("button", "👍 1") && !tree.has("button", "👍 2")
+        })
+        .await?;
+    admin.unreact_as("grace", &post, "thumbsup").await?;
+    screen
+        .until("the last taken back takes the chip away", |tree| {
+            !tree.has("button", "👍 1")
+        })
+        .await?;
+    admin.delete_as("ada", &post).await?;
+    screen
+        .until("the message is gone", |tree| !tree.has("label", &said))
+        .await
+        .map(|_| ())
 }
 
 /// The root of the open thread deleted from elsewhere goes from the
