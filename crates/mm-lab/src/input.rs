@@ -21,6 +21,7 @@ pub mod key {
     pub const UP: u32 = 0xff52;
     pub const BACKSLASH: u32 = 0x5c;
     pub const CONTROL: u32 = 0xffe3;
+    pub const ALT: u32 = 0xffe9;
     pub const SHIFT: u32 = 0xffe1;
 }
 
@@ -352,4 +353,27 @@ pub fn clipboard_text() -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&held.value).into_owned()))
+}
+
+/// A left click with a key held: Alt+click, which marks a message unread.
+///
+/// The key goes down on a connection of its own before the click and
+/// comes up after it; the server keeps the key state, so the click's
+/// connection sees the modifier.
+pub fn click_holding(keysym: u32, x: i32, y: i32) -> Result<()> {
+    let (conn, _) = connect()?;
+    let code = keycode_for(&conn, keysym)?;
+    let fake = |type_: u8| {
+        conn.xtest_fake_input(type_, code, x11rb::CURRENT_TIME, x11rb::NONE, 0, 0, 0)
+            .map_err(|e| Error(format!("holding a key: {e}")))
+            .map(|_| ())
+    };
+    fake(xproto::KEY_PRESS_EVENT)?;
+    conn.flush()
+        .map_err(|e| Error(format!("flushing the display: {e}")))?;
+    let clicked = click_with(1, x, y);
+    fake(xproto::KEY_RELEASE_EVENT)?;
+    conn.flush()
+        .map_err(|e| Error(format!("flushing the display: {e}")))?;
+    clicked
 }

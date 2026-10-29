@@ -5604,6 +5604,7 @@ fn setup_post_row(item: &gtk::ListItem, ctx: &RowContext) {
     row.add_controller(first_hover);
 
     wire_right_click(&row, &floating, item, ctx);
+    wire_alt_click(&row, item, ctx);
 
     // A name and a face are the two places Mattermost opens a person's
     // card from, so both get the gesture and the hand cursor that says
@@ -5661,6 +5662,41 @@ fn wire_right_click(
         }
     });
     row.add_controller(right);
+}
+
+/// Alt+click marks the message unread, Mattermost's own binding: the
+/// quickest way to leave a conversation with a reminder to come back.
+/// Capture phase and claimed on press, so the text underneath does not
+/// take the press for the start of a selection.
+fn wire_alt_click(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) {
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_PRIMARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let (item, commands) = (item.clone(), ctx.commands.clone());
+    click.connect_pressed(move |gesture, _, _, _| {
+        let held = gesture
+            .current_event_state()
+            .contains(gdk::ModifierType::ALT_MASK);
+        if !held {
+            // Out of the way at once: a capture-phase gesture that merely
+            // watches a press still kept the text view under it from
+            // taking the focus on a plain click, which the lab noticed.
+            gesture.set_state(gtk::EventSequenceState::Denied);
+            return;
+        }
+        let Some(data) = item.item().and_downcast::<PostRow>() else {
+            return;
+        };
+        if data.is_separator() {
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        commands
+            .send(Command::MarkUnread(PostId::new(data.id())))
+            .ok();
+    });
+    row.add_controller(click);
 }
 
 /// The row's toolbar, made the first time it is asked for.

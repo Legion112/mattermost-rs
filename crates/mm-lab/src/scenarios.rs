@@ -63,6 +63,7 @@ pub const SCENARIOS: &[&str] = &[
     "forwards-from-the-menu",
     "copies-from-the-menu",
     "marks-unread-from-the-menu",
+    "marks-unread-with-alt-click",
     "replies-in-the-thread-box",
     "jumps-with-the-switcher",
     "focuses-the-box-with-the-keys",
@@ -192,6 +193,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "forwards-from-the-menu" => forwards_from_menu(screen, admin).await,
         "copies-from-the-menu" => copies_from_menu(screen, admin).await,
         "marks-unread-from-the-menu" => marks_unread_from_menu(screen, admin).await,
+        "marks-unread-with-alt-click" => marks_unread_with_alt_click(screen, admin).await,
         "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
         "focuses-the-box-with-the-keys" => focuses_box_with_keys(screen).await,
@@ -1539,6 +1541,40 @@ async fn clipboard_says(expected: &str) -> Result<()> {
     Err(Error(format!(
         "the clipboard holds {last:?}, not {expected:?}"
     )))
+}
+
+/// Alt+click on a message marks it unread, the way the webapp binds it,
+/// and coming back reads it again.
+async fn marks_unread_with_alt_click(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    screen.click_into_holding(&body, key::ALT).await?;
+    let mut unread = 0;
+    for _ in 0..25 {
+        unread = admin.my_unread("engineering").await?;
+        if unread > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if unread == 0 {
+        return Err(Error(
+            "the server counts nothing unread after Alt+click".to_owned(),
+        ));
+    }
+    screen.open_channel("Design").await?;
+    screen.open_channel("Engineering").await?;
+    for _ in 0..25 {
+        if admin.my_unread("engineering").await? == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "coming back to the channel did not read it".to_owned(),
+    ))
 }
 
 /// Save and unsave from the message menu, with the server's saved list

@@ -582,6 +582,15 @@ buttons on the formatting bar, which do not go through the keyboard,
 keep the selection every time. The keys scenario reselects before each
 chord and tests the keys, not the lab's keyboard.
 
+**A capture-phase gesture that only watches still costs the focus.** The
+Alt+click gesture on a message row sits in the capture phase so it can
+claim the press before the text view starts a selection; left merely
+watching a plain click -- returning without claiming -- it kept the
+text view under it from taking the focus, which the lab's Ctrl+Shift+L
+scenario noticed at once. A gesture that is not interested says so:
+`Denied` on the sequence, and the click goes on as if the gesture were
+not there.
+
 **A right-click on a text view is the text view's.** A `GtkTextView`
 puts up its own copy-and-paste menu on the secondary button, and a
 gesture on the row around it sees the press only after. In the capture

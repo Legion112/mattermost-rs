@@ -575,6 +575,16 @@ impl Screen {
         crate::input::click_at(x + w / 2, y + h / 2)
     }
 
+    /// A click in the middle of a widget with a key held: Alt+click.
+    pub async fn click_into_holding(&self, node: &Node, keysym: u32) -> Result<()> {
+        let (x, y, w, h) = self.extents(node).await?;
+        eprintln!(
+            "  click into {:?} holding {keysym:#x} at ({x}, {y}) {w}x{h}",
+            node.name
+        );
+        crate::input::click_holding(keysym, x + w / 2, y + h / 2)
+    }
+
     /// The right button in the middle of a widget: what opens a context
     /// menu, where there is one.
     pub async fn right_click_into(&self, node: &Node) -> Result<()> {
