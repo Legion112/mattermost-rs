@@ -473,7 +473,10 @@ Mattermost. The one-click buttons are ranked by what this reader uses most. \
 Custom emoji are NOT fetched, so one resolves to its shortcode rather than an \
 image. Resting the pointer on a chip says \
 who reacted -- "you, ada and grace reacted with :+1:", the reader first \
--- read from the store when asked, the way every row tooltip is."""
+-- read from the store when asked, the way every row tooltip is. The \
+toolbar's one-click reactions are lab-verified by \
+`reacts-from-the-hover-toolbar`: a press reaches the server's reaction list \
+for the post and a second press takes it back."""
 
 [[feature]]
 id       = "files.inline_images"

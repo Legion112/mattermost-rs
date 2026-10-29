@@ -1326,6 +1326,36 @@ impl Admin {
             .ok_or_else(|| Error(format!("no category called {display_name:?}")))
     }
 
+    /// The emoji names reacted with on a post, by the server's word, with
+    /// who did it.
+    pub async fn reactions_on(&self, post_id: &str) -> Result<Vec<(String, String)>> {
+        let reactions = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/posts/{post_id}/reactions"
+            )))
+            .await?;
+        Ok(reactions
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter_map(|r| {
+                        Some((
+                            r["user_id"].as_str()?.to_owned(),
+                            r["emoji_name"].as_str()?.to_owned(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// The signed-in user's id.
+    #[must_use]
+    pub fn me(&self) -> &str {
+        &self.me
+    }
+
     /// Take a mute off a channel, for a lab kept across runs where a
     /// scenario muted it and did not get as far as unmuting.
     pub async fn unmute(&self, channel: &str) -> Result<()> {

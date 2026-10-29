@@ -56,6 +56,7 @@ pub const SCENARIOS: &[&str] = &[
     "formats-with-the-keys",
     "links-a-pasted-address",
     "completes-a-mention-with-tab",
+    "completes-a-mention-in-the-thread-box",
     "completes-an-emoji-with-tab",
     "inserts-an-emoji-from-the-picker",
     "opens-a-dm-from-the-switcher",
@@ -63,6 +64,8 @@ pub const SCENARIOS: &[&str] = &[
     "edits-with-the-up-key",
     "edits-from-the-menu",
     "reacts-with-the-keyboard",
+    "reacts-from-the-hover-toolbar",
+    "toggles-a-reaction-from-its-chip",
     "searches-messages",
     "opens-a-hit-from-search",
     "shows-recent-mentions",
@@ -97,6 +100,7 @@ pub const SCENARIOS: &[&str] = &[
     "leaves-a-channel",
     "joins-from-the-switcher",
     "signs-in-again-when-revoked",
+    "reloads-channels",
     "tidies-the-lab",
 ];
 
@@ -210,6 +214,10 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "toggles-a-reaction-from-its-chip" => toggles_reaction_from_chip(screen, admin).await,
+        "completes-a-mention-in-the-thread-box" => completes_mention_in_thread(screen).await,
+        "reloads-channels" => reloads_channels(screen).await,
+        "reacts-from-the-hover-toolbar" => reacts_from_toolbar(screen, admin).await,
         "edits-from-the-menu" => edits_from_menu(screen, admin).await,
         "replies-from-the-menu" => replies_from_menu(screen).await,
         "follows-a-rename-from-elsewhere" => follows_rename_from_elsewhere(screen, admin).await,
@@ -1832,6 +1840,178 @@ async fn replies_from_menu(screen: &Screen) -> Result<()> {
         })
         .await
         .map(|_| ())
+}
+
+/// A quick reaction on the hover toolbar reaches the server, and a
+/// second press takes it back.
+async fn reacts_from_toolbar(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    screen.hover(&body).await?;
+    // The quick buttons are named by their glyph: the first button after
+    // the message in tree order whose name is one emoji is one of them.
+    let tree = screen
+        .until("the toolbar is up", |tree| {
+            tree.has("button", "More actions")
+        })
+        .await?;
+    let at = tree
+        .iter()
+        .position(|n| n.path == body.path)
+        .ok_or_else(|| Error("the message went out of the tree".to_owned()))?;
+    let quick = tree[at..]
+        .iter()
+        .take(12)
+        .find(|n| {
+            n.role == "button" && (1..=2).contains(&n.name.chars().count()) && !n.name.is_ascii()
+        })
+        .cloned()
+        .ok_or_else(|| Error("no quick reaction button beside the message".to_owned()))?;
+    let mine_before: Vec<String> = admin
+        .reactions_on(&post)
+        .await?
+        .into_iter()
+        .filter(|(who, _)| who == admin.me())
+        .map(|(_, name)| name)
+        .collect();
+    screen.click_into(&quick).await?;
+    let mut mine = mine_before.clone();
+    for _ in 0..25 {
+        mine = admin
+            .reactions_on(&post)
+            .await?
+            .into_iter()
+            .filter(|(who, _)| who == admin.me())
+            .map(|(_, name)| name)
+            .collect();
+        if mine != mine_before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if mine == mine_before {
+        return Err(Error(format!(
+            "the quick reaction {:?} was pressed but the server's reactions by me stayed {mine_before:?}",
+            quick.name
+        )));
+    }
+    // And back: the same button toggles.
+    screen.hover(&body).await?;
+    screen.click_button_near(&quick.name, &body).await?;
+    for _ in 0..25 {
+        let now: Vec<String> = admin
+            .reactions_on(&post)
+            .await?
+            .into_iter()
+            .filter(|(who, _)| who == admin.me())
+            .map(|(_, name)| name)
+            .collect();
+        if now == mine_before {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "pressing the quick reaction again did not take it back".to_owned(),
+    ))
+}
+
+/// A reaction chip under a message toggles the reader's own reaction:
+/// the seeded 👀 is the admin's, so a click takes it off the server, and
+/// the chip comes back once the reaction is put back from the API.
+async fn toggles_reaction_from_chip(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    let tree = screen.tree().await?;
+    let at = tree
+        .iter()
+        .position(|n| n.path == body.path)
+        .ok_or_else(|| Error("the message went out of the tree".to_owned()))?;
+    let chip = tree[at..]
+        .iter()
+        .take(20)
+        .find(|n| n.role == "button" && n.name.starts_with("👀 "))
+        .cloned()
+        .ok_or_else(|| Error("no 👀 chip under the seeded root".to_owned()))?;
+    screen.click_into(&chip).await?;
+    let mine_has_eyes = |all: Vec<(String, String)>| {
+        all.iter()
+            .any(|(who, name)| who == admin.me() && name == "eyes")
+    };
+    let mut gone = false;
+    for _ in 0..25 {
+        if !mine_has_eyes(admin.reactions_on(&post).await?) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !gone {
+        return Err(Error(
+            "the 👀 chip was pressed but the server still has the reader's eyes on the post"
+                .to_owned(),
+        ));
+    }
+    admin.react_as(crate::seed::ADMIN, &post, "eyes").await?;
+    screen
+        .until("the chip is back", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("👀 "))
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Tab completes an @name in the thread box too.
+async fn completes_mention_in_thread(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
+    screen.type_into(&reply_box, "@gr").await?;
+    screen
+        .until("the popup offers grace", |tree| tree.has("label", "@grace"))
+        .await?;
+    screen.press_key(0xff09, &[])?;
+    composer_says(screen, &reply_box, "@grace ").await?;
+    screen.type_into(&reply_box, "").await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// The reload button in the title bar asks for a sync, and the window
+/// is the same afterwards.
+async fn reloads_channels(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("Reload channels").await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let tree = screen.tree().await?;
+    if !tree.has("label", "CHANNELS") || !tree.has("label", "Engineering") {
+        return Err(Error("the sidebar is not whole after a reload".to_owned()));
+    }
+    if let Some(error) = tree
+        .iter()
+        .find(|n| n.role == "label" && n.name.starts_with("error:"))
+    {
+        return Err(Error(format!("a reload left an error up: {}", error.name)));
+    }
+    Ok(())
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.
