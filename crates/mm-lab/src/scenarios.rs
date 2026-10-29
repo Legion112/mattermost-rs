@@ -26,9 +26,11 @@ use crate::{Error, Result};
 pub const SCENARIOS: &[&str] = &[
     "signs-in",
     "sets-a-custom-status",
+    "cancels-a-custom-status",
     "goes-quiet-for-an-hour",
     "goes-away-and-back",
     "edits-the-profile",
+    "keeps-the-profile-on-cancel",
     "shows-a-post-saved-elsewhere",
     "opens-a-saved-hit",
     "shows-a-thread-reply-count",
@@ -59,6 +61,7 @@ pub const SCENARIOS: &[&str] = &[
     "formats-with-the-keys",
     "links-a-pasted-address",
     "completes-a-mention-with-tab",
+    "dismisses-the-mention-popup",
     "completes-a-mention-in-the-thread-box",
     "completes-an-emoji-with-tab",
     "inserts-an-emoji-from-the-picker",
@@ -98,10 +101,12 @@ pub const SCENARIOS: &[&str] = &[
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "edits-the-channel-header",
+    "keeps-the-header-on-cancel",
     "follows-a-header-change-from-elsewhere",
     "comes-and-goes-with-membership-elsewhere",
     "follows-a-rename-from-elsewhere",
     "archives-from-the-menu",
+    "keeps-the-channel-on-keep",
     "makes-a-channel-private",
     "opens-an-archived-channel",
     "follows-an-archive-from-elsewhere",
@@ -188,41 +193,12 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool)
 
 async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
     match name {
-        "signs-in" => signs_in(screen).await,
-        "sets-a-custom-status" => custom_status(screen, admin).await,
-        "goes-quiet-for-an-hour" => quiet_for_an_hour(screen, admin).await,
-        "edits-the-profile" => edits_profile(screen, admin).await,
-        "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
-        "shows-a-thread-reply-count" => reply_count(screen).await,
-        "follows-a-permalink" => follows_permalink(screen, admin).await,
-        "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
-        "shows-who-is-typing" => who_is_typing(screen, admin).await,
-        "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
-        "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
-        "filters-the-sidebar-to-unreads" => filters_sidebar_to_unreads(screen, admin).await,
-        "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
-        "keeps-quiet-when-muted" => quiet_when_muted(screen, admin).await,
-        "keeps-quiet-when-looking" => quiet_when_looking(screen, admin).await,
-        "honours-mentions-only" => honours_mentions_only(screen, admin).await,
-        "honours-the-account-setting" => honours_account_setting(screen, admin).await,
-        "opens-a-dm-from-a-notification" => opens_dm_from_notification(screen, admin).await,
-        "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
-        "mutes-and-unmutes" => mutes(screen, admin).await,
-        "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
-        "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
-        "sends-a-draft-with-its-file" => draft_with_file(screen, admin).await,
-        "sends-a-message" => sends_a_message(screen, admin).await,
-        "formats-from-the-toolbar" => formats_from_toolbar(screen, admin).await,
-        "formats-with-the-keys" => formats_with_keys(screen).await,
-        "links-a-pasted-address" => links_pasted_address(screen).await,
-        "completes-a-mention-with-tab" => completes_mention(screen).await,
-        "completes-an-emoji-with-tab" => completes_emoji(screen).await,
-        "opens-a-dm-from-the-switcher" => dm_from_switcher(screen, admin).await,
-        "deletes-a-message-from-the-menu" => deletes_from_menu(screen, admin).await,
-        "edits-with-the-up-key" => edits_with_up(screen, admin).await,
-        "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
-        "searches-messages" => searches(screen).await,
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "keeps-the-channel-on-keep" => keeps_channel_on_keep(screen, admin).await,
+        "cancels-a-custom-status" => cancels_custom_status(screen, admin).await,
+        "keeps-the-header-on-cancel" => keeps_header_on_cancel(screen, admin).await,
+        "dismisses-the-mention-popup" => dismisses_mention_popup(screen).await,
+        "keeps-the-profile-on-cancel" => keeps_profile_on_cancel(screen, admin).await,
         "keeps-the-message-on-keep" => keeps_message_on_keep(screen, admin).await,
         "keeps-the-message-on-edit-cancel" => keeps_message_on_edit_cancel(screen, admin).await,
         "stays-in-the-channel-on-stay" => stays_in_channel_on_stay(screen, admin).await,
@@ -279,6 +255,48 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "joins-from-the-switcher" => joins_from_switcher(screen, admin).await,
         "signs-in-again-when-revoked" => signs_in_again(screen, admin).await,
         "tidies-the-lab" => tidies(admin).await,
+        other => more(other, screen, admin).await,
+    }
+}
+
+/// The rest of them: the dispatcher is one match, and clippy keeps a
+/// function under a hundred lines.
+async fn more(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
+    match name {
+        "signs-in" => signs_in(screen).await,
+        "sets-a-custom-status" => custom_status(screen, admin).await,
+        "goes-quiet-for-an-hour" => quiet_for_an_hour(screen, admin).await,
+        "edits-the-profile" => edits_profile(screen, admin).await,
+        "shows-a-post-saved-elsewhere" => saved_elsewhere(screen, admin).await,
+        "shows-a-thread-reply-count" => reply_count(screen).await,
+        "follows-a-permalink" => follows_permalink(screen, admin).await,
+        "shows-a-new-reply-in-threads" => new_reply_in_threads(screen, admin).await,
+        "shows-who-is-typing" => who_is_typing(screen, admin).await,
+        "follows-edits-reactions-and-deletions" => live_post_changes(screen, admin).await,
+        "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
+        "filters-the-sidebar-to-unreads" => filters_sidebar_to_unreads(screen, admin).await,
+        "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
+        "keeps-quiet-when-muted" => quiet_when_muted(screen, admin).await,
+        "keeps-quiet-when-looking" => quiet_when_looking(screen, admin).await,
+        "honours-mentions-only" => honours_mentions_only(screen, admin).await,
+        "honours-the-account-setting" => honours_account_setting(screen, admin).await,
+        "opens-a-dm-from-a-notification" => opens_dm_from_notification(screen, admin).await,
+        "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
+        "mutes-and-unmutes" => mutes(screen, admin).await,
+        "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
+        "keeps-a-draft-on-the-server" => draft_on_server(screen, admin).await,
+        "sends-a-draft-with-its-file" => draft_with_file(screen, admin).await,
+        "sends-a-message" => sends_a_message(screen, admin).await,
+        "formats-from-the-toolbar" => formats_from_toolbar(screen, admin).await,
+        "formats-with-the-keys" => formats_with_keys(screen).await,
+        "links-a-pasted-address" => links_pasted_address(screen).await,
+        "completes-a-mention-with-tab" => completes_mention(screen).await,
+        "completes-an-emoji-with-tab" => completes_emoji(screen).await,
+        "opens-a-dm-from-the-switcher" => dm_from_switcher(screen, admin).await,
+        "deletes-a-message-from-the-menu" => deletes_from_menu(screen, admin).await,
+        "edits-with-the-up-key" => edits_with_up(screen, admin).await,
+        "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
+        "searches-messages" => searches(screen).await,
         other => Err(Error(format!("no scenario called {other:?}"))),
     }
 }
@@ -2281,6 +2299,149 @@ async fn stays_in_channel_on_stay(screen: &Screen, admin: &Admin) -> Result<()> 
         ));
     }
     screen.open_channel("Engineering").await
+}
+
+/// Keep in the archive dialog leaves the channel open for business,
+/// here and on the server.
+async fn keeps_channel_on_keep(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Design").await?;
+    screen.press("Design").await?;
+    screen.press("Archive channel").await?;
+    screen
+        .until("the window asks before archiving", |tree| {
+            tree.has("label", "Archive Design?")
+        })
+        .await?;
+    screen.press("Keep").await?;
+    screen
+        .until("the question is gone and the row stays", |tree| {
+            !tree.has("label", "Archive Design?") && in_sidebar(tree, "Design")
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let record = admin.channel_record("design").await?;
+    if record["delete_at"].as_i64().unwrap_or(0) != 0 {
+        return Err(Error(
+            "Keep was pressed but the server holds Design archived".to_owned(),
+        ));
+    }
+    screen.open_channel("Engineering").await
+}
+
+/// Escape in the custom status dialog sets nothing.
+async fn cancels_custom_status(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.press("Set your status").await?;
+    screen.press("Set a custom status…").await?;
+    let form = screen
+        .until("the status dialog is up", |tree| {
+            tree.has("text box", "What are you up to?")
+        })
+        .await?;
+    screen
+        .type_into(form.find("text box", "What are you up to?")?, "Not really")
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the dialog is gone", |tree| {
+            !tree.has("text box", "What are you up to?")
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if admin.my_custom_status().await?.as_deref() == Some("Not really") {
+        return Err(Error(
+            "Escape in the status dialog still set the status".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Cancel in the channel editor leaves the header as it was.
+async fn keeps_header_on_cancel(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let before = admin.channel_record("engineering").await?["header"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    screen.press("Engineering").await?;
+    screen.press("Edit channel…").await?;
+    let dialog = screen
+        .until("the channel editor is up", |tree| {
+            tree.has("text box", "Header")
+        })
+        .await?;
+    screen
+        .type_into(dialog.find("text box", "Header")?, "A header nobody wanted")
+        .await?;
+    screen.press("Cancel").await?;
+    screen
+        .until("the editor is gone", |tree| !tree.has("text box", "Header"))
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after = admin.channel_record("engineering").await?["header"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if after != before {
+        return Err(Error(format!(
+            "Cancel was pressed but the header went from {before:?} to {after:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Escape with the mention popup up puts the popup away and leaves the
+/// half-typed name alone.
+async fn dismisses_mention_popup(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "@gr").await?;
+    screen
+        .until("the popup offers grace", |tree| tree.has("label", "@grace"))
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the popup is gone", |tree| !tree.has("label", "@grace"))
+        .await?;
+    composer_says(screen, &composer, "@gr").await?;
+    screen.type_into(&composer, "").await
+}
+
+/// Cancel in the profile editor leaves the profile as it was.
+async fn keeps_profile_on_cancel(screen: &Screen, admin: &Admin) -> Result<()> {
+    let before = admin.my_record().await?["position"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    screen.press("Set your status").await?;
+    screen.press("Edit profile…").await?;
+    let dialog = screen
+        .until("the profile editor is up", |tree| {
+            tree.has("text box", "Position")
+        })
+        .await?;
+    screen
+        .type_into(
+            dialog.find("text box", "Position")?,
+            "Position nobody wanted",
+        )
+        .await?;
+    screen.press("Cancel").await?;
+    screen
+        .until("the editor is gone", |tree| {
+            !tree.has("text box", "Position")
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let after = admin.my_record().await?["position"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    if after != before {
+        return Err(Error(format!(
+            "Cancel was pressed but the position went from {before:?} to {after:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.

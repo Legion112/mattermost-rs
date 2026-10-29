@@ -1674,6 +1674,11 @@ wrote it, and picking one toggles the reaction the way the quick \
 buttons do. Verified in the lab, by keys faked on its display: the chord \
 opened the picker over the box, "tada" typed into its search narrowed \
 it, and the server's copy of the newest message carried the reaction. \
+**Escape closes the window's own dialogs** -- the channel editor, the \
+custom status dialog, the profile editor, the message editor -- the way it \
+closes every dialog people meet; an `adw::Window` has no such binding of \
+its own, and the lab found the status dialog staying up on Escape, with the \
+next dialog's Cancel then going to the wrong window (`cancels-a-custom-status`). \
 **Alt+click on a message marks it unread**, the webapp's binding: a \
 capture-phase gesture that acts on the press and denies the sequence every \
 time -- a first version claimed the press and left the hover toolbar's \

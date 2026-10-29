@@ -1682,6 +1682,7 @@ fn open_custom_status_dialog(ui: &Ui, near: &gtk::Widget) {
     window.set_default_widget(Some(&save));
 
     {
+        close_on_escape(&window);
         let window = window.clone();
         cancel.connect_clicked(move |_| window.close());
     }
@@ -1796,6 +1797,7 @@ fn open_channel_editor(ui: &Ui, channel: &ChannelId) {
         .build();
     window.set_default_widget(Some(&save));
     {
+        close_on_escape(&window);
         let window = window.clone();
         cancel.connect_clicked(move |_| window.close());
     }
@@ -1887,6 +1889,7 @@ fn open_profile_editor(ui: &Ui) {
         .build();
     window.set_default_widget(Some(&save));
     {
+        close_on_escape(&window);
         let window = window.clone();
         cancel.connect_clicked(move |_| window.close());
     }
@@ -2655,6 +2658,24 @@ fn face_with_dot(size: i32) -> (gtk::Overlay, adw::Avatar, gtk::Box) {
     gutter.add_overlay(&dot);
     gutter.set_valign(gtk::Align::Start);
     (gutter, face, dot)
+}
+
+/// Escape closes a dialog of this window's own, the way it closes every
+/// dialog people meet: an `adw::Window` has no such binding of its own,
+/// and the lab found the custom status dialog staying up on Escape, with
+/// the next dialog's Cancel then going to the wrong window.
+fn close_on_escape(window: &adw::Window) {
+    let keys = gtk::EventControllerKey::new();
+    let target = window.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gdk::Key::Escape {
+            target.close();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    window.add_controller(keys);
 }
 
 /// Give a widget an accessible name. A placeholder is not one: GTK does
@@ -7154,6 +7175,7 @@ fn open_editor(
     window.set_content(Some(&layout));
 
     {
+        close_on_escape(&window);
         let window = window.clone();
         cancel.connect_clicked(move |_| window.close());
     }
