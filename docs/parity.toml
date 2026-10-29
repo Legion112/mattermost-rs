@@ -1139,7 +1139,9 @@ it at the top of the saved list, the button took it off and the \
 server's own flagged-posts endpoint agreed; pinning one put it on the \
 pinned list and the button emptied it again. NOT built: paging.
 
-The hover toolbar's overflow menu is lab-verified too: resting the pointer \
+The hover toolbar's reply button opens the thread -- it had no handler at \
+all until a reader found it did nothing, which `replies-from-the-hover-toolbar` \
+now presses. The toolbar's overflow menu is lab-verified too: resting the pointer \
 on a message brought the toolbar up, "Pin to channel" left the server \
 holding the post pinned, and "Unpin from channel" took it off. Saving from the message \
 menu is lab-verified too: "Save message" put the post on the server's \

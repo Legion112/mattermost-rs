@@ -5295,6 +5295,21 @@ fn build_message_tools(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) -
     let reply = gtk::Button::from_icon_name("mail-reply-sender-symbolic");
     reply.add_css_class("flat");
     reply.set_tooltip_text(Some("Reply in thread"));
+    {
+        // It had no handler at all: the menu's entry opened the thread
+        // and this button, the one the pointer reaches first, did nothing.
+        let commands = commands.clone();
+        let row = row.clone();
+        reply.connect_clicked(move |_| {
+            let post = row.widget_name();
+            if post.is_empty() {
+                return;
+            }
+            commands
+                .send(Command::OpenThread(PostId::new(post.as_str())))
+                .ok();
+        });
+    }
     tools.append(&reply);
 
     // Saving, which Mattermost puts in the toolbar as well as the menu.

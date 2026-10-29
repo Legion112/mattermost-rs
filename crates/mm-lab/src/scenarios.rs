@@ -68,6 +68,7 @@ pub const SCENARIOS: &[&str] = &[
     "marks-unread-from-the-menu",
     "marks-unread-with-alt-click",
     "replies-in-the-thread-box",
+    "replies-from-the-hover-toolbar",
     "jumps-with-the-switcher",
     "focuses-the-box-with-the-keys",
     "adds-and-removes-somebody",
@@ -201,6 +202,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "marks-unread-from-the-menu" => marks_unread_from_menu(screen, admin).await,
         "marks-unread-with-alt-click" => marks_unread_with_alt_click(screen, admin).await,
         "replies-in-the-thread-box" => replies_in_thread(screen, admin).await,
+        "replies-from-the-hover-toolbar" => replies_from_toolbar(screen).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
         "focuses-the-box-with-the-keys" => focuses_box_with_keys(screen).await,
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
@@ -1254,6 +1256,29 @@ async fn focuses_box_with_keys(screen: &Screen) -> Result<()> {
     Err(Error(
         "Ctrl+Shift+L did not put the focus in the message box".to_owned(),
     ))
+}
+
+/// The reply button on the hover toolbar opens the thread, with the
+/// reply box ready. It had no handler at all until a reader noticed.
+async fn replies_from_toolbar(screen: &Screen) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    screen.hover(&body).await?;
+    screen.click_button_near("Reply in thread", &body).await?;
+    screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.
