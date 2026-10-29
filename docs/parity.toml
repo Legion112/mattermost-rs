@@ -266,7 +266,11 @@ message is a banner whether or not it says the reader's name: \
 name her, clicks it and finds the conversation open. The channel's own \
 `desktop` setting is honoured end to end too: `honours-mentions-only` sets \
 a channel to mentions only from its menu, sees an ordinary message counted \
-in the sidebar with no banner, and a mention sent as one. \
+in the sidebar with no banner, and a mention sent as one; and \
+`honours-the-account-setting` turns the account's own desktop setting to \
+`none` from the API, sees a mention counted and no banner, turns it back to \
+`all` and sees the next one sent -- the window learning the change over the \
+socket as a user update of its own account. \
 Muting silences notifications outright, mentions included: Mattermost's own \
 documentation says that once a channel is muted "all notifications for that \
 channel are disabled, including email, desktop, incoming call ring tones, \

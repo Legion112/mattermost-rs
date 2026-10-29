@@ -40,6 +40,7 @@ pub const SCENARIOS: &[&str] = &[
     "keeps-quiet-when-muted",
     "keeps-quiet-when-looking",
     "honours-mentions-only",
+    "honours-the-account-setting",
     "opens-a-dm-from-a-notification",
     "shows-a-new-direct-message",
     "mutes-and-unmutes",
@@ -172,6 +173,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "keeps-quiet-when-muted" => quiet_when_muted(screen, admin).await,
         "keeps-quiet-when-looking" => quiet_when_looking(screen, admin).await,
         "honours-mentions-only" => honours_mentions_only(screen, admin).await,
+        "honours-the-account-setting" => honours_account_setting(screen, admin).await,
         "opens-a-dm-from-a-notification" => opens_dm_from_notification(screen, admin).await,
         "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
         "mutes-and-unmutes" => mutes(screen, admin).await,
@@ -669,6 +671,58 @@ async fn click_until_open(
     Err(Error(format!(
         "five clicks on the banner did not open {header}"
     )))
+}
+
+/// The account-wide desktop setting is honoured: set to `none` from
+/// another client, a mention sends no banner; set back to `all`, it
+/// does. The window learns the change over the socket, as a user
+/// update of its own account.
+async fn honours_account_setting(screen: &Screen, admin: &Admin) -> Result<()> {
+    let desk = crate::notify::Desk::serve().await?;
+    screen.open_channel("Engineering").await?;
+    admin.set_my_desktop_notify("none").await?;
+    // Give the socket a moment to carry the change before the message.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let hushed = format!("@legion with everything off, at {}", crate::seed::stamp());
+    admin.say_as("ada", "design", &hushed).await?;
+    screen
+        .until("the Design row still counts the mention", |tree| {
+            badge_after(tree, "Design") == Some("1")
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let leaked = desk
+        .banners()
+        .into_iter()
+        .find(|b| b.body.contains(&hushed));
+    admin.set_my_desktop_notify("all").await?;
+    if let Some(banner) = leaked {
+        return Err(Error(format!(
+            "desktop notifications are off for the account but a banner was sent: {banner:?}"
+        )));
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let loud = format!(
+        "@legion with everything on again, at {}",
+        crate::seed::stamp()
+    );
+    admin.say_as("ada", "design", &loud).await?;
+    let mut seen = false;
+    for _ in 0..50 {
+        seen = desk.banners().iter().any(|b| b.body.contains(&loud));
+        if seen {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !seen {
+        return Err(Error(format!(
+            "desktop notifications are back on but no banner came; the desk saw {:?}",
+            desk.banners()
+        )));
+    }
+    screen.open_channel("Design").await?;
+    screen.open_channel("Engineering").await
 }
 
 /// A first message from somebody with no conversation yet makes a

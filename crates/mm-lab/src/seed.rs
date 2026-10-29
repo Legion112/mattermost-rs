@@ -1218,6 +1218,24 @@ impl Admin {
 
     /// Put the account back into a channel it was taken out of, so a test
     /// that leaves one can be run twice.
+    /// Set the signed-in user's account-wide desktop notification level:
+    /// `all`, `mention` or `none`, the way the webapp's settings do.
+    pub async fn set_my_desktop_notify(&self, level: &str) -> Result<()> {
+        let me = self
+            .api
+            .call(&HttpRequest::get(format!("/api/v4/users/{}", self.me)))
+            .await?;
+        let mut props = me["notify_props"].clone();
+        props["desktop"] = json!(level);
+        self.api
+            .call(
+                &HttpRequest::new(Method::Put, format!("/api/v4/users/{}/patch", self.me))
+                    .json(&json!({ "notify_props": props })),
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// Take a mute off a channel, for a lab kept across runs where a
     /// scenario muted it and did not get as far as unmuting.
     pub async fn unmute(&self, channel: &str) -> Result<()> {
