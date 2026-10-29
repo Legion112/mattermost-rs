@@ -88,6 +88,7 @@ pub const SCENARIOS: &[&str] = &[
     "toggles-a-reaction-from-its-chip",
     "searches-messages",
     "searches-for-nothing",
+    "opens-search-with-the-keys",
     "opens-a-hit-from-search",
     "shows-recent-mentions",
     "opens-mentions-from-the-header",
@@ -111,6 +112,7 @@ pub const SCENARIOS: &[&str] = &[
     "walks-channels-with-alt-arrows",
     "jumps-to-unread-with-alt-shift",
     "folds-and-unfolds-a-category",
+    "keeps-the-fold-across-a-reload",
     "focuses-the-box-with-the-keys",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
@@ -246,6 +248,8 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "toggles-a-reaction-from-its-chip" => toggles_reaction_from_chip(screen, admin).await,
         "completes-a-mention-in-the-thread-box" => completes_mention_in_thread(screen).await,
         "reloads-channels" => reloads_channels(screen).await,
+        "keeps-the-fold-across-a-reload" => keeps_the_fold_across_a_reload(screen, admin).await,
+        "opens-search-with-the-keys" => opens_search_with_the_keys(screen).await,
         "reacts-from-the-hover-toolbar" => reacts_from_toolbar(screen, admin).await,
         "edits-from-the-menu" => edits_from_menu(screen, admin).await,
         "replies-from-the-menu" => replies_from_menu(screen).await,
@@ -3007,6 +3011,76 @@ async fn deletes_a_reply_from_the_pane(screen: &Screen, admin: &Admin) -> Result
         )));
     }
     Ok(())
+}
+
+/// A category folded stays folded through a reload of the sidebar.
+///
+/// A resync used to paint what the client remembered from the sync
+/// before, so for a moment the store held the category unfolded while
+/// the sidebar showed it folded, and a click in that moment folded it
+/// again. The reload here is that resync, asked for by its button.
+async fn keeps_the_fold_across_a_reload(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.select_row("CHANNELS").await?;
+    screen
+        .until("the category's other rows are hidden", |tree| {
+            !tree.has("label", "Town Square") && tree.has("label", "Engineering")
+        })
+        .await?;
+    let mut folded = false;
+    for _ in 0..25 {
+        folded = admin.category_collapsed("Channels").await?;
+        if folded {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !folded {
+        return Err(Error(
+            "the category folded on screen but the server does not hold it folded".to_owned(),
+        ));
+    }
+    screen.press("Reload channels").await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if screen.tree().await?.has("label", "Town Square") {
+        return Err(Error("a reload unfolded the category".to_owned()));
+    }
+    screen.select_row("CHANNELS").await?;
+    screen
+        .until("the rows are back", |tree| tree.has("label", "Town Square"))
+        .await?;
+    for _ in 0..25 {
+        if !admin.category_collapsed("Channels").await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "the category unfolded on screen but the server still holds it folded".to_owned(),
+    ))
+}
+
+/// Ctrl+Shift+F opens search with the caret in its box, Mattermost's
+/// own binding: typing straight away, with no click, is what proves
+/// the caret is there.
+async fn opens_search_with_the_keys(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x46, &[key::CONTROL, key::SHIFT])?;
+    let page = screen
+        .until("the search box is up", |tree| {
+            tree.has("search box", "Search messages…")
+        })
+        .await?;
+    let entry = page.find("search box", "Search messages…")?.clone();
+    screen.type_into(&entry, "nightly").await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the thread root is among the results", |tree| {
+            tree.has("label", "Morning. The nightly run")
+        })
+        .await?;
+    screen.open_channel("Engineering").await
 }
 
 /// The root of the open thread deleted from elsewhere goes from the

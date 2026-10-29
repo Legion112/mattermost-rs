@@ -367,7 +367,9 @@ That second click once folded it again instead, one sweep in four: a resync \
 replayed what the client remembered from the sync before, and for the \
 moment between the replay and the fresh list the store held the category \
 unfolded while the sidebar showed it folded. What is remembered is replayed \
-on the first sync of a session only now. An empty `sorting` -- what \
+on the first sync of a session only now, and `keeps-the-fold-across-a-reload` \
+holds it to that: folded, reloaded from the button, still folded, unfolded. \
+An empty `sorting` -- what \
 the server sends for a category nobody has reordered -- is drawn \
 alphabetically, which is inferred from the web app rather than read from the \
 server."""
@@ -1661,6 +1663,8 @@ notes = """
 Ctrl+K for the quick switcher, Ctrl+Shift+F for search, Alt+Up and Alt+Down \
 to walk the sidebar, Alt+Shift+Up and Alt+Shift+Down to walk only what is \
 unread, and Escape to put the thread panel away. Mattermost's own bindings. \
+Ctrl+Shift+F is lab-verified (`opens-search-with-the-keys`): the search box \
+came up with the caret in it, and a search typed with no click found its hit. \
 Walking goes over the sidebar's rows rather than the store, because the \
 sidebar is what the reader is looking at: already in their order, already \
 folded where they folded it, and already filtered if they turned the unread \
