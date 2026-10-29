@@ -4726,6 +4726,15 @@ fn accept_mention(view: &gtk::TextView, username: &str) {
     buffer.place_cursor(&caret);
 }
 
+/// Where the page keys send the conversation.
+#[derive(Clone, Copy)]
+enum Scroll {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
 /// Ctrl+K, the way Mattermost binds the quick switcher.
 ///
 /// On the window rather than on a widget, so it works wherever the
@@ -4739,6 +4748,25 @@ fn wire_switcher(ui: &Ui, window: &adw::ApplicationWindow) {
         if key == gdk::Key::k && state.contains(gdk::ModifierType::CONTROL_MASK) {
             ui.open_switcher();
             return glib::Propagation::Stop;
+        }
+        // Home, End, Page Up and Page Down scroll the conversation from
+        // the message box, where a click on a channel leaves the caret.
+        // With text in the box, Home and End are the text's; the pages
+        // still scroll, since a page of a three-line box is nothing.
+        if ui.composer.view.has_focus() {
+            let empty = ui.composer.view.buffer().char_count() == 0;
+            let scrolled = match key {
+                gdk::Key::Page_Up | gdk::Key::KP_Page_Up => ui.scroll_conversation(Scroll::PageUp),
+                gdk::Key::Page_Down | gdk::Key::KP_Page_Down => {
+                    ui.scroll_conversation(Scroll::PageDown)
+                }
+                gdk::Key::Home | gdk::Key::KP_Home if empty => ui.scroll_conversation(Scroll::Top),
+                gdk::Key::End | gdk::Key::KP_End if empty => ui.scroll_conversation(Scroll::Bottom),
+                _ => false,
+            };
+            if scrolled {
+                return glib::Propagation::Stop;
+            }
         }
         // Ctrl+Shift+F, the way Mattermost binds search. The shift is
         // what keeps it off Ctrl+F, which GTK gives to find-in-widget.
@@ -4996,6 +5024,11 @@ fn wire_selection(ui: &Ui, sidebar: &gtk::ListBox) {
         if name == THREADS_ROW || name == DRAFTS_ROW {
             return;
         }
+        // The click leaves the caret in the message box, as the webapp
+        // does. It left the focus on the row, and from there Home, End
+        // and the page keys walked the sidebar -- switching channels --
+        // until a message had been clicked.
+        ui.composer.view.grab_focus();
         let id = ChannelId::new(name.to_string());
         if ui.selected.borrow().as_ref() == Some(&id) && *ui.pane.borrow() != Pane::Channel {
             ui.show_pane(&Pane::Channel);
@@ -10627,6 +10660,42 @@ impl Ui {
             self.shown.set(Window::newest(CHANNEL_WINDOW));
         }
         self.refresh_posts(channel);
+    }
+
+    /// Move the conversation by a page or to an end, for the keys.
+    ///
+    /// Only while a channel is on screen: the search and thread lists
+    /// are not this list. The ends go by row, since the adjustment's
+    /// upper bound is an estimate GTK revises as rows are realized.
+    fn scroll_conversation(&self, how: Scroll) -> bool {
+        if *self.pane.borrow() != Pane::Channel {
+            return false;
+        }
+        let adjustment = self.scroller.borrow().vadjustment();
+        let view = self.post_view.borrow().clone();
+        let rows = view.model().map_or(0, |model| model.n_items());
+        match how {
+            Scroll::PageUp => {
+                self.stick_to_bottom.set(false);
+                adjustment.set_value(adjustment.value() - adjustment.page_size());
+            }
+            Scroll::PageDown => {
+                adjustment.set_value(adjustment.value() + adjustment.page_size());
+            }
+            Scroll::Top => {
+                self.stick_to_bottom.set(false);
+                if rows > 0 {
+                    view.scroll_to(0, gtk::ListScrollFlags::empty(), None);
+                }
+            }
+            Scroll::Bottom => {
+                self.stick_to_bottom.set(true);
+                if rows > 0 {
+                    view.scroll_to(rows - 1, gtk::ListScrollFlags::empty(), None);
+                }
+            }
+        }
+        true
     }
 
     /// A list of its own for a channel being opened for the first time,

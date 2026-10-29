@@ -23,6 +23,10 @@ pub mod key {
     pub const DOWN: u32 = 0xff54;
     pub const LEFT: u32 = 0xff51;
     pub const RIGHT: u32 = 0xff53;
+    pub const HOME: u32 = 0xff50;
+    pub const END: u32 = 0xff57;
+    pub const PAGE_UP: u32 = 0xff55;
+    pub const PAGE_DOWN: u32 = 0xff56;
     pub const BACKSLASH: u32 = 0x5c;
     pub const CONTROL: u32 = 0xffe3;
     pub const ALT: u32 = 0xffe9;

@@ -119,6 +119,7 @@ pub const SCENARIOS: &[&str] = &[
     "folds-and-unfolds-a-category",
     "keeps-the-fold-across-a-reload",
     "focuses-the-box-with-the-keys",
+    "scrolls-the-channel-with-the-keys",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "edits-the-channel-header",
@@ -295,6 +296,9 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "replies-from-the-hover-toolbar" => replies_from_toolbar(screen).await,
         "jumps-with-the-switcher" => jumps_with_switcher(screen).await,
         "focuses-the-box-with-the-keys" => focuses_box_with_keys(screen).await,
+        "scrolls-the-channel-with-the-keys" => {
+            scrolls_the_channel_with_the_keys(screen, admin).await
+        }
         "adds-and-removes-somebody" => add_and_remove(screen, admin).await,
         "refuses-to-leave-town-square" => town_square(screen).await,
         "leaves-a-channel" => leaves(screen, admin).await,
@@ -1389,11 +1393,19 @@ async fn replies_in_thread(screen: &Screen, admin: &Admin) -> Result<()> {
 /// the reader has clicked, which is Mattermost's own binding for it.
 async fn focuses_box_with_keys(screen: &Screen) -> Result<()> {
     screen.open_channel("Engineering").await?;
-    // Somewhere else first: the sidebar row of the open channel, which
-    // takes the focus when clicked and changes nothing else. A click
-    // into a message did the same until the channel filled with the
-    // other scenarios' traces and the hover toolbar took the click.
-    screen.select_row("Engineering").await?;
+    // Somewhere else first: the reply box of the seeded thread. A
+    // sidebar row took the focus when clicked until a click on a
+    // channel started leaving the caret in the message box, as the
+    // webapp does; and a click into a message had the hover toolbar
+    // take it once the channel filled with other scenarios' traces.
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
     let composer = screen
         .tree()
         .await?
@@ -1407,10 +1419,12 @@ async fn focuses_box_with_keys(screen: &Screen) -> Result<()> {
     screen.press_key(0x4c, &[key::CONTROL, key::SHIFT])?;
     for _ in 0..25 {
         if screen.focused(&composer).await? {
+            screen.press("Close thread").await?;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    screen.press("Close thread").await?;
     Err(Error(
         "Ctrl+Shift+L did not put the focus in the message box".to_owned(),
     ))
@@ -2251,9 +2265,12 @@ async fn opens_mentions_from_header(screen: &Screen) -> Result<()> {
     screen.open_channel("Engineering").await?;
     screen.press("@").await?;
     screen
+        // A hit, not the "N results for @legion" heading above them: the
+        // heading is drawn a moment before the rows, and a click on a
+        // hit not yet drawn went nowhere once in nine sweeps.
         .until("the mentions are found", |tree| {
             tree.iter()
-                .any(|n| n.role == "label" && n.name.contains("for @legion"))
+                .any(|n| n.role == "label" && n.name.starts_with("@legion "))
         })
         .await?;
     screen.open_channel("Engineering").await
@@ -3342,6 +3359,75 @@ async fn scrolls_the_mention_popup_with_the_keys(screen: &Screen) -> Result<()> 
         )));
     }
     Ok(())
+}
+
+/// A click on a channel leaves the caret in the message box, as the
+/// webapp does, and from there Page Up, Page Down, Home and End scroll
+/// the conversation rather than walking the sidebar.
+async fn scrolls_the_channel_with_the_keys(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let stamp = crate::seed::stamp();
+    let texts: Vec<String> = (1..=30)
+        .map(|n| format!("Sent from the lab to scroll past at {stamp}, number {n}"))
+        .collect();
+    for text in &texts {
+        admin.say_as("ada", "design", text).await?;
+    }
+    // The click itself, not the helper that waits for the title: the
+    // focus is what is under test here.
+    screen.select_row("Design").await?;
+    let last = texts[29].clone();
+    let tree = screen
+        .until("the newest message is drawn", |tree| {
+            tree.has("label", &last)
+        })
+        .await?;
+    let composer = tree.find("text box", "Write a message…")?.clone();
+    if !screen.focused(&composer).await? {
+        return Err(Error(
+            "a click on a channel did not put the caret in the message box".to_owned(),
+        ));
+    }
+    let newest = tree.find("label", &last)?.clone();
+    let (_, at_bottom, _, _) = screen.extents(&newest).await?;
+    screen.press_key(key::PAGE_UP, &[])?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let moved = match screen
+        .tree()
+        .await?
+        .iter()
+        .find(|n| n.role == "label" && n.name == last)
+    {
+        // Scrolled down the screen, or off it altogether.
+        Some(node) => screen.extents(node).await?.1 > at_bottom + 100,
+        None => true,
+    };
+    if !moved {
+        return Err(Error(
+            "Page Up in the message box did not scroll the conversation".to_owned(),
+        ));
+    }
+    screen.press_key(key::END, &[])?;
+    screen
+        .until("End comes back to the newest message", |tree| {
+            tree.has("label", &last)
+        })
+        .await?;
+    let (_, back, _, _) = screen
+        .extents(screen.tree().await?.find("label", &last)?)
+        .await?;
+    if (back - at_bottom).abs() > 20 {
+        return Err(Error(format!(
+            "End left the newest message at {back}px, not back at {at_bottom}px"
+        )));
+    }
+    if !screen.focused(&composer).await? {
+        return Err(Error(
+            "scrolling with the keys took the caret out of the message box".to_owned(),
+        ));
+    }
+    admin.sweep_traces("design").await?;
+    screen.open_channel("Engineering").await
 }
 
 /// The root of the open thread deleted from elsewhere goes from the

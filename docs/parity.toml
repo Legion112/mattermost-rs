@@ -1700,6 +1700,11 @@ to walk the sidebar, Alt+Shift+Up and Alt+Shift+Down to walk only what is \
 unread, and Escape to put the thread panel away. Mattermost's own bindings. \
 Ctrl+Shift+F is lab-verified (`opens-search-with-the-keys`): the search box \
 came up with the caret in it, and a search typed with no click found its hit. \
+Home, End, Page Up and Page Down scroll the conversation from an empty \
+message box, which is where a click on a channel now leaves the caret, as \
+the webapp does: from the sidebar row, where the focus used to stay, they \
+walked the sidebar and switched channels until a message had been clicked \
+(`scrolls-the-channel-with-the-keys`). \
 Walking goes over the sidebar's rows rather than the store, because the \
 sidebar is what the reader is looking at: already in their order, already \
 folded where they folded it, and already filtered if they turned the unread \
