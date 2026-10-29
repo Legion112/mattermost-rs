@@ -5709,8 +5709,16 @@ fn wire_right_click(
 
 /// Alt+click marks the message unread, Mattermost's own binding: the
 /// quickest way to leave a conversation with a reminder to come back.
-/// Capture phase and claimed on press, so the text underneath does not
-/// take the press for the start of a selection.
+///
+/// In the capture phase, acting on the press, and denying the sequence
+/// every time. Three versions, two of them wrong: watching the press
+/// without a word kept the text view under it from taking the focus;
+/// claiming the press cancelled the sequence for every widget below and
+/// left the hover toolbar's buttons dead for the rest of the row's life;
+/// and a bubble-phase gesture never saw the release, because the text
+/// view claims the press for itself. Denied bows out at once, so the
+/// click goes on to the text as if the gesture were not there -- the
+/// caret lands in the message on an Alt+click, which is nothing.
 fn wire_alt_click(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) {
     let click = gtk::GestureClick::builder()
         .button(gdk::BUTTON_PRIMARY)
@@ -5721,11 +5729,8 @@ fn wire_alt_click(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) {
         let held = gesture
             .current_event_state()
             .contains(gdk::ModifierType::ALT_MASK);
+        gesture.set_state(gtk::EventSequenceState::Denied);
         if !held {
-            // Out of the way at once: a capture-phase gesture that merely
-            // watches a press still kept the text view under it from
-            // taking the focus on a plain click, which the lab noticed.
-            gesture.set_state(gtk::EventSequenceState::Denied);
             return;
         }
         let Some(data) = item.item().and_downcast::<PostRow>() else {
@@ -5734,7 +5739,6 @@ fn wire_alt_click(row: &gtk::Box, item: &gtk::ListItem, ctx: &RowContext) {
         if data.is_separator() {
             return;
         }
-        gesture.set_state(gtk::EventSequenceState::Claimed);
         commands
             .send(Command::MarkUnread(PostId::new(data.id())))
             .ok();

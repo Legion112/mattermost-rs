@@ -1236,6 +1236,64 @@ impl Admin {
             .map(|_| ())
     }
 
+    /// Whether the signed-in user follows a thread, by the server's word.
+    pub async fn thread_following(&self, channel: &str, root_starts_with: &str) -> Result<bool> {
+        let root = self.post_id_of(channel, root_starts_with).await?;
+        // A thread the user does not follow is not theirs to ask about:
+        // the server answers 404 rather than `is_following: false`, and
+        // a followed one comes back without the field at all -- so an
+        // answer is following unless the field is there and says no.
+        match self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/teams/{}/threads/{root}",
+                self.me, self.team
+            )))
+            .await
+        {
+            Ok(thread) => Ok(thread["is_following"].as_bool().unwrap_or(true)),
+            Err(Error(msg)) if msg.contains("-> 404") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// How many followed threads the server counts unread for the user.
+    pub async fn unread_threads(&self) -> Result<i64> {
+        let list = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/teams/{}/threads?per_page=1",
+                self.me, self.team
+            )))
+            .await?;
+        Ok(list["total_unread_threads"].as_i64().unwrap_or(0))
+    }
+
+    /// Set a channel's header from the API, as another client would.
+    pub async fn set_header(&self, channel: &str, header: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(
+                &HttpRequest::new(Method::Put, format!("/api/v4/channels/{id}/patch"))
+                    .json(&json!({ "header": header })),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    /// Take the signed-in user out of a channel from the API, as an
+    /// admin elsewhere would; `rejoin` puts them back.
+    pub async fn drop_me(&self, channel: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(&HttpRequest::new(
+                Method::Delete,
+                format!("/api/v4/channels/{id}/members/{}", self.me),
+            ))
+            .await
+            .map(|_| ())
+    }
+
     /// Take a mute off a channel, for a lab kept across runs where a
     /// scenario muted it and did not get as far as unmuting.
     pub async fn unmute(&self, channel: &str) -> Result<()> {

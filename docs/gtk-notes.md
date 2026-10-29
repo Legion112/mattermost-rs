@@ -582,14 +582,21 @@ buttons on the formatting bar, which do not go through the keyboard,
 keep the selection every time. The keys scenario reselects before each
 chord and tests the keys, not the lab's keyboard.
 
-**A capture-phase gesture that only watches still costs the focus.** The
-Alt+click gesture on a message row sits in the capture phase so it can
-claim the press before the text view starts a selection; left merely
-watching a plain click -- returning without claiming -- it kept the
-text view under it from taking the focus, which the lab's Ctrl+Shift+L
-scenario noticed at once. A gesture that is not interested says so:
-`Denied` on the sequence, and the click goes on as if the gesture were
-not there.
+**A capture-phase gesture on a row costs more than it looks.** The
+Alt+click gesture first sat in the capture phase on the message row,
+claiming the press so the text view would not start a selection. Two
+things went wrong. Merely watching a plain click -- returning without
+claiming -- kept the text view under it from taking the focus, since a
+gesture tracking a sequence stops the event there; `Denied` cured that.
+Then claiming the Alt press cancelled the sequence for every widget
+below, and the hover toolbar's buttons in that row stayed dead
+afterwards: the reply button did nothing after one Alt+click, which the
+lab found by running the two scenarios in order. A bubble-phase gesture
+was no answer either: the text view claims the press for itself, so the
+row never saw the release. The gesture stays in the capture phase, acts
+on the press when Alt is held, and denies the sequence every time, so
+the click goes on to the text as if the gesture were not there; the
+caret landing in the message on an Alt+click is nothing by comparison.
 
 **A right-click on a text view is the text view's.** A `GtkTextView`
 puts up its own copy-and-paste menu on the secondary button, and a

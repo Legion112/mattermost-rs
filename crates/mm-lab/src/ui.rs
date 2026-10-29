@@ -381,6 +381,15 @@ impl Screen {
     }
 }
 
+/// Whether a label names the row a test asked for: the text exactly, or,
+/// for a long one, the text it starts with -- a message in a list of
+/// hits or drafts is asked for by its first words, the way the seeded
+/// thread root is everywhere else in the lab.
+fn names_row(node: &Node, label: &str) -> bool {
+    node.role == "label"
+        && (node.name == label || (label.chars().count() >= 16 && node.name.starts_with(label)))
+}
+
 /// How long a test waits for the window to catch up with a click.
 ///
 /// Every button here sends a command to the engine, which makes a request
@@ -431,7 +440,7 @@ impl Screen {
             for (index, row) in rows.iter().enumerate() {
                 let mut inside = Vec::new();
                 self.walk(row, &mut inside).await?;
-                if !inside.iter().any(|n| n.role == "label" && n.name == label) {
+                if !inside.iter().any(|n| names_row(n, label)) {
                     seen.extend(
                         inside
                             .iter()
@@ -449,9 +458,7 @@ impl Screen {
                     .await
                     .first()
                     .is_some_and(|word| word & (1 << STATE_SELECTED) != 0);
-                if was_selected
-                    && let Some(text) = inside.iter().find(|n| n.role == "label" && n.name == label)
-                {
+                if was_selected && let Some(text) = inside.iter().find(|n| names_row(n, label)) {
                     self.click_into(text).await?;
                     return Ok(());
                 }
@@ -482,7 +489,7 @@ impl Screen {
                 if selected || activated {
                     return Ok(());
                 }
-                if let Some(text) = inside.iter().find(|n| n.role == "label" && n.name == label) {
+                if let Some(text) = inside.iter().find(|n| names_row(n, label)) {
                     self.click_into(text).await?;
                     return Ok(());
                 }

@@ -27,11 +27,14 @@ pub const SCENARIOS: &[&str] = &[
     "signs-in",
     "sets-a-custom-status",
     "goes-quiet-for-an-hour",
+    "goes-away-and-back",
     "edits-the-profile",
     "shows-a-post-saved-elsewhere",
     "shows-a-thread-reply-count",
     "follows-a-permalink",
     "shows-a-new-reply-in-threads",
+    "marks-all-threads-read",
+    "filters-threads-to-unreads",
     "shows-who-is-typing",
     "follows-edits-reactions-and-deletions",
     "shows-an-unread-and-clears-it",
@@ -46,6 +49,7 @@ pub const SCENARIOS: &[&str] = &[
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
     "keeps-a-draft-on-the-server",
+    "opens-a-draft-from-the-list",
     "sends-a-draft-with-its-file",
     "sends-a-message",
     "formats-from-the-toolbar",
@@ -53,13 +57,16 @@ pub const SCENARIOS: &[&str] = &[
     "links-a-pasted-address",
     "completes-a-mention-with-tab",
     "completes-an-emoji-with-tab",
+    "inserts-an-emoji-from-the-picker",
     "opens-a-dm-from-the-switcher",
     "deletes-a-message-from-the-menu",
     "edits-with-the-up-key",
     "reacts-with-the-keyboard",
     "searches-messages",
+    "opens-a-hit-from-search",
     "shows-recent-mentions",
     "opens-a-card-from-a-mention",
+    "opens-a-card-from-the-name",
     "pins-from-the-hover-toolbar",
     "saves-from-the-menu",
     "opens-the-menu-with-a-right-click",
@@ -69,11 +76,15 @@ pub const SCENARIOS: &[&str] = &[
     "marks-unread-with-alt-click",
     "replies-in-the-thread-box",
     "replies-from-the-hover-toolbar",
+    "closes-the-thread-with-the-button",
+    "follows-and-unfollows-a-thread",
     "jumps-with-the-switcher",
     "focuses-the-box-with-the-keys",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "edits-the-channel-header",
+    "follows-a-header-change-from-elsewhere",
+    "comes-and-goes-with-membership-elsewhere",
     "archives-from-the-menu",
     "makes-a-channel-private",
     "opens-an-archived-channel",
@@ -192,6 +203,21 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "edits-with-the-up-key" => edits_with_up(screen, admin).await,
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
+        "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "opens-a-card-from-the-name" => opens_card_from_name(screen).await,
+        "goes-away-and-back" => goes_away_and_back(screen, admin).await,
+        "inserts-an-emoji-from-the-picker" => inserts_emoji_from_picker(screen).await,
+        "follows-a-header-change-from-elsewhere" => {
+            follows_header_from_elsewhere(screen, admin).await
+        }
+        "comes-and-goes-with-membership-elsewhere" => {
+            membership_changed_elsewhere(screen, admin).await
+        }
+        "opens-a-draft-from-the-list" => opens_draft_from_list(screen, admin).await,
+        "marks-all-threads-read" => marks_all_threads_read(screen, admin).await,
+        "filters-threads-to-unreads" => filters_threads_to_unreads(screen, admin).await,
+        "closes-the-thread-with-the-button" => closes_thread_with_button(screen).await,
+        "follows-and-unfollows-a-thread" => follows_and_unfollows(screen, admin).await,
         "shows-recent-mentions" => recent_mentions(screen).await,
         "opens-a-card-from-a-mention" => card_from_mention(screen).await,
         "pins-from-the-hover-toolbar" => pins_from_toolbar(screen, admin).await,
@@ -235,6 +261,17 @@ async fn signs_in(screen: &Screen) -> Result<()> {
             form.find("text box", "Email or username")?,
             crate::seed::ADMIN,
         )
+        .await?;
+    // A wrong password first: the form says so and stays, rather than
+    // hanging on "Signing in…" or going blank.
+    screen
+        .type_into(form.find("text box", "Password")?, "not-the-password")
+        .await?;
+    screen.press("Log in").await?;
+    let form = screen
+        .until("the form says the password was not accepted", |tree| {
+            tree.has("label", "was not accepted") && tree.has("button", "Log in")
+        })
         .await?;
     screen
         .type_into(form.find("text box", "Password")?, crate::seed::PASSWORD)
@@ -1277,6 +1314,303 @@ async fn replies_from_toolbar(screen: &Screen) -> Result<()> {
         .until("the thread box is away", |tree| {
             !tree.has("text box", "Reply…")
         })
+        .await
+        .map(|_| ())
+}
+
+/// A search hit opens its channel and the thread it is in.
+async fn opens_hit_from_search(screen: &Screen) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Design").await?;
+    screen.press("Search messages").await?;
+    let page = screen
+        .until("the search box is up", |tree| {
+            tree.has("search box", "Search messages…")
+        })
+        .await?;
+    let entry = page.find("search box", "Search messages…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "nightly").await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the thread root is among the results", |tree| {
+            tree.has("label", ROOT)
+        })
+        .await?;
+    screen.select_row(ROOT).await?;
+    screen
+        .until("the hit opened its channel and thread", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Engineering"))
+                && tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    Ok(())
+}
+
+/// A draft's row in the Drafts view opens its channel with the draft
+/// in the box.
+async fn opens_draft_from_list(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Design").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!("Draft from the list at {}", crate::seed::stamp());
+    screen.type_into(&composer, &said).await?;
+    drafts_hold(admin, &said, true).await?;
+    screen.open_channel("Engineering").await?;
+    screen.select_row("Drafts").await?;
+    screen
+        .until("the draft is listed", |tree| tree.has("label", &said))
+        .await?;
+    screen.select_row(&said).await?;
+    screen
+        .until("the row opened Design", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Design"))
+        })
+        .await?;
+    let composer = screen
+        .tree()
+        .await?
+        .find("text box", "Write a message…")?
+        .clone();
+    composer_says(screen, &composer, &said).await?;
+    screen.type_into(&composer, "").await?;
+    drafts_hold(admin, &said, false).await?;
+    screen.open_channel("Engineering").await
+}
+
+/// Mark all read at the end of the Threads tab row clears every unread
+/// thread, here and on the server.
+async fn marks_all_threads_read(screen: &Screen, admin: &Admin) -> Result<()> {
+    admin
+        .reply_as(
+            "grace",
+            "engineering",
+            "Morning. The nightly run",
+            "One more for the unread count.",
+        )
+        .await?;
+    screen.open_channel("Threads").await?;
+    screen
+        .until("a thread shows unread", |tree| {
+            tree.has("button", "Mark this thread read")
+        })
+        .await?;
+    screen.press("Mark all read").await?;
+    screen
+        .until("no thread shows unread", |tree| {
+            !tree.has("button", "Mark this thread read")
+        })
+        .await?;
+    let mut unread = -1;
+    for _ in 0..25 {
+        unread = admin.unread_threads().await?;
+        if unread == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if unread != 0 {
+        return Err(Error(format!(
+            "Mark all read was pressed but the server still counts {unread} unread thread(s)"
+        )));
+    }
+    screen.open_channel("Engineering").await
+}
+
+/// The Unreads tab shows only threads with something new, and the
+/// Followed tab shows them all again.
+async fn filters_threads_to_unreads(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Threads").await?;
+    screen
+        .until("the followed threads are listed", |tree| {
+            tree.has("button", " replies")
+        })
+        .await?;
+    let before = admin.unread_threads().await?;
+    screen.press("Unreads").await?;
+    if before == 0 {
+        screen
+            .until("the unreads tab lists nothing", |tree| {
+                !tree.has("button", " replies")
+            })
+            .await?;
+    } else {
+        screen
+            .until("the unreads tab lists only unread threads", |tree| {
+                tree.has("button", "Mark this thread read")
+            })
+            .await?;
+    }
+    screen.press("Followed threads").await?;
+    screen
+        .until("every followed thread is back", |tree| {
+            tree.has("button", " replies")
+        })
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// The thread pane's close button puts it away.
+async fn closes_thread_with_button(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press(" replies").await?;
+    screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press("Close thread").await?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// The Following toggle in the thread pane reaches the server both
+/// ways.
+async fn follows_and_unfollows(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    screen.press(" replies").await?;
+    screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    for expected in [false, true] {
+        screen.press("Following").await?;
+        let mut last = !expected;
+        for _ in 0..25 {
+            last = admin.thread_following("engineering", ROOT).await?;
+            if last == expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        if last != expected {
+            return Err(Error(format!(
+                "Following was pressed but the server says following = {last}, not {expected}"
+            )));
+        }
+    }
+    screen.press_key(key::ESCAPE, &[])?;
+    Ok(())
+}
+
+/// A header changed from another client reaches the open channel's
+/// title bar over the socket.
+async fn follows_header_from_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Design").await?;
+    let header = format!("Header set elsewhere at {}", crate::seed::stamp());
+    admin.set_header("design", &header).await?;
+    screen
+        .until("the title bar shows the new header", |tree| {
+            tree.has("label", &header)
+        })
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// Taken out of a channel from elsewhere, its row goes; put back, it
+/// returns -- membership events the window has no local cause for.
+async fn membership_changed_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    admin.drop_me("random-lab").await?;
+    screen
+        .until("the Random row goes out of the sidebar", |tree| {
+            !tree.has("label", "Random")
+        })
+        .await?;
+    admin.rejoin("random-lab").await?;
+    screen
+        .until("the Random row is back", |tree| tree.has("label", "Random"))
+        .await
+        .map(|_| ())
+}
+
+/// Away from the status menu reaches the server, and Online takes it
+/// back.
+async fn goes_away_and_back(screen: &Screen, admin: &Admin) -> Result<()> {
+    for (row, expected) in [("Away", "away"), ("Online", "online")] {
+        screen.press("Set your status").await?;
+        screen.press(row).await?;
+        let mut last = String::new();
+        for _ in 0..25 {
+            last = admin.my_status().await?.0;
+            if last == expected {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        if last != expected {
+            return Err(Error(format!(
+                "{row} was pressed but the server says the status is {last:?}, not {expected:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The smiley beside the box opens the picker, and a pick puts the
+/// shortcode in the box.
+async fn inserts_emoji_from_picker(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.press("Insert an emoji").await?;
+    let picker = screen
+        .until("the picker is up", |tree| {
+            tree.has("search box", "Search emoji…")
+        })
+        .await?;
+    // No click into the search box first: the popover gives it the
+    // focus on opening, and a click there took the popover down and
+    // put a new one up, under which the box the test held was gone.
+    let search = picker.find("search box", "Search emoji…")?.clone();
+    screen.type_into(&search, "tada").await?;
+    // A pick is named by its glyph, and the grid fills a moment after
+    // the search changes.
+    screen
+        .until("the picker offers tada", |tree| {
+            tree.iter().any(|n| n.role == "button" && n.name == "🎉")
+        })
+        .await?;
+    screen.press("🎉").await?;
+    composer_says(screen, &composer, ":tada: ").await?;
+    screen.type_into(&composer, "").await
+}
+
+/// The author's name over a message opens their card, the other place
+/// Mattermost opens one from.
+async fn opens_card_from_name(screen: &Screen) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let body = screen.text_holding(ROOT).await?;
+    screen.scroll_into_view(&body).await?;
+    // The name is the label just before the message in tree order: the
+    // sidebar has an "ada" of its own, so the first "ada" is not it.
+    let tree = screen.tree().await?;
+    let at = tree
+        .iter()
+        .position(|n| n.path == body.path)
+        .ok_or_else(|| Error("the message went out of the tree".to_owned()))?;
+    let name = tree[..at]
+        .iter()
+        .rev()
+        .take(8)
+        .find(|n| n.role == "label" && n.name == "ada")
+        .cloned()
+        .ok_or_else(|| Error("no author label before the message".to_owned()))?;
+    screen.click_start_of(&name).await?;
+    screen
+        .until("the card names ada", |tree| tree.has("label", "@ada"))
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the card is gone", |tree| !tree.has("label", "@ada"))
         .await
         .map(|_| ())
 }

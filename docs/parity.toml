@@ -136,7 +136,8 @@ notes = """
 The session token arrives in the Token response header, 26 characters, with \
 the body carrying only the sanitized user -- confirmed on a live server. The \
 MFA field is named `token`, not `mfa_token`. A personal access token is used \
-identically via Authorization: Bearer."""
+identically via Authorization: Bearer. The lab's sign-in tries a wrong \
+password first and expects the form to say so and stay, before the right one."""
 
 [[feature]]
 id       = "auth.session_revoked"
@@ -386,8 +387,14 @@ kept counting threads nobody can see would be a window arguing with \
 itself. Verified on a live account, against a thread made unread for the \
 purpose: the row stopped being unread, the sidebar badge went, and the \
 server's own thread list reported none.
-
-NOT built: the filter control beside the tabs."""
+ \
+The tabs and the button are lab-verified: `marks-all-threads-read` has a \
+reply land, sees the row unread, presses Mark all read and finds the \
+server counting none; `filters-threads-to-unreads` sees the Unreads tab \
+list only what is unread and Followed threads list them all again; and \
+`follows-and-unfollows-a-thread` presses the pane's Following toggle both \
+ways and reads the server, which answers 404 for a thread not followed and \
+the thread itself, without an `is_following` field, for one that is."""
 
 [[feature]]
 id       = "drafts.view"
@@ -435,7 +442,9 @@ server; sending it cleared the draft here and on the server; and the \
 server's own drafts endpoint agreed at every step. Files attached to a draft \
 are written down with it as their ids, since an attachment goes up the \
 moment it is chosen, and come back as chips -- the lab's \
-`sends-a-draft-with-its-file` sends a webapp-made draft with its file. A channel with a draft wears a \
+`sends-a-draft-with-its-file` sends a webapp-made draft with its file, and \
+`opens-a-draft-from-the-list` finds a typed draft in the Drafts view and opens \
+its channel with the draft back in the box. A channel with a draft wears a \
 pencil after its name in the sidebar, the way the webapp marks one; the \
 lab sees it come with the draft and go with it."""
 
@@ -966,8 +975,12 @@ names and the position, and sends only what changed; the server tells \
 everyone, this window included, with a `user_updated`. The username is \
 not offered -- an administrator may forbid changing it, and it is the \
 one thing other people type to reach you. Verified in the lab: a \
-position typed into the dialog was the server's. NOT built: the \
-picture, which needs a file picker the lab cannot drive either."""
+position typed into the dialog was the server's. The card itself is \
+lab-verified from both places Mattermost opens it: an @name inside a \
+message (`opens-a-card-from-a-mention`) and the author's name over one \
+(`opens-a-card-from-the-name`), each showing the person and going on \
+Escape. NOT built: the picture, which needs a file picker the lab cannot \
+drive either."""
 
 [[feature]]
 id       = "sidebar.drag_between_categories"
@@ -1382,7 +1395,9 @@ only shortcode characters, so `:-)` is left alone. Accepting closes the \
 shortcode and leaves a space, which is what somebody mid-sentence wants \
 next. Verified on a live account: searching "rocket" and picking it put a \
 🚀 on the message, and typing `:pep` offered seven of the server's own \
-with their pictures, Tab turning it into `:pepe_clap: `. NOT built: \
+with their pictures, Tab turning it into `:pepe_clap: `. The picker's own \
+way is lab-verified by `inserts-an-emoji-from-the-picker`: the smiley, "tada" \
+typed into its search, the pick, and `:tada: ` in the box. NOT built: \
 skin-tone variants. The typed completion is lab-verified: \
 ":tad" offered :tada: and Tab wrote ":tada: "."""
 
@@ -1645,8 +1660,10 @@ wrote it, and picking one toggles the reaction the way the quick \
 buttons do. Verified in the lab, by keys faked on its display: the chord \
 opened the picker over the box, "tada" typed into its search narrowed \
 it, and the server's copy of the newest message carried the reaction. \
-**Alt+click on a message marks it unread**, the webapp's binding, taken in \
-the capture phase so the text underneath does not start a selection; the \
+**Alt+click on a message marks it unread**, the webapp's binding: a \
+capture-phase gesture that acts on the press and denies the sequence every \
+time -- a first version claimed the press and left the hover toolbar's \
+buttons dead afterwards, which the lab caught; the \
 lab holds Alt over XTEST while it clicks, sees the server count the channel \
 unread, and sees coming back read it (`marks-unread-with-alt-click`). \
 **Ctrl+Shift+L puts the caret in the message box and Ctrl+Shift+U opens the \
