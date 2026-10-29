@@ -3883,12 +3883,17 @@ fn attach_both_composers(ui: &Ui, composer: &gtk::TextView, thread_composer: &gt
             .map(|post| post.channel_id.clone())?;
         Some((channel, Some(root)))
     });
-    attach_mentions(ui, composer, |ui| ui.selected.borrow().clone());
-    attach_mentions(ui, thread_composer, |ui| {
-        let root = ui.thread_root.borrow().clone()?;
-        let store = ui.store.borrow();
-        store.posts.get(&root).map(|post| post.channel_id.clone())
-    });
+    attach_mentions(ui, composer, |ui| ui.selected.borrow().clone(), |_| None);
+    attach_mentions(
+        ui,
+        thread_composer,
+        |ui| {
+            let root = ui.thread_root.borrow().clone()?;
+            let store = ui.store.borrow();
+            store.posts.get(&root).map(|post| post.channel_id.clone())
+        },
+        |ui| ui.thread_root.borrow().clone(),
+    );
     // Each box edits what was last said where it sends: the channel
     // composer the last message in the channel, the thread's own box
     // the last reply in the thread. Taking the channel's last message
@@ -4311,6 +4316,7 @@ fn attach_mentions(
     ui: &Ui,
     entry: &gtk::TextView,
     channel: impl Fn(&Ui) -> Option<ChannelId> + 'static,
+    thread: impl Fn(&Ui) -> Option<PostId> + 'static,
 ) {
     let (list, popup) = completion_popup(entry);
 
@@ -4332,8 +4338,9 @@ fn attach_mentions(
                 let popup = popup.clone();
                 let prefix = prefix.clone();
                 let channel = channel(&ui);
+                let thread = thread(&ui);
                 move || {
-                    fill_mentions(&ui, &list, &prefix, channel.as_ref());
+                    fill_mentions(&ui, &list, &prefix, channel.as_ref(), thread.as_ref());
                     if list.row_at_index(0).is_none() {
                         popup.popdown();
                     } else {
@@ -4523,7 +4530,13 @@ fn completion_keys(
 /// Draw the people who match, with the name beside the username the way
 /// Mattermost does: the username is what the mention becomes, the name
 /// is what the reader was thinking of.
-fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str, channel: Option<&ChannelId>) {
+fn fill_mentions(
+    ui: &Ui,
+    list: &gtk::ListBox,
+    prefix: &str,
+    channel: Option<&ChannelId>,
+    thread: Option<&PostId>,
+) {
     while let Some(old) = list.first_child() {
         list.remove(&old);
     }
@@ -4544,7 +4557,7 @@ fn fill_mentions(ui: &Ui, list: &gtk::ListBox, prefix: &str, channel: Option<&Ch
     }
 
     let mut heading_drawn = (false, false);
-    for found in store.mention_candidates(channel, prefix, MENTIONS_OFFERED) {
+    for found in store.mention_candidates(channel, thread, prefix, MENTIONS_OFFERED) {
         // Two sections, like Mattermost's: the people in this
         // conversation, then anyone else the typing matches. The second
         // heading only appears once somebody is under it.
@@ -10892,7 +10905,7 @@ impl Ui {
             let store = self.store.borrow();
             (
                 store
-                    .mention_candidates(Some(channel), prefix, MENTIONS_OFFERED)
+                    .mention_candidates(Some(channel), None, prefix, MENTIONS_OFFERED)
                     .len()
                     >= MENTIONS_ENOUGH,
                 store.teams.first().map(|team| team.id.clone()),

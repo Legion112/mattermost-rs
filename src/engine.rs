@@ -1173,7 +1173,24 @@ async fn handle(a: &Active, command: Command, events: &async_channel::Sender<Eve
             .await
             {
                 Ok(page) => {
+                    let channel = page.posts.get(&root).map(|p| p.channel_id.clone());
                     let _ = events.send(Event::Thread { root, page }).await;
+                    // Who is in the channel the thread is in, for `@` in
+                    // the reply box. A roster comes with opening a
+                    // channel, and a thread opened from the Threads view
+                    // or a notification is in one that may never have
+                    // been opened: without this, everyone in the thread
+                    // was offered as not in the channel.
+                    if let Some(channel) = channel
+                        && let Ok(users) = fetch(
+                            &a.client,
+                            &rest::users_in_channel(&channel, CHANNEL_ROSTER),
+                            rest::parse_users_in_channel,
+                        )
+                        .await
+                    {
+                        let _ = events.send(Event::ChannelRoster { channel, users }).await;
+                    }
                 }
                 Err(e) => {
                     let _ = events.send(Event::Failed(e)).await;

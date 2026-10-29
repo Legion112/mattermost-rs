@@ -942,6 +942,50 @@ impl Admin {
         id_of(&find_root(&page, starts_with)?)
     }
 
+    /// Who is in a thread -- the root's author and everyone who replied
+    /// -- by username.
+    pub async fn thread_people(
+        &self,
+        channel: &str,
+        root_starts_with: &str,
+    ) -> Result<Vec<String>> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=200"
+            )))
+            .await?;
+        let root_id = id_of(&find_root(&page, root_starts_with)?)?;
+        let mut ids: Vec<String> = page["posts"]
+            .as_object()
+            .map(|posts| {
+                posts
+                    .values()
+                    .filter(|p| {
+                        p["id"].as_str() == Some(root_id.as_str())
+                            || p["root_id"].as_str() == Some(root_id.as_str())
+                    })
+                    .filter_map(|p| p["user_id"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        ids.sort();
+        ids.dedup();
+        let users = self
+            .api
+            .call(&HttpRequest::new(Method::Post, "/api/v4/users/ids").json(&json!(ids)))
+            .await?;
+        Ok(users
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|u| u["username"].as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// The id of a post in a channel starting with the text, reply or
     /// root: `post_id_of` finds roots only, and a reply changed from
     /// elsewhere has to be named by its own id.

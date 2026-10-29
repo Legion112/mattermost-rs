@@ -2136,7 +2136,7 @@ fn mention_candidates_rank_username_then_name_then_anywhere() {
     ]);
 
     let names: Vec<&str> = store
-        .mention_candidates(None, "pre", 10)
+        .mention_candidates(None, None, "pre", 10)
         .into_iter()
         .map(|m| m.user.username.as_str())
         .collect();
@@ -2145,10 +2145,10 @@ fn mention_candidates_rank_username_then_name_then_anywhere() {
     assert_eq!(names, ["presenceaura", "diogen", "supreme"]);
 
     // Case does not matter, and no query offers everybody.
-    assert_eq!(store.mention_candidates(None, "PRE", 10).len(), 3);
-    assert_eq!(store.mention_candidates(None, "", 10).len(), 4);
-    assert_eq!(store.mention_candidates(None, "", 2).len(), 2);
-    assert!(store.mention_candidates(None, "zzz", 10).is_empty());
+    assert_eq!(store.mention_candidates(None, None, "PRE", 10).len(), 3);
+    assert_eq!(store.mention_candidates(None, None, "", 10).len(), 4);
+    assert_eq!(store.mention_candidates(None, None, "", 2).len(), 2);
+    assert!(store.mention_candidates(None, None, "zzz", 10).is_empty());
 }
 
 /// A deactivated person and a bot are not offered: mentioning the first
@@ -2176,7 +2176,7 @@ fn mention_candidates_skip_deactivated_people_and_bots() {
         },
     ]);
     let names: Vec<&str> = store
-        .mention_candidates(None, "go", 10)
+        .mention_candidates(None, None, "go", 10)
         .into_iter()
         .map(|m| m.user.username.as_str())
         .collect();
@@ -2272,7 +2272,7 @@ fn mention_candidates_put_the_channels_own_people_first() {
     );
 
     let offered: Vec<(&str, bool)> = store
-        .mention_candidates(Some(&c1), "", 10)
+        .mention_candidates(Some(&c1), None, "", 10)
         .into_iter()
         .map(|m| (m.user.username.as_str(), m.in_channel))
         .collect();
@@ -2291,17 +2291,20 @@ fn mention_candidates_put_the_channels_own_people_first() {
     // A channel whose roster has never been fetched falls back to
     // everyone rather than offering nothing.
     let unknown = ChannelId::new("c2");
-    assert_eq!(store.mention_candidates(Some(&unknown), "", 10).len(), 4);
+    assert_eq!(
+        store.mention_candidates(Some(&unknown), None, "", 10).len(),
+        4
+    );
     assert!(
         store
-            .mention_candidates(Some(&unknown), "", 10)
+            .mention_candidates(Some(&unknown), None, "", 10)
             .iter()
             .all(|m| !m.in_channel)
     );
 
     // Matching still narrows it, and a member still leads.
     let narrowed: Vec<&str> = store
-        .mention_candidates(Some(&c1), "a", 10)
+        .mention_candidates(Some(&c1), None, "a", 10)
         .into_iter()
         .map(|m| m.user.username.as_str())
         .collect();
@@ -2489,7 +2492,7 @@ fn the_special_mentions_are_the_same_list_the_renderer_uses() {
     // Not a user, so it is not in the roster-backed list either.
     assert!(
         store
-            .mention_candidates(None, "all", 10)
+            .mention_candidates(None, None, "all", 10)
             .iter()
             .all(|m| m.user.username != "all")
     );
@@ -3922,4 +3925,69 @@ fn the_formatting_bar_preference_reads_the_webapps_way_round() {
         ..mm_types::Preference::default()
     }]);
     assert!(!store.formatting_hidden("post"));
+}
+
+/// Without a roster -- a thread opened from the Threads view is in a
+/// channel that may never have been opened -- anyone who has spoken in
+/// the channel counts as in it; and in a thread, the people in the
+/// thread come before the rest of the channel.
+#[test]
+fn mention_candidates_count_speakers_as_members_and_put_thread_people_first() {
+    let mut store = store();
+    let person = |id: &str, username: &str| User {
+        id: UserId::new(id),
+        username: username.to_owned(),
+        ..User::default()
+    };
+    store.apply_users(vec![
+        person("u-ada", "ada"),
+        person("u-grace", "grace"),
+        person("u-margaret", "margaret"),
+        person("u-linus", "linus"),
+    ]);
+    // ada's root, grace's reply to it, and margaret speaking in the
+    // channel only; linus has said nothing anywhere.
+    let mut root = post("p-root", "c1", 100);
+    root.user_id = UserId::new("u-ada");
+    let mut reply = post("p-reply", "c1", 200);
+    reply.user_id = UserId::new("u-grace");
+    reply.root_id = PostId::new("p-root");
+    let mut aside = post("p-aside", "c1", 300);
+    aside.user_id = UserId::new("u-margaret");
+    store.apply_post_list(
+        &ChannelId::new("c1"),
+        &page(vec![root, reply, aside]),
+        PageAnchor::Newest,
+    );
+    let offered = |thread: Option<&PostId>| -> Vec<(String, bool)> {
+        store
+            .mention_candidates(Some(&ChannelId::new("c1")), thread, "", 10)
+            .into_iter()
+            .map(|m| (m.user.username.clone(), m.in_channel))
+            .collect()
+    };
+    let named = |pairs: &[(&str, bool)]| -> Vec<(String, bool)> {
+        pairs.iter().map(|(n, b)| ((*n).to_owned(), *b)).collect()
+    };
+    // No roster: the three who spoke are in, linus is not, and the one
+    // who spoke last leads.
+    assert_eq!(
+        offered(None),
+        named(&[
+            ("margaret", true),
+            ("grace", true),
+            ("ada", true),
+            ("linus", false)
+        ])
+    );
+    // In the thread: its two people first, the later speaker leading.
+    assert_eq!(
+        offered(Some(&PostId::new("p-root"))),
+        named(&[
+            ("grace", true),
+            ("ada", true),
+            ("margaret", true),
+            ("linus", false)
+        ])
+    );
 }

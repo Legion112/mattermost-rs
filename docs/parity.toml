@@ -584,7 +584,18 @@ behind it. `@all`, `@channel` and `@here` are offered \
 under their own SPECIAL MENTIONS heading, from the same list the renderer \
 highlights them with -- two lists would be a name the composer offers and \
 the message does not mark. Lab-verified: "@gr" typed into \
-the box offered grace, and Tab wrote "@grace "."""
+the box offered grace, and Tab wrote "@grace ".
+
+Who counts as in the channel: the roster, and anyone who has spoken there. \
+A roster comes with opening a channel, and a thread opened from the \
+Threads view or a notification is in one that may never have been opened \
+-- so `@` in the reply box drew everyone under NOT IN CHANNEL, the people \
+in the thread and the reader included, which a real thread showed. Opening \
+a thread fetches its channel's roster now as well. And in the thread box \
+the people in the thread come before the rest of the channel, the later \
+speaker first. Lab-verified by `ranks-thread-people-first`: `@` in the \
+seeded thread's reply box lists its people under CHANNEL MEMBERS before \
+anyone who is not in it; the ranking with no roster at all is unit-tested."""
 
 [[feature]]
 id       = "posts.warm_channels"

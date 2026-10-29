@@ -75,6 +75,7 @@ pub const SCENARIOS: &[&str] = &[
     "completes-a-mention-with-tab",
     "dismisses-the-mention-popup",
     "completes-a-mention-in-the-thread-box",
+    "ranks-thread-people-first",
     "completes-an-emoji-with-tab",
     "inserts-an-emoji-from-the-picker",
     "opens-a-dm-from-the-switcher",
@@ -252,6 +253,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "opens-a-pinned-hit" => opens_pinned_hit(screen, admin).await,
         "toggles-a-reaction-from-its-chip" => toggles_reaction_from_chip(screen, admin).await,
         "completes-a-mention-in-the-thread-box" => completes_mention_in_thread(screen).await,
+        "ranks-thread-people-first" => ranks_thread_people_first(screen, admin).await,
         "reloads-channels" => reloads_channels(screen).await,
         "keeps-the-fold-across-a-reload" => keeps_the_fold_across_a_reload(screen, admin).await,
         "opens-search-with-the-keys" => opens_search_with_the_keys(screen).await,
@@ -3245,6 +3247,61 @@ async fn shows_more_of_a_long_code_block(screen: &Screen, admin: &Admin) -> Resu
         })
         .await
         .map(|_| ())
+}
+
+/// `@` in the thread box offers the people in the thread before the
+/// rest of the channel, and everyone in the thread as in the channel.
+async fn ranks_thread_people_first(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    let people = admin.thread_people("engineering", ROOT).await?;
+    screen.open_channel("Engineering").await?;
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
+    screen.type_into(&reply_box, "@").await?;
+    let tree = screen
+        .until("the popup lists the channel's people", |tree| {
+            tree.iter()
+                .any(|n| n.role == "label" && n.name == "CHANNEL MEMBERS")
+        })
+        .await?;
+    let heading = tree
+        .iter()
+        .position(|n| n.role == "label" && n.name == "CHANNEL MEMBERS")
+        .ok_or_else(|| Error("the heading went out of the tree".to_owned()))?;
+    let offered: Vec<String> = tree[heading + 1..]
+        .iter()
+        .take_while(|n| !(n.role == "label" && n.name == "NOT IN CHANNEL"))
+        .filter(|n| n.role == "label" && n.name.starts_with('@'))
+        .map(|n| n.name.trim_start_matches('@').to_owned())
+        .collect();
+    let last_in = offered.iter().rposition(|u| people.contains(u));
+    let first_out = offered.iter().position(|u| !people.contains(u));
+    // Escape takes the popup, and the pane with it when it is up.
+    screen.press_key(key::ESCAPE, &[])?;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    if screen.tree().await?.has("button", "Close thread") {
+        screen.press("Close thread").await?;
+    }
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await?;
+    match (last_in, first_out) {
+        (None, _) => Err(Error(format!(
+            "nobody from the thread {people:?} is offered under the heading: {offered:?}"
+        ))),
+        (Some(last_in), Some(first_out)) if first_out < last_in => Err(Error(format!(
+            "somebody outside the thread {people:?} is offered before somebody in it: {offered:?}"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// The root of the open thread deleted from elsewhere goes from the

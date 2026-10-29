@@ -548,38 +548,55 @@ impl Store {
     pub fn mention_candidates(
         &self,
         channel: Option<&ChannelId>,
+        thread: Option<&PostId>,
         prefix: &str,
         limit: usize,
     ) -> Vec<Mention<'_>> {
         let wanted = prefix.trim().to_lowercase();
         let members = channel.and_then(|c| self.channel_members.get(c));
         let spoke = channel.map(|c| self.last_spoke(c)).unwrap_or_default();
-        // Four keys, in the order the reader thinks: the people here
+        let in_thread = thread
+            .map(|root| self.thread_people(root))
+            .unwrap_or_default();
+        // Five keys, in the order the reader thinks: the people here
         // before anyone else, the better match before the worse one, the
+        // people in this thread before the rest of the channel, the
         // person who just said something before the one who never has,
         // and the alphabet only to break a genuine tie.
-        let mut found: Vec<(u8, u8, std::cmp::Reverse<i64>, &User)> = self
+        //
+        // "Here" is the roster when there is one, and anyone who has
+        // spoken in the channel besides. A roster arrives with opening
+        // the channel, and a thread opened from the Threads view is in
+        // a channel that may never have been opened -- so the people in
+        // the thread were drawn under "not in channel", every one of
+        // them, the reader included.
+        let mut found: Vec<(u8, u8, u8, std::cmp::Reverse<i64>, &User)> = self
             .users
             .values()
             .filter(|u| u.delete_at.is_zero() && !u.is_bot && !u.username.is_empty())
             .filter_map(|u| {
                 let tier = mention_rank(u, &wanted)?;
-                let here = u8::from(!members.is_some_and(|m| m.contains(&u.id)));
+                let present =
+                    members.is_some_and(|m| m.contains(&u.id)) || spoke.contains_key(&u.id);
+                let here = u8::from(!present);
+                let elsewhere = u8::from(!in_thread.contains(&u.id));
                 let said = spoke.get(&u.id).copied().unwrap_or(0);
-                Some((here, tier, std::cmp::Reverse(said), u))
+                Some((here, tier, elsewhere, std::cmp::Reverse(said), u))
             })
             .collect();
         found.sort_by(
-            |(here, tier, said, a), (other_here, other_tier, other_said, b)| {
+            |(here, tier, elsewhere, said, a),
+             (other_here, other_tier, other_elsewhere, other_said, b)| {
                 here.cmp(other_here)
                     .then_with(|| tier.cmp(other_tier))
+                    .then_with(|| elsewhere.cmp(other_elsewhere))
                     .then_with(|| said.cmp(other_said))
                     .then_with(|| a.username.cmp(&b.username))
             },
         );
         found
             .into_iter()
-            .map(|(here, _, _, user)| Mention {
+            .map(|(here, _, _, _, user)| Mention {
                 user,
                 in_channel: here == 0,
             })
@@ -629,6 +646,15 @@ impl Store {
     /// Replies count, unlike `channel_posts`: someone answering in a
     /// thread is still part of the conversation, and is exactly who the
     /// reader is about to mention.
+    /// Who is in a thread: the root's author and everyone who replied.
+    fn thread_people(&self, root: &PostId) -> BTreeSet<&UserId> {
+        self.posts
+            .values()
+            .filter(|p| !p.is_deleted() && (p.id == *root || p.root_id == *root))
+            .map(|p| &p.user_id)
+            .collect()
+    }
+
     fn last_spoke(&self, channel: &ChannelId) -> HashMap<&UserId, i64> {
         let mut latest: HashMap<&UserId, i64> = HashMap::new();
         for post in self
