@@ -1218,6 +1218,26 @@ impl Admin {
 
     /// Put the account back into a channel it was taken out of, so a test
     /// that leaves one can be run twice.
+    /// Take a mute off a channel, for a lab kept across runs where a
+    /// scenario muted it and did not get as far as unmuting.
+    pub async fn unmute(&self, channel: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(
+                &HttpRequest::new(
+                    Method::Put,
+                    format!("/api/v4/channels/{id}/members/{}/notify_props", self.me),
+                )
+                .json(&json!({
+                    "user_id": self.me,
+                    "channel_id": id,
+                    "mark_unread": "all",
+                })),
+            )
+            .await
+            .map(|_| ())
+    }
+
     pub async fn rejoin(&self, channel: &str) -> Result<()> {
         if self.am_in(channel).await? {
             return Ok(());

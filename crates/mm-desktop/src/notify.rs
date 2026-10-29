@@ -164,7 +164,11 @@ pub fn notification_for(
     if settings.suppress_system && post.is_system() {
         return Err(Suppressed::SystemMessage);
     }
-    if settings.muted && settings.muted_is_silent && !mentioned {
+    // Mentions included: Mattermost's documentation has a muted channel
+    // sending no notification of any kind, with a direct mention only
+    // bolding the row in the sidebar. This client let a mention through
+    // a mute until the lab caught the banner.
+    if settings.muted && settings.muted_is_silent {
         return Err(Suppressed::Muted);
     }
     match settings.effective() {

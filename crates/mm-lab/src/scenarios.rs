@@ -37,6 +37,8 @@ pub const SCENARIOS: &[&str] = &[
     "shows-an-unread-and-clears-it",
     "filters-the-sidebar-to-unreads",
     "opens-a-channel-from-a-notification",
+    "keeps-quiet-when-muted",
+    "keeps-quiet-when-looking",
     "shows-a-new-direct-message",
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
@@ -104,6 +106,7 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool)
     // Only matters with --keep-data: put back what a previous run left
     // changed, so this one starts where that one did.
     admin.rejoin(PRACTICE).await?;
+    admin.unmute("design").await?;
 
     let home = lab_home();
     // Thrown away rather than reused: signing in is the first scenario, and
@@ -162,6 +165,8 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "shows-an-unread-and-clears-it" => unread_and_clears(screen, admin).await,
         "filters-the-sidebar-to-unreads" => filters_sidebar_to_unreads(screen, admin).await,
         "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
+        "keeps-quiet-when-muted" => quiet_when_muted(screen, admin).await,
+        "keeps-quiet-when-looking" => quiet_when_looking(screen, admin).await,
         "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
         "mutes-and-unmutes" => mutes(screen, admin).await,
         "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
@@ -488,6 +493,66 @@ async fn opens_from_notification(screen: &Screen, admin: &Admin) -> Result<()> {
                 .any(|n| n.role == "button" && n.name.starts_with("Design"))
         })
         .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// A muted channel sends no banner, mention or not: Mattermost's own
+/// rule, and `NotifySettings::muted_is_silent` is where this client
+/// keeps it. The same desk as the scenario before, with the channel
+/// muted first and unmuted after.
+async fn quiet_when_muted(screen: &Screen, admin: &Admin) -> Result<()> {
+    let desk = crate::notify::Desk::serve().await?;
+    screen.open_channel("Design").await?;
+    screen.press("Design").await?;
+    screen.press("Mute").await?;
+    membership_says(admin, "design", "mark_unread", "mention").await?;
+    screen.close_menu("Design").await?;
+    screen.open_channel("Engineering").await?;
+
+    let said = format!(
+        "@legion a banner nobody should see, at {}",
+        crate::seed::stamp()
+    );
+    admin.say_as("ada", "design", &said).await?;
+    // The mention lands in the sidebar first; a banner would follow at
+    // once if one were coming, so a wait after the badge is enough.
+    screen
+        .until("the muted Design row still counts the mention", |tree| {
+            badge_after(tree, "Design") == Some("1")
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Some(banner) = desk.banners().into_iter().find(|b| b.body.contains(&said)) {
+        return Err(Error(format!(
+            "Design is muted but a banner was sent: {banner:?}"
+        )));
+    }
+
+    screen.open_channel("Design").await?;
+    screen.press("Design").await?;
+    screen.press("Mute").await?;
+    membership_says(admin, "design", "mark_unread", "all").await?;
+    screen.close_menu("Design").await?;
+    screen.open_channel("Engineering").await
+}
+
+/// A mention in the channel the reader is looking at sends no banner:
+/// they are reading it, and a banner for what is already on screen is
+/// the window shouting at somebody standing next to it.
+async fn quiet_when_looking(screen: &Screen, admin: &Admin) -> Result<()> {
+    let desk = crate::notify::Desk::serve().await?;
+    screen.open_channel("Design").await?;
+    let said = format!("@legion said to your face, at {}", crate::seed::stamp());
+    admin.say_as("ada", "design", &said).await?;
+    screen
+        .until("the message is on screen", |tree| tree.has("label", &said))
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Some(banner) = desk.banners().into_iter().find(|b| b.body.contains(&said)) {
+        return Err(Error(format!(
+            "Design is open but a banner was sent for it: {banner:?}"
+        )));
+    }
     screen.open_channel("Engineering").await
 }
 

@@ -251,12 +251,19 @@ lab-verified too, by `opens-a-channel-from-a-notification`: the lab takes \
 since nothing else there does, sees the banner a mention in a closed \
 channel sends -- naming the sender and the channel, with a `default` action \
 -- invokes that action the way a shell does for a click, and watches the \
-window open the channel. \
+window open the channel. And `keeps-quiet-when-muted` mutes a channel, has \
+somebody mention the reader in it, sees the mention counted in the sidebar \
+and no banner sent, which is `muted_is_silent` holding end to end; and \
+`keeps-quiet-when-looking` has the reader mentioned in the channel they \
+have open and sees the message land with no banner for it. \
 Muting silences notifications outright, mentions included: Mattermost's own \
 documentation says that once a channel is muted "all notifications for that \
 channel are disabled, including email, desktop, incoming call ring tones, \
 and push notifications", with a direct mention only bolding the row in the \
-sidebar. `NotifySettings::muted_is_silent` is that rule, on by default."""
+sidebar. `NotifySettings::muted_is_silent` is that rule, on by default -- and it had a \
+hole: a mention was let through a mute, on the theory that losing one is \
+the thing people never forgive. The lab's own desk caught the banner, and \
+the rule now reads as the documentation does."""
 
 [[feature]]
 id       = "posts.timeline_gaps"

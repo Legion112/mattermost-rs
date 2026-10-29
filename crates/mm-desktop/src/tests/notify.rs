@@ -140,10 +140,12 @@ fn mentions_only_lets_a_mention_through_and_stops_the_rest() {
     assert!(n.is_mention);
 }
 
-/// Muting silences ordinary traffic but must not swallow a message that names
-/// the reader — losing that is the thing people never forgive.
+/// Muting silences everything, mentions included: Mattermost's own rule, in
+/// which a muted channel sends no notification of any kind and a direct
+/// mention only bolds the row in the sidebar. The mention still counts there;
+/// it just does not interrupt.
 #[test]
-fn a_muted_channel_is_silent_except_for_mentions() {
+fn a_muted_channel_is_silent_even_for_mentions() {
     let muted = NotifySettings {
         muted: true,
         ..NotifySettings::default()
@@ -152,11 +154,14 @@ fn a_muted_channel_is_silent_except_for_mentions() {
         decide(&post("u-bob", "chatter"), false, None, &muted),
         Err(Suppressed::Muted)
     );
-    assert!(decide(&post("u-bob", "@me hi"), true, None, &muted).is_ok());
+    assert_eq!(
+        decide(&post("u-bob", "@me hi"), true, None, &muted),
+        Err(Suppressed::Muted)
+    );
 }
 
-/// Whether mute alone silences notifications is not confirmed against a live
-/// server, so it is a flag rather than a hidden assumption.
+/// The rule is a flag rather than a hidden assumption, so a reader who
+/// wants a muted channel to still interrupt can have it.
 #[test]
 fn mute_can_be_configured_not_to_silence() {
     let muted_but_loud = NotifySettings {
