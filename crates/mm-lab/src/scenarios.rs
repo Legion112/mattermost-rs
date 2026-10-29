@@ -79,12 +79,16 @@ pub const SCENARIOS: &[&str] = &[
     "closes-the-thread-with-the-button",
     "follows-and-unfollows-a-thread",
     "jumps-with-the-switcher",
+    "walks-channels-with-alt-arrows",
+    "jumps-to-unread-with-alt-shift",
+    "folds-and-unfolds-a-category",
     "focuses-the-box-with-the-keys",
     "adds-and-removes-somebody",
     "refuses-to-leave-town-square",
     "edits-the-channel-header",
     "follows-a-header-change-from-elsewhere",
     "comes-and-goes-with-membership-elsewhere",
+    "follows-a-rename-from-elsewhere",
     "archives-from-the-menu",
     "makes-a-channel-private",
     "opens-an-archived-channel",
@@ -204,6 +208,10 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "follows-a-rename-from-elsewhere" => follows_rename_from_elsewhere(screen, admin).await,
+        "folds-and-unfolds-a-category" => folds_and_unfolds_a_category(screen, admin).await,
+        "walks-channels-with-alt-arrows" => walks_channels_with_alt_arrows(screen).await,
+        "jumps-to-unread-with-alt-shift" => jumps_to_unread_with_alt_shift(screen, admin).await,
         "opens-a-card-from-the-name" => opens_card_from_name(screen).await,
         "goes-away-and-back" => goes_away_and_back(screen, admin).await,
         "inserts-an-emoji-from-the-picker" => inserts_emoji_from_picker(screen).await,
@@ -1380,9 +1388,33 @@ async fn opens_draft_from_list(screen: &Screen, admin: &Admin) -> Result<()> {
     screen.open_channel("Engineering").await
 }
 
+/// The Threads view, by its sidebar row. Not `open_channel`: that waits
+/// for a channel's header button, and this view has a title instead.
+async fn open_threads(screen: &Screen) -> Result<()> {
+    screen.select_row("Threads").await?;
+    screen
+        .until("the Threads view is up", |tree| {
+            // A tab is a toggle button, whatever the bus calls it.
+            tree.iter().any(|n| n.name == "Followed threads")
+        })
+        .await
+        .map(|_| ())
+}
+
 /// Mark all read at the end of the Threads tab row clears every unread
 /// thread, here and on the server.
 async fn marks_all_threads_read(screen: &Screen, admin: &Admin) -> Result<()> {
+    // With the thread pane away first: a reply landing in a thread that
+    // is open in the pane is read at once, which is right, and would
+    // leave nothing for this test to mark.
+    if screen.tree().await?.has("text box", "Reply…") {
+        screen.press_key(key::ESCAPE, &[])?;
+        screen
+            .until("the thread pane is away", |tree| {
+                !tree.has("text box", "Reply…")
+            })
+            .await?;
+    }
     admin
         .reply_as(
             "grace",
@@ -1391,7 +1423,7 @@ async fn marks_all_threads_read(screen: &Screen, admin: &Admin) -> Result<()> {
             "One more for the unread count.",
         )
         .await?;
-    screen.open_channel("Threads").await?;
+    open_threads(screen).await?;
     screen
         .until("a thread shows unread", |tree| {
             tree.has("button", "Mark this thread read")
@@ -1422,7 +1454,7 @@ async fn marks_all_threads_read(screen: &Screen, admin: &Admin) -> Result<()> {
 /// The Unreads tab shows only threads with something new, and the
 /// Followed tab shows them all again.
 async fn filters_threads_to_unreads(screen: &Screen, admin: &Admin) -> Result<()> {
-    screen.open_channel("Threads").await?;
+    open_threads(screen).await?;
     screen
         .until("the followed threads are listed", |tree| {
             tree.has("button", " replies")
@@ -1611,6 +1643,111 @@ async fn opens_card_from_name(screen: &Screen) -> Result<()> {
     screen.press_key(key::ESCAPE, &[])?;
     screen
         .until("the card is gone", |tree| !tree.has("label", "@ada"))
+        .await
+        .map(|_| ())
+}
+
+/// Alt+Down and Alt+Up walk the sidebar one row at a time, in the
+/// order the reader sees it.
+async fn walks_channels_with_alt_arrows(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(key::DOWN, &[key::ALT])?;
+    screen
+        .until("Alt+Down opened the next row", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Leaving Practice"))
+        })
+        .await?;
+    screen.press_key(key::UP, &[key::ALT])?;
+    screen
+        .until("Alt+Up came back", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Engineering"))
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Alt+Shift+Down goes to the next unread channel, skipping the read
+/// ones in between.
+async fn jumps_to_unread_with_alt_shift(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Archive Practice").await?;
+    screen.open_channel("Engineering").await?;
+    admin
+        .say_as(
+            "ada",
+            "random-lab",
+            "Something unread in Random, for the arrows.",
+        )
+        .await?;
+    screen
+        .until("the Random row is unread", |tree| {
+            matches!(badge_after(tree, "Random"), Some("1" | "●"))
+        })
+        .await?;
+    focused_composer(screen).await?;
+    screen.press_key(key::DOWN, &[key::ALT, key::SHIFT])?;
+    screen
+        .until("Alt+Shift+Down opened Random", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Random"))
+        })
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// A click on a category heading folds it, hiding its rows but the open
+/// one, and the server remembers the fold; a second click unfolds.
+async fn folds_and_unfolds_a_category(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.select_row("CHANNELS").await?;
+    screen
+        .until("the category's other rows are hidden", |tree| {
+            !tree.has("label", "Town Square") && tree.has("label", "Engineering")
+        })
+        .await?;
+    let mut folded = false;
+    for _ in 0..25 {
+        folded = admin.category_collapsed("Channels").await?;
+        if folded {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !folded {
+        return Err(Error(
+            "the category folded on screen but the server does not hold it folded".to_owned(),
+        ));
+    }
+    screen.select_row("CHANNELS").await?;
+    screen
+        .until("the rows are back", |tree| tree.has("label", "Town Square"))
+        .await?;
+    for _ in 0..25 {
+        if !admin.category_collapsed("Channels").await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "the category unfolded on screen but the server still holds it folded".to_owned(),
+    ))
+}
+
+/// A channel renamed from another client is renamed in the sidebar
+/// over the socket, and renamed back.
+async fn follows_rename_from_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    admin.set_display_name("random-lab", "Random Lab").await?;
+    screen
+        .until("the row is renamed", |tree| tree.has("label", "Random Lab"))
+        .await?;
+    admin.set_display_name("random-lab", "Random").await?;
+    screen
+        .until("the row has its name back", |tree| {
+            tree.has("label", "Random") && !tree.has("label", "Random Lab")
+        })
         .await
         .map(|_| ())
 }

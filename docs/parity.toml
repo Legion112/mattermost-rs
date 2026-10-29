@@ -207,7 +207,12 @@ the second conversation never reached the sidebar. The lab caught it when \
 a direct message's banner scenario was put in front of the one that opens a \
 new conversation. Verified in the lab: a first message from a colleague with \
 no conversation yet made her row in the sidebar, and the row opened on the \
-message."""
+message. Three more things done elsewhere reach the window over the socket, \
+each lab-verified from the API: a header change shows in the open channel's \
+title bar (`follows-a-header-change-from-elsewhere`), a rename shows in the \
+sidebar and back (`follows-a-rename-from-elsewhere`), and being taken out of \
+a channel takes its row away and being put back brings it back \
+(`comes-and-goes-with-membership-elsewhere`)."""
 
 [[feature]]
 id       = "desktop.notifications"
@@ -328,7 +333,9 @@ the user's own categories, with the stacking taken from `order` rather than \
 from the array. Folding a category is written back: verified on a live server \
 by folding one from the client and reading the flag back, false then true then \
 false. A folded category still shows its unread channels and whichever channel \
-is open, which is what folding means in Mattermost. An empty `sorting` -- what \
+is open, which is what folding means in Mattermost -- lab-verified by \
+`folds-and-unfolds-a-category`, which clicks the heading, sees the other rows \
+go and the open one stay, reads the flag from the server, and clicks again. An empty `sorting` -- what \
 the server sends for a category nobody has reordered -- is drawn \
 alphabetically, which is inferred from the web app rather than read from the \
 server."""
@@ -1618,7 +1625,11 @@ folded where they folded it, and already filtered if they turned the unread \
 filter on -- walking the store instead would step into channels that are not \
 on screen. It wraps, which is what makes "previous unread" useful when there \
 are two, and it is bounded at one lap so "next unread" with nothing unread \
-stops instead of spinning. Every binding is on the window in the capture \
+stops instead of spinning. Both walks are lab-verified: \
+`walks-channels-with-alt-arrows` steps Alt+Down to the next row and Alt+Up \
+back, and `jumps-to-unread-with-alt-shift` has a message land in Random and \
+Alt+Shift+Down skip the read rows between to it. Every binding is on the \
+window in the capture \
 phase, because a `GtkEntry` with the focus eats key presses and the composer \
 has the focus nearly always. Verified on a live account: Alt+Down walked \
 four channels and wrapped from the bottom of CHANNELS to the top of \

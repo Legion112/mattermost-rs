@@ -1281,6 +1281,18 @@ impl Admin {
             .map(|_| ())
     }
 
+    /// Rename a channel from the API, as another client would.
+    pub async fn set_display_name(&self, channel: &str, display_name: &str) -> Result<()> {
+        let id = self.channel(channel).await?;
+        self.api
+            .call(
+                &HttpRequest::new(Method::Put, format!("/api/v4/channels/{id}/patch"))
+                    .json(&json!({ "display_name": display_name })),
+            )
+            .await
+            .map(|_| ())
+    }
+
     /// Take the signed-in user out of a channel from the API, as an
     /// admin elsewhere would; `rejoin` puts them back.
     pub async fn drop_me(&self, channel: &str) -> Result<()> {
@@ -1292,6 +1304,26 @@ impl Admin {
             ))
             .await
             .map(|_| ())
+    }
+
+    /// Whether the server holds a sidebar category folded, by its display
+    /// name.
+    pub async fn category_collapsed(&self, display_name: &str) -> Result<bool> {
+        let list = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/users/{}/teams/{}/channels/categories",
+                self.me, self.team
+            )))
+            .await?;
+        list["categories"]
+            .as_array()
+            .and_then(|all| {
+                all.iter()
+                    .find(|c| c["display_name"].as_str() == Some(display_name))
+                    .map(|c| c["collapsed"].as_bool().unwrap_or(false))
+            })
+            .ok_or_else(|| Error(format!("no category called {display_name:?}")))
     }
 
     /// Take a mute off a channel, for a lab kept across runs where a

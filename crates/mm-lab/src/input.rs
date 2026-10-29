@@ -20,6 +20,7 @@ pub mod key {
     pub const RETURN: u32 = 0xff0d;
     pub const ESCAPE: u32 = 0xff1b;
     pub const UP: u32 = 0xff52;
+    pub const DOWN: u32 = 0xff54;
     pub const BACKSLASH: u32 = 0x5c;
     pub const CONTROL: u32 = 0xffe3;
     pub const ALT: u32 = 0xffe9;
