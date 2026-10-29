@@ -198,10 +198,15 @@ they are next opened.
 
 A message in a channel the store has never heard of -- the first word of \
 a new direct message, or a channel the reader was just added to -- asks \
-for a sync, at most once every few seconds, since only a sync brings the \
-channel, its membership and its category. Verified in the lab: a first \
-message from a colleague with no conversation yet made her row in the \
-sidebar, and the row opened on the message."""
+for a sync, since only a sync brings the channel, its membership and its \
+category -- at most once every few seconds *per channel*: the gate was per \
+window once, and a first message from one new person two seconds after a \
+first message from another was taken for the same request and dropped, so \
+the second conversation never reached the sidebar. The lab caught it when \
+a direct message's banner scenario was put in front of the one that opens a \
+new conversation. Verified in the lab: a first message from a colleague with \
+no conversation yet made her row in the sidebar, and the row opened on the \
+message."""
 
 [[feature]]
 id       = "desktop.notifications"

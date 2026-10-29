@@ -190,7 +190,11 @@ struct Ui {
     /// channel the store did not know. Once in a while, not once per
     /// message: the first message in a new conversation is followed by
     /// the second before the sync has answered.
-    resync_asked: Rc<std::cell::Cell<Option<std::time::Instant>>>,
+    /// When a sync was last asked for over a post in a channel this
+    /// client had not heard of, and which channel: a second post in the
+    /// same channel moments later is not another request, but a post in
+    /// a different unknown channel is -- see `learn_new_channel`.
+    resync_asked: Rc<RefCell<Option<(std::time::Instant, ChannelId)>>>,
     /// Whether a redraw is already queued.
     ///
     /// Avatars and images arrive one at a time, and each one used to redraw
@@ -1190,7 +1194,7 @@ fn build(
         thread_root: Rc::new(RefCell::new(None)),
         drawn_sidebar: Rc::new(RefCell::new(None)),
         sidebar_stale: Rc::new(std::cell::Cell::new(false)),
-        resync_asked: Rc::new(std::cell::Cell::new(None)),
+        resync_asked: Rc::new(RefCell::new(None)),
         redraw_queued: Rc::new(std::cell::Cell::new(false)),
         redraw_cost: Rc::new(std::cell::Cell::new(std::time::Duration::ZERO)),
         sidebar_queued: Rc::new(std::cell::Cell::new(false)),
@@ -10099,15 +10103,22 @@ impl Ui {
         if self.store.borrow().channels.contains_key(&post.channel_id) {
             return;
         }
+        // Per channel, not per window: a first message from one new
+        // person two seconds after a first message from another was
+        // taken for the same request and dropped, and the second
+        // conversation never reached the sidebar -- caught in the lab.
         let now = std::time::Instant::now();
         let recently = self
             .resync_asked
-            .get()
-            .is_some_and(|at| now.duration_since(at) < RESYNC_PAUSE);
+            .borrow()
+            .as_ref()
+            .is_some_and(|(at, channel)| {
+                *channel == post.channel_id && now.duration_since(*at) < RESYNC_PAUSE
+            });
         if recently {
             return;
         }
-        self.resync_asked.set(Some(now));
+        *self.resync_asked.borrow_mut() = Some((now, post.channel_id.clone()));
         self.commands.send(Command::Sync).ok();
     }
 
