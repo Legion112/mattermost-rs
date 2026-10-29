@@ -39,6 +39,7 @@ pub const SCENARIOS: &[&str] = &[
     "opens-a-channel-from-a-notification",
     "keeps-quiet-when-muted",
     "keeps-quiet-when-looking",
+    "honours-mentions-only",
     "opens-a-dm-from-a-notification",
     "shows-a-new-direct-message",
     "mutes-and-unmutes",
@@ -170,6 +171,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
         "keeps-quiet-when-muted" => quiet_when_muted(screen, admin).await,
         "keeps-quiet-when-looking" => quiet_when_looking(screen, admin).await,
+        "honours-mentions-only" => honours_mentions_only(screen, admin).await,
         "opens-a-dm-from-a-notification" => opens_dm_from_notification(screen, admin).await,
         "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
         "mutes-and-unmutes" => mutes(screen, admin).await,
@@ -492,13 +494,7 @@ async fn opens_from_notification(screen: &Screen, admin: &Admin) -> Result<()> {
             banner.actions
         )));
     }
-    desk.click(banner.id).await?;
-    screen
-        .until("the click opened Design", |tree| {
-            tree.iter()
-                .any(|n| n.role == "button" && n.name.starts_with("Design"))
-        })
-        .await?;
+    click_until_open(screen, &desk, banner.id, "Design").await?;
     screen.open_channel("Engineering").await
 }
 
@@ -590,14 +586,89 @@ async fn opens_dm_from_notification(screen: &Screen, admin: &Admin) -> Result<()
             banner.summary
         )));
     }
-    desk.click(banner.id).await?;
+    click_until_open(screen, &desk, banner.id, "margaret").await?;
+    screen.open_channel("Engineering").await
+}
+
+/// A channel set to notify for mentions only sends no banner for an
+/// ordinary message and one for a mention: the channel's own
+/// `desktop` setting, honoured end to end, with the lab as the desktop.
+async fn honours_mentions_only(screen: &Screen, admin: &Admin) -> Result<()> {
+    let desk = crate::notify::Desk::serve().await?;
+    screen.open_channel("Design").await?;
+    screen.press("Design").await?;
+    screen.press("Mentions").await?;
+    membership_says(admin, "design", "desktop", "mention").await?;
+    screen.close_menu("Design").await?;
+    screen.open_channel("Engineering").await?;
+
+    let plain = format!("Nothing for you here, at {}", crate::seed::stamp());
+    admin.say_as("ada", "design", &plain).await?;
     screen
-        .until("the click opened the conversation", |tree| {
-            tree.iter()
-                .any(|n| n.role == "button" && n.name.starts_with("margaret"))
+        .until("the Design row shows the message unread", |tree| {
+            matches!(badge_after(tree, "Design"), Some("1" | "●"))
         })
         .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Some(banner) = desk.banners().into_iter().find(|b| b.body.contains(&plain)) {
+        return Err(Error(format!(
+            "Design notifies for mentions only but an ordinary message sent a banner: {banner:?}"
+        )));
+    }
+    let named = format!("@legion this one is for you, at {}", crate::seed::stamp());
+    admin.say_as("ada", "design", &named).await?;
+    let mut seen = false;
+    for _ in 0..50 {
+        seen = desk.banners().iter().any(|b| b.body.contains(&named));
+        if seen {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    if !seen {
+        return Err(Error(format!(
+            "a mention in a mentions-only channel sent no banner; the desk saw {:?}",
+            desk.banners()
+        )));
+    }
+
+    // Back to the default, and read, for the scenarios after this one.
+    screen.open_channel("Design").await?;
+    screen.press("Design").await?;
+    screen.press("Default").await?;
+    membership_says(admin, "design", "desktop", "default").await?;
+    screen.close_menu("Design").await?;
     screen.open_channel("Engineering").await
+}
+
+/// Click a banner until the window has opened what it names.
+///
+/// Clicked more than once if need be: the client listens for the click
+/// only once `Notify` has answered, on a connection of its own, which is
+/// why `Desk::click` waits a moment first; a person clicks again too.
+async fn click_until_open(
+    screen: &Screen,
+    desk: &crate::notify::Desk,
+    banner: u32,
+    header: &str,
+) -> Result<()> {
+    for _ in 0..5 {
+        desk.click(banner).await?;
+        for _ in 0..10 {
+            let open = screen
+                .tree()
+                .await?
+                .iter()
+                .any(|n| n.role == "button" && n.name.starts_with(header));
+            if open {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+    Err(Error(format!(
+        "five clicks on the banner did not open {header}"
+    )))
 }
 
 /// A first message from somebody with no conversation yet makes a

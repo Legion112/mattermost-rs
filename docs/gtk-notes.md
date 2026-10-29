@@ -603,8 +603,14 @@ went nowhere and a click on one could not be faked. The lab takes the
 name on the session bus itself (`crates/mm-lab/src/notify.rs`), answers
 `Notify` with an id the way a shell does, and emits `ActionInvoked` for
 a click -- a moment after the banner, since the client subscribes to
-the signal only once `Notify` has answered, and a click emitted in the
-same instant was lost once. Two bugs fell out of it in the first hour:
+the signal only once `Notify` has answered, on a connection of its own,
+and a click emitted in the same instant was lost once. Banner ids count
+up across every desk the lab makes: the client's thread for an old
+banner waits on for that banner's id, and a new desk handing the same
+id to a new banner had the old thread take the click and open the old
+banner's channel -- which looked like a lost click until the screenshot
+showed the wrong channel open. A scenario still clicks again until the
+window has opened what the banner names, as a person would. Two bugs fell out of it in the first hour:
 a mention let through a mute, and a second new conversation within
 five seconds of the first dropped by a per-window resync gate.
 

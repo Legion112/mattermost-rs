@@ -30,10 +30,15 @@ pub struct Banner {
     pub actions: Vec<String>,
 }
 
+/// Ids count up across every desk the lab makes, never from one again:
+/// the client's thread for an old banner waits on for that banner's id,
+/// and a new desk handing the same id to a new banner had the old
+/// thread take the click -- and open the old banner's channel.
+static NEXT_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
 #[derive(Debug, Default)]
 struct Server {
     received: Arc<Mutex<Vec<Banner>>>,
-    next: Mutex<u32>,
 }
 
 // The bus's shape, not this crate's: every method of an interface takes
@@ -68,12 +73,7 @@ impl Server {
         expire_timeout: i32,
     ) -> u32 {
         let id = if replaces_id == 0 {
-            let mut next = self
-                .next
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *next += 1;
-            *next
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         } else {
             replaces_id
         };
@@ -135,7 +135,6 @@ impl Desk {
         let received = Arc::new(Mutex::new(Vec::new()));
         let server = Server {
             received: Arc::clone(&received),
-            next: Mutex::new(0),
         };
         let connection = zbus::connection::Builder::session()
             .map_err(|e| Error(format!("no session bus for notifications: {e}")))?
