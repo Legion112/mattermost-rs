@@ -695,6 +695,11 @@ impl Screen {
         Err(Error(format!("{:?} would not come into view", node.name)))
     }
 
+    /// Where the window a widget is in sits on the screen, and how big.
+    pub async fn window_box(&self, node: &Node) -> Result<(i32, i32, i32, i32)> {
+        self.toplevel_box(node).await
+    }
+
     /// Where to turn the wheel for the list a widget is in: over its own
     /// column, half way down the window, so the wheel turns that list and
     /// not the sidebar beside it. Worked out once and kept, for a list

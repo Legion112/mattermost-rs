@@ -67,6 +67,7 @@ pub const SCENARIOS: &[&str] = &[
     "shows-a-file-from-elsewhere",
     "walks-images-with-the-arrows",
     "shows-more-of-a-long-code-block",
+    "wraps-a-long-code-line",
     "deletes-a-reply-from-the-pane",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
@@ -228,6 +229,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
             follows_changes_in_the_open_thread(screen, admin).await
         }
         "shows-the-shortcuts" => shows_the_shortcuts(screen).await,
+        "wraps-a-long-code-line" => wraps_a_long_code_line(screen, admin).await,
         "shows-the-new-messages-line" => shows_the_new_messages_line(screen, admin).await,
         "shows-a-file-from-elsewhere" => shows_a_file_from_elsewhere(screen, admin).await,
         "walks-images-with-the-arrows" => walks_images_with_the_arrows(screen, admin).await,
@@ -3428,6 +3430,42 @@ async fn scrolls_the_channel_with_the_keys(screen: &Screen, admin: &Admin) -> Re
     }
     admin.sweep_traces("design").await?;
     screen.open_channel("Engineering").await
+}
+
+/// A code line wider than the window wraps onto the next line, as the
+/// webapp wraps it, rather than running off to the right behind a
+/// scrollbar.
+async fn wraps_a_long_code_line(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let line = format!(
+        "https://gitlab.example.com/{}{}",
+        "a-long-path-segment/".repeat(12),
+        crate::seed::stamp()
+    );
+    let text = format!("Sent from the lab as one long line\n```\n{line}\n```");
+    let post = admin.say_as("ada", "engineering", &text).await?;
+    let tree = screen
+        .until("the line is drawn", |tree| tree.has("label", &line))
+        .await?;
+    let code = tree.find("label", &line)?.clone();
+    let (_, _, width, height) = screen.extents(&code).await?;
+    let (_, _, window_width, _) = screen.window_box(&code).await?;
+    admin.delete_as("ada", &post).await?;
+    screen
+        .until("the line is gone", |tree| !tree.has("label", &line))
+        .await?;
+    // Narrower than the window, and taller than one line of it.
+    if width >= window_width {
+        return Err(Error(format!(
+            "the code line is {width}px wide in a {window_width}px window: it did not wrap"
+        )));
+    }
+    if height < 30 {
+        return Err(Error(format!(
+            "the code line is {height}px tall: one line, so it did not wrap"
+        )));
+    }
+    Ok(())
 }
 
 /// The root of the open thread deleted from elsewhere goes from the

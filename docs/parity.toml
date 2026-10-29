@@ -953,8 +953,10 @@ What is sent is drawn whole. A fenced code block was drawn in a scroller \
 capped at a screenful, and the list gives a row its minimum height -- for a \
 vertical scroller, next to nothing -- so a report pasted into a message came \
 out as a two-line sliver nobody could read, which a real deploy report \
-showed. The panel is as tall as what it shows now, with no vertical \
-scrolling of its own, and a block longer than twenty lines is folded to its \
+showed. The panel is as tall as what it shows now, with no scrolling of its \
+own either way: a line wider than the window wraps onto the next, as the \
+webapp wraps it (`wraps-a-long-code-line`), where it used to go off to the \
+right behind a scrollbar. A block longer than twenty lines is folded to its \
 first twenty behind "Show more (N lines)", which unfolds it whole and folds \
 it back -- how the webapp folds a tall post. Lab-verified by \
 `shows-more-of-a-long-code-block`: a sixty-line report drawn folded at line \

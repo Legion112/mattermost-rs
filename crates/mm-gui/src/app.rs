@@ -6488,14 +6488,18 @@ fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
 /// A code block: a padded panel of monospace, folded behind Show more
 /// when it is long.
 ///
-/// Code does not wrap: the long lines go sideways in a scroller, the
-/// way every other client draws them. It does not scroll vertically,
-/// though. It did, capped at a screenful -- and the list gives a row
-/// its *minimum* height, which for a vertical scroller is next to
-/// nothing, so a report pasted into a message was drawn as a two-line
-/// sliver nobody could read. Now the panel is as tall as what it
-/// shows, and a tall block is folded to its first lines behind a Show
-/// more button, which is how the webapp folds a tall post.
+/// The lines wrap, as the webapp wraps them: a line wider than the
+/// window goes on below, broken inside a word where it must be, since
+/// a URL has no spaces. It went sideways behind a scrollbar before,
+/// which is where a deploy report's status line went -- and the panel
+/// was a vertical scroller too, capped at a screenful, and the list
+/// gives a row its *minimum* height, which for a scroller is next to
+/// nothing, so the report was drawn as a two-line sliver nobody could
+/// read. Now the panel is as tall as what it shows, and a tall block
+/// is folded to its first lines behind a Show more button, which is
+/// how the webapp folds a tall post. The fold is also what bounds the
+/// measuring: twenty wrapped lines of monospace, not the whole dump,
+/// which as one wrapped label once cost a channel five seconds to open.
 fn code_block(block: &BlockView) -> gtk::Widget {
     let lines: Vec<&str> = block.text.lines().collect();
     let folded = lines.len() > CODE_FOLD_LINES + CODE_FOLD_SLACK;
@@ -6505,18 +6509,12 @@ fn code_block(block: &BlockView) -> gtk::Widget {
         block.text.clone()
     };
     let code = card_label(&shown, false, &["monospace"]);
-    code.set_wrap(false);
-    code.set_hexpand(false);
     code.set_margin_start(10);
     code.set_margin_end(10);
     code.set_margin_top(6);
     code.set_margin_bottom(6);
-    let panel = gtk::ScrolledWindow::builder()
-        .child(&code)
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .vscrollbar_policy(gtk::PolicyType::Never)
-        .propagate_natural_height(true)
-        .build();
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    panel.append(&code);
     // "card" is libadwaita's panel styling: a background a shade off
     // the window's, and rounded corners.
     panel.add_css_class("card");
