@@ -1278,6 +1278,7 @@ fn wire_everything(ui: &Ui, composer: &Composer, thread_composer: &Composer) {
     watch_presence(ui);
     remember_geometry(ui);
     install_forwarding(ui);
+    install_menu_done(ui);
 }
 
 /// Ask again, now and then, where the people on screen are.
@@ -6214,7 +6215,7 @@ fn wire_forward_entry(
     let popover = popover.clone();
     let post = post.clone();
     button.connect_clicked(move |_| {
-        popover.popdown();
+        menu_done(&popover);
         ON_FORWARD.with(|handler| {
             if let Some(handler) = handler.borrow().as_ref() {
                 handler(&post, &address);
@@ -6225,6 +6226,39 @@ fn wire_forward_entry(
 
 /// What a picker does with the row chosen: see `Ui::open_picker`.
 type Chooser = Rc<dyn Fn(&Ui, &str, &str)>;
+
+/// See `ON_MENU_DONE`.
+type MenuDoneHandler = Rc<dyn Fn()>;
+
+thread_local! {
+    /// What happens once a message menu entry has been chosen: the
+    /// window puts the caret back in the message box, as Mattermost
+    /// does. Without it the focus stays with the menu's button, and the
+    /// first Escape after a menu went nowhere -- the lab counted two
+    /// to close a thread opened from the menu.
+    static ON_MENU_DONE: RefCell<Option<MenuDoneHandler>> = const { RefCell::new(None) };
+}
+
+/// A menu entry has done its work: the popover goes and the caret goes
+/// home.
+fn menu_done(popover: &gtk::Popover) {
+    // On the next turn of the loop rather than inside the click that
+    // chose the entry: a popover taken down from within its own button's
+    // handler left the window taking the next Escape for the popover's,
+    // and a keyboard reader needed two to close what the entry opened.
+    // Through the menu button that owns the popover, so the button's own
+    // "active" state is let go of too: a popover taken down behind the
+    // button's back left the button thinking its menu was still up.
+    match popover.parent().and_downcast::<gtk::MenuButton>() {
+        Some(button) => button.set_active(false),
+        None => popover.popdown(),
+    }
+    ON_MENU_DONE.with(|handler| {
+        if let Some(handler) = handler.borrow().as_ref() {
+            handler();
+        }
+    });
+}
 
 /// See `ON_FORWARD`: the message being forwarded, and its permalink.
 type ForwardHandler = Rc<dyn Fn(&PostId, &str)>;
@@ -6879,7 +6913,7 @@ fn wire_save_entry(
     let post = post.clone();
     button.connect_clicked(move |_| {
         save_post(&store, &commands, &post, saved);
-        popover.popdown();
+        menu_done(&popover);
     });
 }
 
@@ -6941,7 +6975,7 @@ fn fill_message_menu(
         let popover = popover.clone();
         button.connect_clicked(move |_| {
             commands.send(command.clone()).ok();
-            popover.popdown();
+            menu_done(&popover);
         });
         actions.append(button);
     };
@@ -6951,7 +6985,7 @@ fn fill_message_menu(
             if let Some(display) = gdk::Display::default() {
                 display.clipboard().set_text(&text);
             }
-            popover.popdown();
+            menu_done(&popover);
         });
         actions.append(button);
     };
@@ -7023,7 +7057,7 @@ fn wire_delete_entry(
 ) {
     let (commands, popover, post) = (commands.clone(), popover.clone(), post.clone());
     delete.connect_clicked(move |button| {
-        popover.popdown();
+        menu_done(&popover);
         let ask = adw::AlertDialog::builder()
             .heading("Delete this message?")
             .body("It goes for everybody, and it does not come back.")
@@ -7057,7 +7091,7 @@ fn wire_edit(
     let post = post.clone();
     let was = was.to_owned();
     edit.connect_clicked(move |button| {
-        popover.popdown();
+        menu_done(&popover);
         open_editor(button, &post, &was, &commands);
     });
 }
@@ -7237,6 +7271,16 @@ impl RowWidgets {
 /// Make a click on an `@name` in a message open that person's card,
 /// pointing at the name. See `ON_MENTION` for why this is installed
 /// rather than wired.
+/// Put the caret back in the message box after a menu entry: see
+/// `ON_MENU_DONE`.
+fn install_menu_done(ui: &Ui) {
+    let ui = ui.clone();
+    let handler: MenuDoneHandler = Rc::new(move || {
+        ui.composer.view.grab_focus();
+    });
+    ON_MENU_DONE.with(|slot| *slot.borrow_mut() = Some(handler));
+}
+
 /// Let a message menu open the forward picker: see `ON_FORWARD`.
 fn install_forwarding(ui: &Ui) {
     let ui = ui.clone();

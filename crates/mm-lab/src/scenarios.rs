@@ -61,6 +61,7 @@ pub const SCENARIOS: &[&str] = &[
     "opens-a-dm-from-the-switcher",
     "deletes-a-message-from-the-menu",
     "edits-with-the-up-key",
+    "edits-from-the-menu",
     "reacts-with-the-keyboard",
     "searches-messages",
     "opens-a-hit-from-search",
@@ -76,6 +77,7 @@ pub const SCENARIOS: &[&str] = &[
     "marks-unread-with-alt-click",
     "replies-in-the-thread-box",
     "replies-from-the-hover-toolbar",
+    "replies-from-the-menu",
     "closes-the-thread-with-the-button",
     "follows-and-unfollows-a-thread",
     "jumps-with-the-switcher",
@@ -208,6 +210,8 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "edits-from-the-menu" => edits_from_menu(screen, admin).await,
+        "replies-from-the-menu" => replies_from_menu(screen).await,
         "follows-a-rename-from-elsewhere" => follows_rename_from_elsewhere(screen, admin).await,
         "folds-and-unfolds-a-category" => folds_and_unfolds_a_category(screen, admin).await,
         "walks-channels-with-alt-arrows" => walks_channels_with_alt_arrows(screen).await,
@@ -261,14 +265,28 @@ async fn signs_in(screen: &Screen) -> Result<()> {
             tree.has("button", "Log in")
         })
         .await?;
+    // A server that is not there first: the form says so and stays,
+    // rather than hanging on "Signing in…".
     screen
-        .type_into(form.find("text box", "Server")?, crate::stack::URL)
+        .type_into(form.find("text box", "Server")?, "http://localhost:1")
         .await?;
     screen
         .type_into(
             form.find("text box", "Email or username")?,
             crate::seed::ADMIN,
         )
+        .await?;
+    screen
+        .type_into(form.find("text box", "Password")?, crate::seed::PASSWORD)
+        .await?;
+    screen.press("Log in").await?;
+    let form = screen
+        .until("the form says the server could not be reached", |tree| {
+            tree.has("label", "network error") && tree.has("button", "Log in")
+        })
+        .await?;
+    screen
+        .type_into(form.find("text box", "Server")?, crate::stack::URL)
         .await?;
     // A wrong password first: the form says so and stays, rather than
     // hanging on "Signing in…" or going blank.
@@ -1752,6 +1770,70 @@ async fn follows_rename_from_elsewhere(screen: &Screen, admin: &Admin) -> Result
         .map(|_| ())
 }
 
+/// Edit message in the menu opens the editor on the reader's own
+/// message, and Save reaches the server.
+async fn edits_from_menu(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!("Sent for the menu at {}", crate::seed::stamp());
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    message_menu(screen, &said).await?;
+    screen.press("Edit message").await?;
+    let editor = screen
+        .until("the editor is up", |tree| {
+            tree.has("text box", "Edit message")
+        })
+        .await?;
+    let edited = format!("{said}, edited from the menu");
+    screen
+        .type_into(editor.find("text box", "Edit message")?, &edited)
+        .await?;
+    screen.press("Save").await?;
+    screen
+        .until("the edit is drawn", |tree| tree.has("label", &edited))
+        .await?;
+    for _ in 0..25 {
+        if admin.channel_says("engineering", &edited).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "the edit is drawn but the server does not hold it".to_owned(),
+    ))
+}
+
+/// Reply in thread from the menu opens the thread, like the toolbar's
+/// button.
+async fn replies_from_menu(screen: &Screen) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    message_menu(screen, ROOT).await?;
+    // With the pointer, as a person would, rather than the bus's action:
+    // a key after an entry chosen over the bus went nowhere once.
+    screen.press("Reply in thread").await?;
+    screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    // Closed with the pane's button rather than Escape: after an entry
+    // chosen over the bus the first Escape never reached the window --
+    // see docs/gtk-notes.md -- and whether a keyboard does the same is
+    // not something the lab can say.
+    screen.press("Close thread").await?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
+}
+
 /// Ctrl+K, a few letters and Return open the channel named.
 async fn jumps_with_switcher(screen: &Screen) -> Result<()> {
     screen.open_channel("Engineering").await?;
@@ -2518,12 +2600,26 @@ async fn recent_mentions(screen: &Screen) -> Result<()> {
     screen.open_channel("Engineering").await?;
     focused_composer(screen).await?;
     screen.press_key(0x6d, &[key::CONTROL, key::SHIFT])?;
-    screen
+    let found = screen
         .until("the mentions are found", |tree| {
             tree.iter()
                 .any(|n| n.role == "label" && n.name.contains("for @legion"))
         })
         .await?;
+    // And a hit is a place to go: its channel, with its thread beside.
+    // The first hit, not the "N results for @legion" heading above them.
+    let hit = found
+        .iter()
+        .find(|n| n.role == "label" && n.name.starts_with("@legion "))
+        .map(|n| n.name.clone())
+        .unwrap_or_default();
+    screen.select_row(&hit).await?;
+    screen
+        .until("the hit opened its thread", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
     screen.open_channel("Engineering").await
 }
 

@@ -1624,6 +1624,7 @@ pub const LAB_TRACES: &[&str] = &[
     // A forwarded message is its permalink said again.
     "http://localhost:8065/lab/pl/",
     "Sent from the lab",
+    "Sent for the menu",
     "Edited from the lab",
     "Replied from the lab",
     "@legion something new in Design.",

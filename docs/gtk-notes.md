@@ -621,6 +621,19 @@ window has opened what the banner names, as a person would. Two bugs fell out of
 a mention let through a mute, and a second new conversation within
 five seconds of the first dropped by a per-window resync gate.
 
+**The first Escape after a menu entry chosen over the bus went nowhere.**
+With a message menu's entry pressed through AT-SPI and its popover gone,
+the next Escape never reached the window's key controller at all -- a
+status line written from that controller stayed silent -- and the
+second did; a 1.5-second pause before the first changed nothing, nor did
+returning the focus to the message box, nor closing the menu through
+its button rather than the popover. A pointer click on the entry could
+not be tried: a click into a popover from XTEST does not reach it. So
+whether a keyboard loses that Escape is not known; the lab closes the
+thread with the pane's button after a menu, and a menu entry now hands
+the caret back to the message box regardless, which is where Mattermost
+leaves it.
+
 **The clipboard is read the X way.** A window of the lab's own asks
 the selection owner -- the client under test, once it has copied -- to
 convert `CLIPBOARD` to `UTF8_STRING` into a property, and reads the
