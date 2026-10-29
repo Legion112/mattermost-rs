@@ -69,7 +69,10 @@ pub const SCENARIOS: &[&str] = &[
     "deletes-a-message-from-the-menu",
     "keeps-the-message-on-keep",
     "keeps-the-message-on-edit-cancel",
+    "closes-the-editor-with-escape",
     "edits-with-the-up-key",
+    "edits-a-reply-with-the-up-key",
+    "opens-the-thread-with-shift-up",
     "edits-from-the-menu",
     "reacts-with-the-keyboard",
     "reacts-from-the-hover-toolbar",
@@ -94,6 +97,7 @@ pub const SCENARIOS: &[&str] = &[
     "closes-the-thread-with-the-button",
     "follows-and-unfollows-a-thread",
     "jumps-with-the-switcher",
+    "closes-the-switcher-with-escape",
     "walks-channels-with-alt-arrows",
     "jumps-to-unread-with-alt-shift",
     "folds-and-unfolds-a-category",
@@ -194,6 +198,10 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool)
 async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
     match name {
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "edits-a-reply-with-the-up-key" => edits_reply_with_up(screen).await,
+        "opens-the-thread-with-shift-up" => opens_thread_with_shift_up(screen).await,
+        "closes-the-switcher-with-escape" => closes_switcher_with_escape(screen).await,
+        "closes-the-editor-with-escape" => closes_editor_with_escape(screen, admin).await,
         "keeps-the-channel-on-keep" => keeps_channel_on_keep(screen, admin).await,
         "cancels-a-custom-status" => cancels_custom_status(screen, admin).await,
         "keeps-the-header-on-cancel" => keeps_header_on_cancel(screen, admin).await,
@@ -2442,6 +2450,130 @@ async fn keeps_profile_on_cancel(screen: &Screen, admin: &Admin) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Escape puts the switcher away.
+async fn closes_switcher_with_escape(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x6b, &[key::CONTROL])?;
+    let finder = screen
+        .until("the switcher is up", |tree| {
+            tree.has("search box", "Find channel…")
+        })
+        .await?;
+    // Into the dialog first: a key goes to the window under the pointer.
+    let entry = finder.find("search box", "Find channel…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the switcher is gone", |tree| {
+            !tree.has("search box", "Find channel…")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Escape puts the message editor away with the message as it was.
+async fn closes_editor_with_escape(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!("Sent for the editor at {}", crate::seed::stamp());
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    screen.type_into(&composer, "").await?;
+    screen.press_key(key::UP, &[])?;
+    let editor = screen
+        .until("the editor is up", |tree| {
+            tree.has("text box", "Edit message")
+        })
+        .await?;
+    let editor_box = editor.find("text box", "Edit message")?.clone();
+    screen.click_into(&editor_box).await?;
+    screen
+        .type_into(&editor_box, "changed and then not")
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the editor is gone and the message is as it was", |tree| {
+            !tree.has("text box", "Edit message") && tree.has("label", &said)
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if admin
+        .channel_says("engineering", "changed and then not")
+        .await?
+    {
+        return Err(Error(
+            "Escape in the editor still saved the change".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Shift+Up in an empty box opens the thread of the newest message.
+async fn opens_thread_with_shift_up(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "").await?;
+    screen.press_key(key::UP, &[key::SHIFT])?;
+    screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Up in the empty reply box edits the reader's last reply in that
+/// thread, the way it edits their last message in the channel.
+async fn edits_reply_with_up(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
+    let said = format!("Replied from the lab at {}", crate::seed::stamp());
+    screen.type_into(&reply_box, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the reply is drawn", |tree| tree.has("label", &said))
+        .await?;
+    screen.type_into(&reply_box, "").await?;
+    screen.press_key(key::UP, &[])?;
+    let editor = screen
+        .until("the editor is up on the reply", |tree| {
+            tree.has("text box", "Edit message")
+        })
+        .await?;
+    let editor_box = editor.find("text box", "Edit message")?.clone();
+    composer_says(screen, &editor_box, &said).await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the editor is gone", |tree| {
+            !tree.has("text box", "Edit message")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.

@@ -637,7 +637,11 @@ leaves it. A relative of it is certain: pressing the title bar's pin
 button while the channel menu was open -- both are called "Pinned in
 this channel" -- left the menu up with its grab, and the next click
 went to the menu. A test that wants the title bar's button opens no
-menu first.
+menu first. And the same family once more: an emoji picker popover
+opened over the bus did not take an Escape from XTEST at all, while a
+switcher window and a message editor window did; a popover under a
+real keyboard closes on Escape by itself, so the lab does not test that
+one.
 
 **The clipboard is read the X way.** A window of the lab's own asks
 the selection owner -- the client under test, once it has copied -- to
