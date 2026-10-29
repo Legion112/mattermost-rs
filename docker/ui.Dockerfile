@@ -31,10 +31,12 @@ FROM ubuntu:24.04
 #                       placeholder, and a wrong icon name can never be seen
 #   librsvg2-common  the SVG loader the theme's icons need; without it the
 #                    theme is installed and the placeholders stay
+#   fonts-noto-color-emoji  or every reaction in a screenshot is a box with a
+#                           code point in it
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       xvfb at-spi2-core dbus-daemon dbus-x11 ca-certificates fonts-dejavu-core \
-      adwaita-icon-theme librsvg2-common \
+      adwaita-icon-theme librsvg2-common fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
 # The package and its dependencies. Copied separately from the apt layer

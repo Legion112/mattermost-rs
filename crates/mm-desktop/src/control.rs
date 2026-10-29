@@ -36,7 +36,15 @@ const DEPENDS: &[&str] = &[
 /// underlines without these; the tray needs an `AppIndicator`
 /// extension on GNOME, since GNOME 46 dropped `StatusNotifierItem`
 /// from the shell. Neither is a reason to refuse to install.
-const RECOMMENDS: &[&str] = &["hunspell-en-us", "gnome-shell-extension-appindicator"];
+// `fonts-noto-color-emoji` is recommended rather than required for the same
+// reason as the dictionaries: without it a reaction draws as a box with a
+// code point in it -- which is what the lab's container showed -- and the
+// client still runs.
+const RECOMMENDS: &[&str] = &[
+    "hunspell-en-us",
+    "gnome-shell-extension-appindicator",
+    "fonts-noto-color-emoji",
+];
 
 /// The `control` file's contents.
 ///

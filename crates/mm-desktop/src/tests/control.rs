@@ -57,6 +57,12 @@ fn dictionaries_and_the_tray_are_recommended_not_required() {
     assert!(!depends.contains("hunspell"), "{depends}");
     assert!(recommends.contains("hunspell-en-us"), "{recommends}");
     assert!(recommends.contains("appindicator"), "{recommends}");
+    // An emoji font: without it a reaction is a box with a code point.
+    assert!(
+        recommends.contains("fonts-noto-color-emoji"),
+        "{recommends}"
+    );
+    assert!(!depends.contains("fonts-noto"), "{depends}");
 
     // Comma-space separated, which is what dpkg expects.
     for field in [depends, recommends] {
