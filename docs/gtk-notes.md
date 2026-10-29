@@ -588,6 +588,17 @@ gesture on the row around it sees the press only after. In the capture
 phase and claimed on press, the row's gesture takes it first, and the
 message menu comes up alone.
 
+**The lab is the desktop's notification daemon.** The container has
+nobody on `org.freedesktop.Notifications`, so a banner the client sent
+went nowhere and a click on one could not be faked. The lab takes the
+name on the session bus itself (`crates/mm-lab/src/notify.rs`), answers
+`Notify` with an id the way a shell does, and emits `ActionInvoked` for
+a click -- a moment after the banner, since the client subscribes to
+the signal only once `Notify` has answered, and a click emitted in the
+same instant was lost once. Two bugs fell out of it in the first hour:
+a mention let through a mute, and a second new conversation within
+five seconds of the first dropped by a per-window resync gate.
+
 **The clipboard is read the X way.** A window of the lab's own asks
 the selection owner -- the client under test, once it has copied -- to
 convert `CLIPBOARD` to `UTF8_STRING` into a property, and reads the
