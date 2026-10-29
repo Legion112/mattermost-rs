@@ -163,6 +163,10 @@ impl Desk {
     /// Click a banner: its `default` action, then the close that follows
     /// a click on every desktop.
     pub async fn click(&self, id: u32) -> Result<()> {
+        // The client subscribes to the signal only after `Notify` has
+        // answered; a click emitted in the same instant was lost once.
+        // A person takes longer than this to reach for a banner.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let iface = self
             .connection
             .object_server()

@@ -39,6 +39,7 @@ pub const SCENARIOS: &[&str] = &[
     "opens-a-channel-from-a-notification",
     "keeps-quiet-when-muted",
     "keeps-quiet-when-looking",
+    "opens-a-dm-from-a-notification",
     "shows-a-new-direct-message",
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
@@ -167,6 +168,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "opens-a-channel-from-a-notification" => opens_from_notification(screen, admin).await,
         "keeps-quiet-when-muted" => quiet_when_muted(screen, admin).await,
         "keeps-quiet-when-looking" => quiet_when_looking(screen, admin).await,
+        "opens-a-dm-from-a-notification" => opens_dm_from_notification(screen, admin).await,
         "shows-a-new-direct-message" => new_direct_message(screen, admin).await,
         "mutes-and-unmutes" => mutes(screen, admin).await,
         "sets-how-the-channel-notifies" => notify_level(screen, admin).await,
@@ -553,6 +555,44 @@ async fn quiet_when_looking(screen: &Screen, admin: &Admin) -> Result<()> {
             "Design is open but a banner was sent for it: {banner:?}"
         )));
     }
+    screen.open_channel("Engineering").await
+}
+
+/// A direct message sends a banner naming the sender, and clicking it
+/// opens the conversation: a DM is a mention whether or not it says
+/// your name.
+async fn opens_dm_from_notification(screen: &Screen, admin: &Admin) -> Result<()> {
+    let desk = crate::notify::Desk::serve().await?;
+    screen.open_channel("Engineering").await?;
+    let said = format!("A word in private, at {}", crate::seed::stamp());
+    admin.dm_from("margaret", &said).await?;
+    let mut banner = None;
+    for _ in 0..50 {
+        banner = desk.banners().into_iter().find(|b| b.body.contains(&said));
+        if banner.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let Some(banner) = banner else {
+        return Err(Error(format!(
+            "no banner carried the direct message; the desk saw {:?}",
+            desk.banners()
+        )));
+    };
+    if !banner.summary.contains("margaret") {
+        return Err(Error(format!(
+            "the banner says {:?}, not naming margaret",
+            banner.summary
+        )));
+    }
+    desk.click(banner.id).await?;
+    screen
+        .until("the click opened the conversation", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("margaret"))
+        })
+        .await?;
     screen.open_channel("Engineering").await
 }
 

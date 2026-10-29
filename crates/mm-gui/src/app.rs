@@ -3910,44 +3910,57 @@ fn format_selection(view: &gtk::TextView, marker: &str) {
 /// none takes the focus, so the selection it works on stays put.
 fn build_formatting_bar(view: &gtk::TextView) -> gtk::Box {
     type Shape = fn(&str, usize, usize) -> mm_md::Wrapped;
-    /// Each button: its name, its icon (or a label, after `=`), and
-    /// what it does to the text.
-    const BUTTONS: &[(&str, &str, Shape)] = &[
-        ("Bold", "format-text-bold-symbolic", |t, s, e| {
+    /// Each button: its name, its icon, the label drawn instead where the
+    /// icon theme has no such icon -- newer Adwaita dropped most of the
+    /// editing icons, and GTK draws a broken-image placeholder for a name
+    /// it cannot find -- and what it does to the text.
+    const BUTTONS: &[(&str, &str, &str, Shape)] = &[
+        ("Bold", "format-text-bold-symbolic", "B", |t, s, e| {
             mm_md::wrap(t, s, e, "**")
         }),
-        ("Italic", "format-text-italic-symbolic", |t, s, e| {
+        ("Italic", "format-text-italic-symbolic", "I", |t, s, e| {
             mm_md::wrap(t, s, e, "*")
         }),
         (
             "Strikethrough",
             "format-text-strikethrough-symbolic",
+            "S",
             |t, s, e| mm_md::wrap(t, s, e, "~~"),
         ),
-        ("Heading", "=H", |t, s, e| {
+        ("Heading", "", "H", |t, s, e| {
             mm_md::prefix_lines(t, s, e, "### ")
         }),
-        ("Link", "insert-link-symbolic", mm_md::link),
-        ("Code", "=</>", |t, s, e| mm_md::wrap(t, s, e, "`")),
-        ("Bulleted list", "view-list-bullet-symbolic", |t, s, e| {
-            mm_md::prefix_lines(t, s, e, "- ")
-        }),
+        ("Link", "insert-link-symbolic", "Link", mm_md::link),
+        ("Code", "", "</>", |t, s, e| mm_md::wrap(t, s, e, "`")),
+        (
+            "Bulleted list",
+            "view-list-bullet-symbolic",
+            "• List",
+            |t, s, e| mm_md::prefix_lines(t, s, e, "- "),
+        ),
         (
             "Numbered list",
             "view-list-ordered-symbolic",
+            "1. List",
             mm_md::number_lines,
         ),
-        ("Quote", "format-indent-more-symbolic", |t, s, e| {
-            mm_md::prefix_lines(t, s, e, "> ")
-        }),
+        (
+            "Quote",
+            "format-indent-more-symbolic",
+            "Quote",
+            |t, s, e| mm_md::prefix_lines(t, s, e, "> "),
+        ),
     ];
     let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     bar.set_margin_start(4);
     bar.set_margin_bottom(2);
-    for (name, look, shape) in BUTTONS {
-        let button = match look.strip_prefix('=') {
-            Some(label) => gtk::Button::with_label(label),
-            None => gtk::Button::from_icon_name(look),
+    let theme = gdk::Display::default().map(|display| gtk::IconTheme::for_display(&display));
+    for (name, icon, label, shape) in BUTTONS {
+        let drawn = !icon.is_empty() && theme.as_ref().is_some_and(|theme| theme.has_icon(icon));
+        let button = if drawn {
+            gtk::Button::from_icon_name(icon)
+        } else {
+            gtk::Button::with_label(label)
         };
         button.set_tooltip_text(Some(name));
         button.add_css_class("flat");

@@ -255,7 +255,10 @@ window open the channel. And `keeps-quiet-when-muted` mutes a channel, has \
 somebody mention the reader in it, sees the mention counted in the sidebar \
 and no banner sent, which is `muted_is_silent` holding end to end; and \
 `keeps-quiet-when-looking` has the reader mentioned in the channel they \
-have open and sees the message land with no banner for it. \
+have open and sees the message land with no banner for it. A direct \
+message is a banner whether or not it says the reader's name: \
+`opens-a-dm-from-a-notification` has margaret write one, sees the banner \
+name her, clicks it and finds the conversation open. \
 Muting silences notifications outright, mentions included: Mattermost's own \
 documentation says that once a channel is muted "all notifications for that \
 channel are disabled, including email, desktop, incoming call ring tones, \
@@ -822,6 +825,10 @@ the line shapes put a prefix on every line the selection touches and take \
 it off again when they all have it, a numbered list renumbering itself, and \
 the link puts `[what was selected](url)` in with the address selected to be \
 typed over. The arithmetic is in `mm_md` beside `wrap`, settled by tests. \
+Each button asks the icon theme first and is a label -- B, I, S, Link, \
+• List, 1. List, Quote -- where the theme has no such icon: newer Adwaita \
+dropped most of the editing icons, and GTK draws a broken-image \
+placeholder for a name it cannot find, which the lab's screenshots showed. \
 For somebody who types code into chat all day a row of buttons is height \
 taken from the conversation, so the `Aa` toggle beside the smiley hides it, \
 and that choice is kept as the webapp's own `advanced_text_editor` \
