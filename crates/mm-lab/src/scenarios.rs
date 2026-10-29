@@ -64,6 +64,8 @@ pub const SCENARIOS: &[&str] = &[
     "inserts-an-emoji-from-the-picker",
     "opens-a-dm-from-the-switcher",
     "deletes-a-message-from-the-menu",
+    "keeps-the-message-on-keep",
+    "keeps-the-message-on-edit-cancel",
     "edits-with-the-up-key",
     "edits-from-the-menu",
     "reacts-with-the-keyboard",
@@ -72,6 +74,7 @@ pub const SCENARIOS: &[&str] = &[
     "searches-messages",
     "opens-a-hit-from-search",
     "shows-recent-mentions",
+    "opens-mentions-from-the-header",
     "opens-a-card-from-a-mention",
     "opens-a-card-from-the-name",
     "pins-from-the-hover-toolbar",
@@ -101,6 +104,8 @@ pub const SCENARIOS: &[&str] = &[
     "archives-from-the-menu",
     "makes-a-channel-private",
     "opens-an-archived-channel",
+    "follows-an-archive-from-elsewhere",
+    "stays-in-the-channel-on-stay",
     "leaves-a-channel",
     "joins-from-the-switcher",
     "signs-in-again-when-revoked",
@@ -218,6 +223,11 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "keeps-the-message-on-keep" => keeps_message_on_keep(screen, admin).await,
+        "keeps-the-message-on-edit-cancel" => keeps_message_on_edit_cancel(screen, admin).await,
+        "stays-in-the-channel-on-stay" => stays_in_channel_on_stay(screen, admin).await,
+        "opens-mentions-from-the-header" => opens_mentions_from_header(screen).await,
+        "follows-an-archive-from-elsewhere" => follows_archive_from_elsewhere(screen, admin).await,
         "keeps-drafts-across-switches" => keeps_drafts_across_switches(screen).await,
         "sends-two-lines" => sends_two_lines(screen, admin).await,
         "opens-a-saved-hit" => opens_saved_hit(screen, admin).await,
@@ -2144,6 +2154,133 @@ async fn sends_two_lines(screen: &Screen, admin: &Admin) -> Result<()> {
     Err(Error(
         "the two-line message did not reach the server as one message".to_owned(),
     ))
+}
+
+/// A channel archived from another client leaves the sidebar while it
+/// is open, the way one archived here does, and comes back when
+/// restored.
+async fn follows_archive_from_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Design").await?;
+    admin.archive("design").await?;
+    // The sidebar alone: the title bar names the open channel too.
+    let gone = screen
+        .until("the Design row leaves the sidebar", |tree| {
+            !in_sidebar(tree, "Design")
+        })
+        .await;
+    admin.restore("design").await?;
+    gone?;
+    screen
+        .until("the Design row is back", |tree| in_sidebar(tree, "Design"))
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// The @ button in the title bar opens the recent mentions, like the
+/// chord does.
+async fn opens_mentions_from_header(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("@").await?;
+    screen
+        .until("the mentions are found", |tree| {
+            tree.iter()
+                .any(|n| n.role == "label" && n.name.contains("for @legion"))
+        })
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// Keep in the delete dialog keeps the message, here and on the server.
+async fn keeps_message_on_keep(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!("Sent for the dialog at {}", crate::seed::stamp());
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    message_menu(screen, &said).await?;
+    screen.press("Delete message").await?;
+    screen
+        .until("the window asks first", |tree| {
+            tree.has("label", "Delete this message?")
+        })
+        .await?;
+    screen.press("Keep").await?;
+    screen
+        .until("the question is gone and the message is not", |tree| {
+            !tree.has("label", "Delete this message?") && tree.has("label", &said)
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if !admin.channel_says("engineering", &said).await? {
+        return Err(Error(
+            "Keep was pressed but the server no longer holds the message".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Cancel in the editor leaves the message as it was.
+async fn keeps_message_on_edit_cancel(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!("Sent for the editor at {}", crate::seed::stamp());
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    message_menu(screen, &said).await?;
+    screen.press("Edit message").await?;
+    let editor = screen
+        .until("the editor is up", |tree| {
+            tree.has("text box", "Edit message")
+        })
+        .await?;
+    let changed = format!("{said}, changed and then not");
+    screen
+        .type_into(editor.find("text box", "Edit message")?, &changed)
+        .await?;
+    screen.press("Cancel").await?;
+    screen
+        .until("the editor is gone and the message is as it was", |tree| {
+            !tree.has("text box", "Edit message") && tree.has("label", &said)
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if admin.channel_says("engineering", &changed).await? {
+        return Err(Error(
+            "Cancel was pressed but the server holds the changed text".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Stay in the leave dialog keeps the reader in the channel.
+async fn stays_in_channel_on_stay(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Design").await?;
+    screen.press("Design").await?;
+    screen.press("Leave channel").await?;
+    screen
+        .until("the window asks before leaving", |tree| {
+            tree.has("button", "Stay")
+        })
+        .await?;
+    screen.press("Stay").await?;
+    screen
+        .until("the question is gone and the row stays", |tree| {
+            !tree.has("button", "Stay") && tree.has("label", "Design")
+        })
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if !admin.am_in("design").await? {
+        return Err(Error(
+            "Stay was pressed but the server no longer has us in Design".to_owned(),
+        ));
+    }
+    screen.open_channel("Engineering").await
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.

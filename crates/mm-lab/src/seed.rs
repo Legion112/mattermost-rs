@@ -1667,6 +1667,8 @@ pub const LAB_TRACES: &[&str] = &[
     "http://localhost:8065/lab/pl/",
     "Sent from the lab",
     "Sent for the menu",
+    "Sent for the dialog",
+    "Sent for the editor",
     "Edited from the lab",
     "Replied from the lab",
     "@legion something new in Design.",
