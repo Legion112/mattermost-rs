@@ -87,6 +87,9 @@ pub struct Attachment {
     /// Which file this is, so a click can ask for the full-size copy.
     pub file: mm_types::FileId,
     pub texture: Option<gtk::gdk::Texture>,
+    /// The file's own name, for the viewer's title and for whoever
+    /// reads the row rather than looks at it.
+    pub name: String,
     pub width: i32,
     pub height: i32,
 }

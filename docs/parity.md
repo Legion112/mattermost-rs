@@ -102,7 +102,7 @@ real server yet.
 
 | feature | status | verified | notes |
 |---|---|---|---|
-| `files.inline_images` | partial | 12.0.1 | An attached image is drawn in the row at the size its metadata states, from the `mini_preview` thumbnail that rides in the post so the row never reflows, and clicking it opens the full-size copy in a window. Download, and anything that is not a picture, are `posts.attachments`' business and are built there -- this row claimed otherwise for longer than it was true. An animated GIF renders its first frame. |
+| `files.inline_images` | partial | 12.0.1 | An attached image is drawn in the row at the size its metadata states, from the `mini_preview` thumbnail that rides in the post so the row never reflows, and clicking it opens the full-size copy in a window. Download, and anything that is not a picture, are `posts.attachments`' business and are built there -- this row claimed otherwise for longer than it was true. An animated GIF renders its first frame. A click opens a picture full size, and from there Left and Right walk the conversation's pictures -- the thread's if opened from the pane, the channel's otherwise -- with the name and the place in the title; one viewer only, since a click with it up shows the picture there rather than opening another window over it, which every click did until it was reported. Lab-verified by `walks-images-with-the-arrows`: two pictures uploaded from the API, the first clicked, Right and Left walked, Escape closed. |
 
 <details><summary><code>files.inline_images</code> wire</summary>
 

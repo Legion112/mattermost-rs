@@ -155,7 +155,7 @@ struct Ui {
     images: Rc<RefCell<HashMap<mm_types::FileId, gdk::Texture>>>,
     /// The image window that is open, if one is: which file it shows and
     /// the picture to put a better copy into when one arrives.
-    viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    viewer: Rc<RefCell<Option<Viewer>>>,
     /// The thread pane: its model, its view, the panel itself and which
     /// root it is showing.
     thread_posts: gio::ListStore,
@@ -723,7 +723,7 @@ struct RowContext {
     /// The server's base URL, for building a permalink.
     server: Rc<RefCell<String>>,
     /// The image currently open in the viewer, if any.
-    viewer: Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    viewer: Rc<RefCell<Option<Viewer>>>,
     shown: ShownTools,
     links: LinkImages,
     avatars: Avatars,
@@ -1279,6 +1279,7 @@ fn wire_everything(ui: &Ui, composer: &Composer, thread_composer: &Composer) {
     remember_geometry(ui);
     install_forwarding(ui);
     install_menu_done(ui);
+    install_gallery(ui);
 }
 
 /// Ask again, now and then, where the people on screen are.
@@ -6642,7 +6643,7 @@ fn bind_images(
     images: &gtk::Box,
     data: &PostRow,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    viewer: &Rc<RefCell<Option<Viewer>>>,
 ) {
     while let Some(old) = images.first_child() {
         images.remove(&old);
@@ -6662,6 +6663,9 @@ fn bind_images(
             picture.set_paintable(Some(texture));
         }
         picture.add_css_class("card");
+        // Named for whoever reads the row rather than looks at it, and
+        // for the lab, which finds a picture by it.
+        picture.update_property(&[gtk::accessible::Property::Label(&image.name)]);
 
         // A click opens it full size, which is what a thumbnail is for.
         let click = gtk::GestureClick::new();
@@ -6844,39 +6848,81 @@ fn file_row(
 fn open_image(
     attachment: &Attachment,
     commands: &tokio::sync::mpsc::UnboundedSender<Command>,
-    viewer: &Rc<RefCell<Option<(FileId, gtk::Picture)>>>,
+    viewer: &Rc<RefCell<Option<Viewer>>>,
 ) {
-    let Some(texture) = &attachment.texture else {
+    if attachment.texture.is_none() {
         // Nothing decoded yet: the row is still showing a placeholder,
         // and an empty window would say less than the row does.
         return;
+    }
+    // Every picture in the conversation, so the arrow keys can walk
+    // them from this one: the webapp's preview walks the files of one
+    // post, and a reader looking through photographs wants the channel's.
+    let mut gallery = ON_GALLERY
+        .with(|slot| slot.borrow().clone())
+        .map_or_else(Vec::new, |around| around(&attachment.file));
+    if gallery.is_empty() {
+        gallery.push(attachment.clone());
+    }
+    let at = gallery
+        .iter()
+        .position(|a| a.file == attachment.file)
+        .unwrap_or(0);
+
+    // One viewer, whatever is clicked: a second click on a picture --
+    // the same one or another -- shows it in the window already up
+    // rather than opening another window over it, which is what every
+    // click did until it was reported.
+    let reused = {
+        let mut held = viewer.borrow_mut();
+        held.as_mut().map(|open| {
+            open.gallery.clone_from(&gallery);
+            open.at = at;
+            open.showing = attachment.file.clone();
+            (open.picture.clone(), open.window.clone())
+        })
     };
+    if let Some((picture, window)) = reused {
+        show_in_viewer(&picture, &window, &gallery, at);
+        window.present();
+        commands
+            .send(Command::FetchFile {
+                file: attachment.file.clone(),
+                preview: false,
+            })
+            .ok();
+        return;
+    }
+
     let picture = gtk::Picture::builder()
-        .paintable(texture)
         .content_fit(gtk::ContentFit::ScaleDown)
         .build();
-
     let window = adw::Window::builder()
-        .title("Image")
         .default_width(IMAGE_WINDOW_WIDTH)
         .default_height(IMAGE_WINDOW_HEIGHT)
         .build();
+    show_in_viewer(&picture, &window, &gallery, at);
     let layout = gtk::Box::new(gtk::Orientation::Vertical, 0);
     layout.append(&adw::HeaderBar::new());
     layout.append(&picture);
     picture.set_vexpand(true);
     window.set_content(Some(&layout));
 
-    // Escape, because this is a viewer and that is what closes one.
+    // Escape closes, as it closes any viewer; Left and Right walk the
+    // gallery, as they do in every viewer there is.
     let keys = gtk::EventControllerKey::new();
     {
         let window = window.clone();
+        let commands = commands.clone();
+        let viewer = Rc::clone(viewer);
         keys.connect_key_pressed(move |_, key, _, _| {
-            if key == gdk::Key::Escape {
-                window.close();
-                return glib::Propagation::Stop;
+            match key {
+                gdk::Key::Escape => window.close(),
+                gdk::Key::Left | gdk::Key::KP_Left => step_image(&viewer, &commands, -1),
+                gdk::Key::Right | gdk::Key::KP_Right => step_image(&viewer, &commands, 1),
+                _ => return glib::Propagation::Proceed,
             }
-            glib::Propagation::Proceed
+            glib::Propagation::Stop
         });
     }
     window.add_controller(keys);
@@ -6884,7 +6930,13 @@ fn open_image(
     // Only one viewer is tracked, which is the one that can still be
     // improved by bytes arriving; closing it takes the entry away so a
     // later file does not try to paint into a window that is gone.
-    *viewer.borrow_mut() = Some((attachment.file.clone(), picture));
+    *viewer.borrow_mut() = Some(Viewer {
+        showing: attachment.file.clone(),
+        picture,
+        window: window.clone(),
+        gallery,
+        at,
+    });
     {
         let viewer = Rc::clone(viewer);
         window.connect_close_request(move |_| {
@@ -6899,6 +6951,92 @@ fn open_image(
         })
         .ok();
     window.present();
+}
+
+/// The image open full size, and the gallery it was opened from.
+struct Viewer {
+    /// Which file is up, so the full-size copy can be painted when it lands.
+    showing: FileId,
+    picture: gtk::Picture,
+    window: adw::Window,
+    /// Every picture in the conversation it was opened from, in order.
+    gallery: Vec<Attachment>,
+    /// Where in `gallery` the picture up is.
+    at: usize,
+}
+
+/// Put one of the gallery on the viewer: the copy in hand first, the
+/// full size when it lands; the name in the title, with the place in
+/// the gallery when there is one to walk; and the name on the picture
+/// for whoever reads the window rather than looks at it.
+fn show_in_viewer(picture: &gtk::Picture, window: &adw::Window, gallery: &[Attachment], at: usize) {
+    let Some(shown) = gallery.get(at) else {
+        return;
+    };
+    picture.set_paintable(shown.texture.as_ref());
+    let name = if shown.name.is_empty() {
+        "Image"
+    } else {
+        shown.name.as_str()
+    };
+    picture.update_property(&[gtk::accessible::Property::Label(name)]);
+    let title = if gallery.len() > 1 {
+        format!("{name} ({} of {})", at + 1, gallery.len())
+    } else {
+        name.to_owned()
+    };
+    window.set_title(Some(&title));
+}
+
+/// One step through the open viewer's gallery, stopping at either end.
+fn step_image(
+    viewer: &Rc<RefCell<Option<Viewer>>>,
+    commands: &tokio::sync::mpsc::UnboundedSender<Command>,
+    by: isize,
+) {
+    let stepped = {
+        let mut held = viewer.borrow_mut();
+        let Some(open) = held.as_mut() else {
+            return;
+        };
+        let Some(next) = open.at.checked_add_signed(by) else {
+            return;
+        };
+        if next >= open.gallery.len() {
+            return;
+        }
+        open.at = next;
+        open.showing = open.gallery[next].file.clone();
+        (
+            open.picture.clone(),
+            open.window.clone(),
+            open.gallery.clone(),
+            next,
+        )
+    };
+    let (picture, window, gallery, at) = stepped;
+    show_in_viewer(&picture, &window, &gallery, at);
+    commands
+        .send(Command::FetchFile {
+            file: gallery[at].file.clone(),
+            preview: false,
+        })
+        .ok();
+}
+
+thread_local! {
+    /// Where a picture's gallery comes from: the window, which knows
+    /// which list the picture is drawn in. A row knows only itself.
+    static ON_GALLERY: RefCell<Option<GalleryHandler>> = const { RefCell::new(None) };
+}
+
+type GalleryHandler = Rc<dyn Fn(&FileId) -> Vec<Attachment>>;
+
+/// Let a picture clicked in a row find the pictures around it.
+fn install_gallery(ui: &Ui) {
+    let ui = ui.clone();
+    let handler: GalleryHandler = Rc::new(move |file| ui.gallery_around(file));
+    ON_GALLERY.with(|slot| *slot.borrow_mut() = Some(handler));
 }
 
 /// Save a post, or take it out of the saved list.
@@ -11660,11 +11798,29 @@ impl Ui {
             out.push(Attachment {
                 file: file.id.clone(),
                 texture,
+                name: file.name.clone(),
                 width,
                 height,
             });
         }
         out
+    }
+
+    /// Every picture drawn in the list the file is in, in order: the
+    /// thread pane's if it is there, else the channel's. Nothing, for a
+    /// file drawn in neither.
+    fn gallery_around(&self, file: &FileId) -> Vec<Attachment> {
+        let lists = [self.thread_posts.clone(), self.posts.borrow().clone()];
+        for list in lists {
+            let images: Vec<Attachment> = (0..list.n_items())
+                .filter_map(|i| list.item(i).and_downcast::<PostRow>())
+                .flat_map(|row| row.images())
+                .collect();
+            if images.iter().any(|a| a.file == *file) {
+                return images;
+            }
+        }
+        Vec::new()
     }
 
     /// Whether the server says this channel has never had a message.
@@ -12015,10 +12171,10 @@ impl Ui {
         };
         // If this is the image somebody is looking at full size, it is
         // the full-size copy they asked for by opening it.
-        if let Some((showing, picture)) = self.viewer.borrow().as_ref()
-            && *showing == file
+        if let Some(open) = self.viewer.borrow().as_ref()
+            && open.showing == file
         {
-            picture.set_paintable(Some(&texture));
+            open.picture.set_paintable(Some(&texture));
         }
         self.images.borrow_mut().insert(file, texture);
         self.redraw_soon();

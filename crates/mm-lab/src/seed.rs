@@ -1654,14 +1654,20 @@ async fn give_faces(admin: &Api, ids: &std::collections::BTreeMap<&str, String>)
 /// Generated rather than committed: the bytes do not matter, only that
 /// there are enough of them and that each person's differ.
 fn face_png(seed: usize) -> Vec<u8> {
+    square_png(seed, FACE_PIXELS)
+}
+
+/// A PNG square of the size asked for, coloured by the seed: what a
+/// scenario posts when it needs a picture the window will draw.
+pub(crate) fn square_png(seed: usize, side: usize) -> Vec<u8> {
     let (r, g, b) = (
         u8::try_from((seed * 71) % 256).unwrap_or(0),
         u8::try_from((seed * 149) % 256).unwrap_or(0),
         u8::try_from((seed * 223) % 256).unwrap_or(0),
     );
-    let mut pixels = Vec::with_capacity(FACE_PIXELS * FACE_PIXELS * 3);
-    for y in 0..FACE_PIXELS {
-        for x in 0..FACE_PIXELS {
+    let mut pixels = Vec::with_capacity(side * side * 3);
+    for y in 0..side {
+        for x in 0..side {
             // A gradient, so the encoder cannot collapse it to nothing
             // and the decoder has real work to do.
             let shade = u8::try_from((x + y) % 256).unwrap_or(0);
@@ -1670,8 +1676,8 @@ fn face_png(seed: usize) -> Vec<u8> {
     }
     let mut out = Vec::new();
     {
-        let size = u32::try_from(FACE_PIXELS).unwrap_or(1);
-        let mut encoder = png::Encoder::new(&mut out, size, size);
+        let pixels_across = u32::try_from(side).unwrap_or(1);
+        let mut encoder = png::Encoder::new(&mut out, pixels_across, pixels_across);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         if let Ok(mut writer) = encoder.write_header() {

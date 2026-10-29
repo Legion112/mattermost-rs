@@ -65,6 +65,7 @@ pub const SCENARIOS: &[&str] = &[
     "shows-the-shortcuts",
     "shows-the-new-messages-line",
     "shows-a-file-from-elsewhere",
+    "walks-images-with-the-arrows",
     "deletes-a-reply-from-the-pane",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
@@ -225,6 +226,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "shows-the-shortcuts" => shows_the_shortcuts(screen).await,
         "shows-the-new-messages-line" => shows_the_new_messages_line(screen, admin).await,
         "shows-a-file-from-elsewhere" => shows_a_file_from_elsewhere(screen, admin).await,
+        "walks-images-with-the-arrows" => walks_images_with_the_arrows(screen, admin).await,
         "deletes-a-reply-from-the-pane" => deletes_a_reply_from_the_pane(screen, admin).await,
         "searches-for-nothing" => searches_for_nothing(screen).await,
         "pastes-text-over-a-selection" => pastes_text_over_selection(screen).await,
@@ -3125,6 +3127,76 @@ async fn counts_reactions_from_two_people(screen: &Screen, admin: &Admin) -> Res
     admin.delete_as("ada", &post).await?;
     screen
         .until("the message is gone", |tree| !tree.has("label", &said))
+        .await
+        .map(|_| ())
+}
+
+/// A click on a picture opens it full size, Left and Right walk the
+/// channel's pictures from there, and Escape closes the viewer.
+async fn walks_images_with_the_arrows(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let stamp = crate::seed::stamp();
+    let mut posts = Vec::new();
+    for (name, seed) in [("lab-first.png", 11_usize), ("lab-second.png", 29)] {
+        let file = admin
+            .upload_note("engineering", name, &crate::seed::square_png(seed, 96))
+            .await?;
+        let said = format!("Sent from the lab with {name} at {stamp}");
+        posts.push(admin.say_with_file("engineering", &said, &file).await?);
+    }
+    let tree = screen
+        .until("both pictures are drawn", |tree| {
+            tree.has("image", "lab-first.png") && tree.has("image", "lab-second.png")
+        })
+        .await?;
+    let first = tree.find("image", "lab-first.png")?.clone();
+    screen.scroll_into_view(&first).await?;
+    screen.click_into(&first).await?;
+    let titled = |tree: &Vec<Node>, title: &str| tree.iter().any(|n| n.name == title);
+    let up = screen
+        .until("the viewer is up on the first picture", |tree| {
+            titled(tree, "lab-first.png (1 of 2)")
+                && tree
+                    .iter()
+                    .filter(|n| n.role == "image" && n.name == "lab-first.png")
+                    .count()
+                    >= 2
+        })
+        .await?;
+    // The keys go to the window under the pointer, so the pointer goes
+    // to the viewer's own picture: the last of the two by that name.
+    let shown = up
+        .iter()
+        .rfind(|n| n.role == "image" && n.name == "lab-first.png")
+        .cloned()
+        .ok_or_else(|| Error("the viewer's picture went out of the tree".to_owned()))?;
+    screen.hover(&shown).await?;
+    screen.press_key(key::RIGHT, &[])?;
+    screen
+        .until("Right walks to the second", |tree| {
+            titled(tree, "lab-second.png (2 of 2)")
+        })
+        .await?;
+    screen.press_key(key::RIGHT, &[])?;
+    screen.press_key(key::LEFT, &[])?;
+    screen
+        .until("Left walks back to the first", |tree| {
+            titled(tree, "lab-first.png (1 of 2)")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("Escape closes the viewer", |tree| {
+            !titled(tree, "lab-first.png (1 of 2)")
+        })
+        .await?;
+    for post in &posts {
+        admin.delete_as(crate::seed::ADMIN, post).await?;
+    }
+    screen
+        .until("the pictures are gone", |tree| {
+            !tree.has("image", "lab-first.png")
+        })
         .await
         .map(|_| ())
 }
