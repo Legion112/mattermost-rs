@@ -6409,6 +6409,64 @@ fn wire_inline_links(view: &gtk::TextView, hrefs: &Rc<RefCell<Vec<String>>>) {
     view.add_controller(motion);
 }
 
+/// A code block: a padded panel of monospace, folded behind Show more
+/// when it is long.
+///
+/// Code does not wrap: the long lines go sideways in a scroller, the
+/// way every other client draws them. It does not scroll vertically,
+/// though. It did, capped at a screenful -- and the list gives a row
+/// its *minimum* height, which for a vertical scroller is next to
+/// nothing, so a report pasted into a message was drawn as a two-line
+/// sliver nobody could read. Now the panel is as tall as what it
+/// shows, and a tall block is folded to its first lines behind a Show
+/// more button, which is how the webapp folds a tall post.
+fn code_block(block: &BlockView) -> gtk::Widget {
+    let lines: Vec<&str> = block.text.lines().collect();
+    let folded = lines.len() > CODE_FOLD_LINES + CODE_FOLD_SLACK;
+    let shown = if folded {
+        lines[..CODE_FOLD_LINES].join("\n")
+    } else {
+        block.text.clone()
+    };
+    let code = card_label(&shown, false, &["monospace"]);
+    code.set_wrap(false);
+    code.set_hexpand(false);
+    code.set_margin_start(10);
+    code.set_margin_end(10);
+    code.set_margin_top(6);
+    code.set_margin_bottom(6);
+    let panel = gtk::ScrolledWindow::builder()
+        .child(&code)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .build();
+    // "card" is libadwaita's panel styling: a background a shade off
+    // the window's, and rounded corners.
+    panel.add_css_class("card");
+    if !folded {
+        return panel.upcast();
+    }
+    let stack = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    stack.append(&panel);
+    let rest = lines.len() - CODE_FOLD_LINES;
+    let more = gtk::Button::with_label(&format!("Show more ({rest} lines)"));
+    more.add_css_class("flat");
+    more.set_halign(gtk::Align::Start);
+    let whole = block.text.clone();
+    more.connect_clicked(move |button| {
+        if code.text() == shown {
+            code.set_text(&whole);
+            button.set_label("Show less");
+        } else {
+            code.set_text(&shown);
+            button.set_label(&format!("Show more ({rest} lines)"));
+        }
+    });
+    stack.append(&more);
+    stack.upcast()
+}
+
 /// Build the widgets for a message body, a block at a time.
 ///
 /// A code block becomes a padded box rather than a run of monospace text,
@@ -6460,38 +6518,7 @@ fn fill_blocks(into: &gtk::Box, blocks: &[BlockView]) {
     for block in blocks {
         let widget: gtk::Widget = match block.kind {
             BlockKind::Rule => gtk::Separator::new(gtk::Orientation::Horizontal).upcast(),
-            BlockKind::Code => {
-                let code = card_label(&block.text, false, &["monospace"]);
-                // Code does not wrap, and it does not grow without
-                // limit. Both of those cost real time: a dump pasted
-                // into a message is thousands of characters, and as one
-                // wrapped label it is a Pango layout that GTK measures
-                // every time the row is laid out. A channel of them took
-                // five seconds to open on a real account and produced a
-                // 1.1 second frame in the lab -- the first thing that
-                // ever reproduced it there.
-                //
-                // Scrolled instead, the way every other client draws
-                // one: the long lines go sideways, the tall ones are
-                // capped, and what GTK measures is a box of known size.
-                code.set_wrap(false);
-                code.set_hexpand(false);
-                code.set_margin_start(10);
-                code.set_margin_end(10);
-                code.set_margin_top(6);
-                code.set_margin_bottom(6);
-                let panel = gtk::ScrolledWindow::builder()
-                    .child(&code)
-                    .hscrollbar_policy(gtk::PolicyType::Automatic)
-                    .vscrollbar_policy(gtk::PolicyType::Automatic)
-                    .propagate_natural_height(true)
-                    .max_content_height(CODE_MAX_HEIGHT)
-                    .build();
-                // "card" is libadwaita's panel styling: a background a shade
-                // off the window's, and rounded corners.
-                panel.add_css_class("card");
-                panel.upcast()
-            }
+            BlockKind::Code => code_block(block),
             BlockKind::Bullet => {
                 let item = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 item.set_margin_start(6);
@@ -7709,14 +7736,17 @@ const REDRAW_SHARE: u32 = 3;
 const REDRAW_SOONEST: std::time::Duration = std::time::Duration::from_millis(100);
 const REDRAW_LATEST: std::time::Duration = std::time::Duration::from_millis(1500);
 
-/// How tall a code block is allowed to be before it scrolls.
+/// How many lines of a code block are shown before it is folded.
 ///
-/// About twenty lines: enough to read a stack trace or a short
-/// snippet without scrolling, and short enough that a sixty-line dump
-/// does not push the rest of the conversation off the screen -- or
-/// cost what measuring sixty lines of monospace costs, which is the
-/// reason this exists at all.
-const CODE_MAX_HEIGHT: i32 = 340;
+/// Twenty: enough to read a stack trace or a short snippet whole, and
+/// few enough that a sixty-line dump does not push the rest of the
+/// conversation off the screen -- or cost what measuring sixty lines
+/// of monospace costs on every layout. The rest is a click away.
+const CODE_FOLD_LINES: usize = 20;
+
+/// A block only a few lines over the fold is shown whole: a Show more
+/// that reveals three lines is more to read than the lines were.
+const CODE_FOLD_SLACK: usize = 5;
 
 /// How big a decoded avatar is kept.
 ///

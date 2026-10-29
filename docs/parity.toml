@@ -933,7 +933,18 @@ showed in the preview with the box gone, and the box came back.
 
 The thread box is lab-verified: a reply typed into "Reply…" and sent with \
 Return landed under the root on the server, and Escape put the panel \
-away."""
+away.
+
+What is sent is drawn whole. A fenced code block was drawn in a scroller \
+capped at a screenful, and the list gives a row its minimum height -- for a \
+vertical scroller, next to nothing -- so a report pasted into a message came \
+out as a two-line sliver nobody could read, which a real deploy report \
+showed. The panel is as tall as what it shows now, with no vertical \
+scrolling of its own, and a block longer than twenty lines is folded to its \
+first twenty behind "Show more (N lines)", which unfolds it whole and folds \
+it back -- how the webapp folds a tall post. Lab-verified by \
+`shows-more-of-a-long-code-block`: a sixty-line report drawn folded at line \
+twenty, unfolded to its sixtieth line by the button, and folded again."""
 
 [[feature]]
 id       = "posts.spellcheck"

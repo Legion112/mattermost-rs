@@ -66,6 +66,7 @@ pub const SCENARIOS: &[&str] = &[
     "shows-the-new-messages-line",
     "shows-a-file-from-elsewhere",
     "walks-images-with-the-arrows",
+    "shows-more-of-a-long-code-block",
     "deletes-a-reply-from-the-pane",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
@@ -227,6 +228,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "shows-the-new-messages-line" => shows_the_new_messages_line(screen, admin).await,
         "shows-a-file-from-elsewhere" => shows_a_file_from_elsewhere(screen, admin).await,
         "walks-images-with-the-arrows" => walks_images_with_the_arrows(screen, admin).await,
+        "shows-more-of-a-long-code-block" => shows_more_of_a_long_code_block(screen, admin).await,
         "deletes-a-reply-from-the-pane" => deletes_a_reply_from_the_pane(screen, admin).await,
         "searches-for-nothing" => searches_for_nothing(screen).await,
         "pastes-text-over-a-selection" => pastes_text_over_selection(screen).await,
@@ -3196,6 +3198,50 @@ async fn walks_images_with_the_arrows(screen: &Screen, admin: &Admin) -> Result<
     screen
         .until("the pictures are gone", |tree| {
             !tree.has("image", "lab-first.png")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// A long code block is folded to its first lines behind a Show more
+/// button, and the button unfolds it whole and folds it back.
+async fn shows_more_of_a_long_code_block(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let stamp = crate::seed::stamp();
+    let lines: Vec<String> = (1..=60)
+        .map(|n| format!("line {n} of the report"))
+        .collect();
+    let text = format!(
+        "Sent from the lab as a long report at {stamp}\n```\n{}\n```",
+        lines.join("\n")
+    );
+    let post = admin.say_as("ada", "engineering", &text).await?;
+    let tree = screen
+        .until("the report is drawn folded", |tree| {
+            tree.has("label", "line 20 of the report")
+                && !tree.has("label", "line 21 of the report")
+                && tree.has("button", "Show more (40 lines)")
+        })
+        .await?;
+    let more = tree.find("button", "Show more (40 lines)")?.clone();
+    screen.scroll_into_view(&more).await?;
+    screen.press("Show more (40 lines)").await?;
+    screen
+        .until("the whole report is drawn", |tree| {
+            tree.has("label", "line 60 of the report") && tree.has("button", "Show less")
+        })
+        .await?;
+    screen.press("Show less").await?;
+    screen
+        .until("the report is folded again", |tree| {
+            !tree.has("label", "line 21 of the report")
+                && tree.has("button", "Show more (40 lines)")
+        })
+        .await?;
+    admin.delete_as("ada", &post).await?;
+    screen
+        .until("the report is gone", |tree| {
+            !tree.has("label", "line 20 of the report")
         })
         .await
         .map(|_| ())
