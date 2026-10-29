@@ -10280,6 +10280,17 @@ impl Ui {
         if changes.is_empty() {
             return;
         }
+        // The root of the open thread deleted from another client takes
+        // the thread with it, server side: nothing can be said in it any
+        // more, so the pane goes, and a reply half-typed into it goes
+        // too rather than being kept as a draft on a post that is gone.
+        let open = self.thread_root.borrow().clone();
+        if let Some(root) = open
+            && changes.contains(&mm_core::Change::PostRemoved(root))
+        {
+            self.thread_composer.view.buffer().set_text("");
+            self.close_thread();
+        }
         // A person changing -- their custom status, mostly -- is drawn on
         // the rows on screen without rebuilding them.
         for change in &changes {

@@ -212,7 +212,11 @@ each lab-verified from the API: a header change shows in the open channel's \
 title bar (`follows-a-header-change-from-elsewhere`), a rename shows in the \
 sidebar and back (`follows-a-rename-from-elsewhere`), and being taken out of \
 a channel takes its row away and being put back brings it back \
-(`comes-and-goes-with-membership-elsewhere`)."""
+(`comes-and-goes-with-membership-elsewhere`). The root of the open thread \
+deleted from another client took the thread pane with it, as the server \
+takes the thread: the pane stayed up showing the dead root and its reply \
+before, with a box ready to reply into nothing \
+(`loses-a-thread-root-deleted-elsewhere`)."""
 
 [[feature]]
 id       = "desktop.notifications"

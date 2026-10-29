@@ -40,6 +40,7 @@ pub const SCENARIOS: &[&str] = &[
     "filters-threads-to-unreads",
     "shows-who-is-typing",
     "follows-edits-reactions-and-deletions",
+    "loses-a-thread-root-deleted-elsewhere",
     "shows-an-unread-and-clears-it",
     "filters-the-sidebar-to-unreads",
     "opens-a-channel-from-a-notification",
@@ -57,9 +58,11 @@ pub const SCENARIOS: &[&str] = &[
     "sends-a-draft-with-its-file",
     "sends-a-message",
     "sends-two-lines",
+    "keeps-up-with-a-burst",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
     "links-a-pasted-address",
+    "pastes-text-over-a-selection",
     "completes-a-mention-with-tab",
     "dismisses-the-mention-popup",
     "completes-a-mention-in-the-thread-box",
@@ -78,6 +81,7 @@ pub const SCENARIOS: &[&str] = &[
     "reacts-from-the-hover-toolbar",
     "toggles-a-reaction-from-its-chip",
     "searches-messages",
+    "searches-for-nothing",
     "opens-a-hit-from-search",
     "shows-recent-mentions",
     "opens-mentions-from-the-header",
@@ -198,6 +202,12 @@ pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool)
 async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
     match name {
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "loses-a-thread-root-deleted-elsewhere" => {
+            loses_thread_root_deleted_elsewhere(screen, admin).await
+        }
+        "keeps-up-with-a-burst" => keeps_up_with_a_burst(screen, admin).await,
+        "searches-for-nothing" => searches_for_nothing(screen).await,
+        "pastes-text-over-a-selection" => pastes_text_over_selection(screen).await,
         "edits-a-reply-with-the-up-key" => edits_reply_with_up(screen).await,
         "opens-the-thread-with-shift-up" => opens_thread_with_shift_up(screen).await,
         "closes-the-switcher-with-escape" => closes_switcher_with_escape(screen).await,
@@ -2574,6 +2584,138 @@ async fn edits_reply_with_up(screen: &Screen) -> Result<()> {
         })
         .await
         .map(|_| ())
+}
+
+/// Plain text pasted over a selection replaces it, as a paste does
+/// anywhere; only a web address makes a link.
+async fn pastes_text_over_selection(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "the old words").await?;
+    screen.click_into(&composer).await?;
+    crate::input::offer_clipboard_text("the new words", std::time::Duration::from_secs(20))?;
+    screen.press_key(0x61, &[key::CONTROL])?;
+    screen.press_key(0x76, &[key::CONTROL])?;
+    composer_says(screen, &composer, "the new words").await?;
+    screen.type_into(&composer, "").await
+}
+
+/// A search with no hits says so rather than showing an empty page.
+async fn searches_for_nothing(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    screen.press("Search messages").await?;
+    let page = screen
+        .until("the search box is up", |tree| {
+            tree.has("search box", "Search messages…")
+        })
+        .await?;
+    let entry = page.find("search box", "Search messages…")?.clone();
+    screen.click_into(&entry).await?;
+    screen.type_into(&entry, "zzqqxxnothing").await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the page says nothing matched", |tree| {
+            tree.has("label", "Nothing matched")
+        })
+        .await?;
+    screen.open_channel("Engineering").await
+}
+
+/// Twenty messages landing in a row while the channel is open all end
+/// up on screen, each once, in order.
+async fn keeps_up_with_a_burst(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let stamp = crate::seed::stamp();
+    let texts: Vec<String> = (1..=20)
+        .map(|n| format!("Sent from the lab in a burst at {stamp}, number {n}"))
+        .collect();
+    for text in &texts {
+        admin.say_as("ada", "engineering", text).await?;
+    }
+    let last = texts[19].clone();
+    screen
+        .until("the last of the burst is drawn", |tree| {
+            tree.has("label", &last)
+        })
+        .await?;
+    let tree = screen.tree().await?;
+    let mut seen = Vec::new();
+    for n in &tree {
+        if n.role == "label"
+            && n.name
+                .starts_with(&format!("Sent from the lab in a burst at {stamp}"))
+        {
+            seen.push(n.name.clone());
+        }
+    }
+    // The list draws only the rows in view, so what is seen is the tail
+    // of the burst: in order, each once, ending on the last.
+    let tail = texts[texts.len() - seen.len()..].to_vec();
+    if seen.is_empty() || seen != tail {
+        return Err(Error(format!(
+            "the burst is drawn as {} label(s), not as the end of it in order: {seen:?}",
+            seen.len()
+        )));
+    }
+    // And away again at once, not at the end of the run: twenty messages
+    // push the seeded thread out of the drawn rows, and every scenario
+    // after this one that presses its reply count found nothing to press.
+    admin.sweep_traces("engineering").await?;
+    screen
+        .until("the burst is gone again", |tree| !tree.has("label", &last))
+        .await
+        .map(|_| ())
+}
+
+/// The root of the open thread deleted from elsewhere goes from the
+/// pane too, one way or another: the pane closes, or the root is not
+/// shown in it any more.
+async fn loses_thread_root_deleted_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!(
+        "Sent from the lab to be deleted at {}",
+        crate::seed::stamp()
+    );
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    let post = admin.post_id_of("engineering", &said).await?;
+    admin
+        .reply_as(
+            "grace",
+            "engineering",
+            &said,
+            "A reply before the root goes.",
+        )
+        .await?;
+    let body = screen
+        .until("the reply count is on the message", |tree| {
+            tree.has("button", "1 reply")
+        })
+        .await?
+        .iter()
+        .find(|n| n.role == "label" && n.name == said)
+        .cloned()
+        .ok_or_else(|| Error("the message went out of the tree".to_owned()))?;
+    screen.click_button_near("1 reply", &body).await?;
+    screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    admin.delete_as(crate::seed::ADMIN, &post).await?;
+    screen
+        .until("the deleted root is gone from the window", |tree| {
+            !tree.has("label", &said)
+        })
+        .await?;
+    if screen.tree().await?.has("text box", "Reply…") {
+        screen.press_key(key::ESCAPE, &[])?;
+    }
+    Ok(())
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.
