@@ -48,6 +48,7 @@ pub const SCENARIOS: &[&str] = &[
     "sends-a-message",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
+    "links-a-pasted-address",
     "completes-a-mention-with-tab",
     "completes-an-emoji-with-tab",
     "opens-a-dm-from-the-switcher",
@@ -178,6 +179,7 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "sends-a-message" => sends_a_message(screen, admin).await,
         "formats-from-the-toolbar" => formats_from_toolbar(screen, admin).await,
         "formats-with-the-keys" => formats_with_keys(screen).await,
+        "links-a-pasted-address" => links_pasted_address(screen).await,
         "completes-a-mention-with-tab" => completes_mention(screen).await,
         "completes-an-emoji-with-tab" => completes_emoji(screen).await,
         "opens-a-dm-from-the-switcher" => dm_from_switcher(screen, admin).await,
@@ -810,6 +812,39 @@ async fn formats_with_keys(screen: &Screen) -> Result<()> {
     screen.type_into(&composer, "").await
 }
 
+/// A web address pasted over a selection links the selection to it,
+/// the way Mattermost does; pasted over nothing it is just text.
+///
+/// The lab owns the clipboard for the moment, answering the client's
+/// request for the text the way any other program would.
+async fn links_pasted_address(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    screen.type_into(&composer, "the docs").await?;
+    screen.click_into(&composer).await?;
+    crate::input::offer_clipboard_text(
+        "https://docs.mattermost.com/",
+        std::time::Duration::from_secs(20),
+    )?;
+    screen.press_key(0x61, &[key::CONTROL])?;
+    screen.press_key(0x76, &[key::CONTROL])?;
+    composer_says(
+        screen,
+        &composer,
+        "[the docs](https://docs.mattermost.com/)",
+    )
+    .await?;
+    // Over nothing: the address as text, at the caret, after the link.
+    screen.press_key(0x76, &[key::CONTROL])?;
+    composer_says(
+        screen,
+        &composer,
+        "[the docs](https://docs.mattermost.com/)https://docs.mattermost.com/",
+    )
+    .await?;
+    screen.type_into(&composer, "").await
+}
+
 /// Wait for the composer to hold exactly `expected`.
 async fn composer_says(screen: &Screen, composer: &Node, expected: &str) -> Result<()> {
     let mut last = String::new();
@@ -1068,13 +1103,12 @@ async fn replies_in_thread(screen: &Screen, admin: &Admin) -> Result<()> {
 /// Ctrl+Shift+L puts the caret back in the message box from wherever
 /// the reader has clicked, which is Mattermost's own binding for it.
 async fn focuses_box_with_keys(screen: &Screen) -> Result<()> {
-    const ROOT: &str = "Morning. The nightly run";
     screen.open_channel("Engineering").await?;
-    // Somewhere else first: the text of a message, which takes the focus
-    // when clicked the way any text view does.
-    let body = screen.text_holding(ROOT).await?;
-    screen.scroll_into_view(&body).await?;
-    screen.click_into(&body).await?;
+    // Somewhere else first: the sidebar row of the open channel, which
+    // takes the focus when clicked and changes nothing else. A click
+    // into a message did the same until the channel filled with the
+    // other scenarios' traces and the hover toolbar took the click.
+    screen.select_row("Engineering").await?;
     let composer = screen
         .tree()
         .await?

@@ -208,3 +208,39 @@ fn no_selection_gives_a_placeholder_link() {
     // right way round, as with `wrap`.
     assert_eq!(link("ab", 9, 1).text, "a[b](url)");
 }
+
+/// A URL pasted over a selection links the selection to it, with the
+/// caret after; over nothing it is just text, as any paste is.
+#[test]
+fn a_pasted_address_links_the_selection() {
+    assert_eq!(
+        paste_link("see docs now", 4, 8, "https://x.test/d"),
+        Wrapped {
+            text: "see [docs](https://x.test/d) now".to_owned(),
+            start: 28,
+            end: 28,
+        }
+    );
+    assert_eq!(
+        paste_link("see ", 4, 4, "https://x.test"),
+        Wrapped {
+            text: "see https://x.test".to_owned(),
+            start: 18,
+            end: 18,
+        }
+    );
+    // Backwards and out-of-range offsets, as with `wrap`.
+    assert_eq!(paste_link("ab", 9, 1, "http://h").text, "a[b](http://h)");
+}
+
+/// Only one bare address counts: a scheme, nothing after it that is not
+/// part of it, and no second word.
+#[test]
+fn only_a_bare_address_is_one() {
+    assert!(is_web_address("https://example.test/a?b=c"));
+    assert!(is_web_address("  http://h/ \n"));
+    assert!(!is_web_address("https://"));
+    assert!(!is_web_address("see https://h"));
+    assert!(!is_web_address("https://h and more"));
+    assert!(!is_web_address("ftp://h"));
+}

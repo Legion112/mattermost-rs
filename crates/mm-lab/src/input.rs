@@ -11,6 +11,7 @@
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{self, ConnectionExt as _};
 use x11rb::protocol::xtest::ConnectionExt as _;
+use x11rb::wrapper::ConnectionExt as _;
 
 use crate::{Error, Result};
 
@@ -376,4 +377,137 @@ pub fn click_holding(keysym: u32, x: i32, y: i32) -> Result<()> {
     conn.flush()
         .map_err(|e| Error(format!("flushing the display: {e}")))?;
     clicked
+}
+
+/// Put text on the clipboard and answer for it until `held` has passed.
+///
+/// The X way round: a window of this process takes `CLIPBOARD` and a
+/// thread answers every `SelectionRequest` for it -- the list of
+/// targets, and the text as `UTF8_STRING` or `STRING` -- the way the
+/// client under test does when it has copied. The thread stops when
+/// the time is up or something else takes the selection.
+pub fn offer_clipboard_text(text: &str, held: std::time::Duration) -> Result<()> {
+    let (conn, root) = connect()?;
+    let atom = |name: &str| -> Result<xproto::Atom> {
+        conn.intern_atom(false, name.as_bytes())
+            .map_err(|e| Error(format!("naming {name}: {e}")))?
+            .reply()
+            .map(|r| r.atom)
+            .map_err(|e| Error(format!("naming {name}: {e}")))
+    };
+    let (clipboard, utf8, targets, string) = (
+        atom("CLIPBOARD")?,
+        atom("UTF8_STRING")?,
+        atom("TARGETS")?,
+        atom("STRING")?,
+    );
+    let window = conn
+        .generate_id()
+        .map_err(|e| Error(format!("a window id for the clipboard: {e}")))?;
+    let visual = conn.setup().roots[0].root_visual;
+    conn.create_window(
+        x11rb::COPY_DEPTH_FROM_PARENT,
+        window,
+        root,
+        0,
+        0,
+        1,
+        1,
+        0,
+        xproto::WindowClass::INPUT_OUTPUT,
+        visual,
+        &xproto::CreateWindowAux::new(),
+    )
+    .map_err(|e| Error(format!("a window for the clipboard: {e}")))?;
+    conn.set_selection_owner(window, clipboard, x11rb::CURRENT_TIME)
+        .map_err(|e| Error(format!("taking the clipboard: {e}")))?;
+    conn.flush()
+        .map_err(|e| Error(format!("flushing the display: {e}")))?;
+    let owner = conn
+        .get_selection_owner(clipboard)
+        .map_err(|e| Error(format!("asking who holds the clipboard: {e}")))?
+        .reply()
+        .map_err(|e| Error(format!("asking who holds the clipboard: {e}")))?
+        .owner;
+    if owner != window {
+        return Err(Error("the clipboard could not be taken".to_owned()));
+    }
+    let text = text.as_bytes().to_vec();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + held;
+        while std::time::Instant::now() < deadline {
+            let event = match conn.poll_for_event() {
+                Ok(Some(event)) => event,
+                Ok(None) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(_) => return,
+            };
+            match event {
+                x11rb::protocol::Event::SelectionRequest(request) => {
+                    answer_for_clipboard(&conn, &request, &text, (targets, utf8, string));
+                }
+                x11rb::protocol::Event::SelectionClear(_) => return,
+                _ => {}
+            }
+        }
+        let _ = conn.destroy_window(window);
+        let _ = conn.flush();
+    });
+    Ok(())
+}
+
+/// Answer one request for the clipboard: the targets on offer, or the
+/// text itself, written to the requestor's property and announced with
+/// a `SelectionNotify` -- with no property when the target is not one
+/// this owner has.
+fn answer_for_clipboard(
+    conn: &x11rb::rust_connection::RustConnection,
+    request: &xproto::SelectionRequestEvent,
+    text: &[u8],
+    (targets, utf8, string): (xproto::Atom, xproto::Atom, xproto::Atom),
+) {
+    let property = if request.property == x11rb::NONE {
+        request.target
+    } else {
+        request.property
+    };
+    let answered = if request.target == targets {
+        conn.change_property32(
+            xproto::PropMode::REPLACE,
+            request.requestor,
+            property,
+            xproto::AtomEnum::ATOM,
+            &[targets, utf8, string],
+        )
+        .is_ok()
+    } else if request.target == utf8 || request.target == string {
+        conn.change_property8(
+            xproto::PropMode::REPLACE,
+            request.requestor,
+            property,
+            request.target,
+            text,
+        )
+        .is_ok()
+    } else {
+        false
+    };
+    let notify = xproto::SelectionNotifyEvent {
+        response_type: xproto::SELECTION_NOTIFY_EVENT,
+        sequence: 0,
+        time: request.time,
+        requestor: request.requestor,
+        selection: request.selection,
+        target: request.target,
+        property: if answered { property } else { x11rb::NONE },
+    };
+    let _ = conn.send_event(
+        false,
+        request.requestor,
+        xproto::EventMask::NO_EVENT,
+        notify,
+    );
+    let _ = conn.flush();
 }

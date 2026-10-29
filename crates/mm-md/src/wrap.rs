@@ -139,6 +139,42 @@ pub fn link(text: &str, start: usize, end: usize) -> Wrapped {
     }
 }
 
+/// A URL pasted over a selection makes the selection a link to it,
+/// which is what Mattermost does with one: `[what was selected](url)`,
+/// with the caret after the closing bracket. With nothing selected the
+/// URL goes in as text, the way any paste does.
+#[must_use]
+pub fn paste_link(text: &str, start: usize, end: usize, url: &str) -> Wrapped {
+    let chars: Vec<char> = text.chars().collect();
+    let (start, end) = (start.min(chars.len()), end.min(chars.len()));
+    let (start, end) = (start.min(end), start.max(end));
+    let before: String = chars[..start].iter().collect();
+    let after: String = chars[end..].iter().collect();
+    let put = if start == end {
+        url.to_owned()
+    } else {
+        let chosen: String = chars[start..end].iter().collect();
+        format!("[{chosen}]({url})")
+    };
+    let caret = start + put.chars().count();
+    Wrapped {
+        text: format!("{before}{put}{after}"),
+        start: caret,
+        end: caret,
+    }
+}
+
+/// Whether a piece of pasted text is one web address and nothing else:
+/// a scheme, no spaces, no line breaks. Only such a paste is turned into
+/// a link round the selection; anything else replaces it as text does.
+#[must_use]
+pub fn is_web_address(text: &str) -> bool {
+    let text = text.trim();
+    (text.starts_with("https://") || text.starts_with("http://"))
+        && text.len() > "https://".len()
+        && !text.chars().any(char::is_whitespace)
+}
+
 /// The shared arithmetic of the line-prefix toggles.
 ///
 /// `has` says how wide a line's existing prefix is, when it has one;

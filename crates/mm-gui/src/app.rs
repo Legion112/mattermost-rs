@@ -2930,15 +2930,43 @@ impl Composer {
             let Some(clipboard) = controller.widget().map(|w| w.clipboard()) else {
                 return glib::Propagation::Proceed;
             };
-            if !clipboard.formats().contain_mime_type("image/png") {
-                // Ordinary text: let the box paste it as always.
+            if clipboard.formats().contain_mime_type("image/png") {
+                composer.paste_image(&clipboard);
+                return glib::Propagation::Stop;
+            }
+            // Text over a selection may be an address, and an address
+            // over a selection makes it a link, the way Mattermost does;
+            // the clipboard is read asynchronously, so the paste is
+            // taken over here and done by hand either way. With nothing
+            // selected the box pastes as always.
+            if !composer.view.buffer().has_selection() {
                 return glib::Propagation::Proceed;
             }
-            composer.paste_image(&clipboard);
+            composer.paste_text_over_selection(&clipboard);
             glib::Propagation::Stop
         });
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         self.view.add_controller(keys);
+    }
+
+    /// Paste text over a selection: a web address links the selection
+    /// to it, anything else replaces the selection as a paste does.
+    fn paste_text_over_selection(&self, clipboard: &gdk::Clipboard) {
+        let view = self.view.clone();
+        clipboard.read_text_async(gio::Cancellable::NONE, move |read| {
+            let Ok(Some(text)) = read else { return };
+            let text = text.to_string();
+            if mm_md::is_web_address(&text) {
+                let url = text.trim().to_owned();
+                reshape(&view, |held, start, end| {
+                    mm_md::paste_link(held, start, end, &url)
+                });
+            } else {
+                let buffer = view.buffer();
+                buffer.delete_selection(true, true);
+                buffer.insert_at_cursor(&text);
+            }
+        });
     }
 
     /// Files dragged onto the composer are attached to the message.

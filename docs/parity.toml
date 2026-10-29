@@ -830,6 +830,13 @@ the line shapes put a prefix on every line the selection touches and take \
 it off again when they all have it, a numbered list renumbering itself, and \
 the link puts `[what was selected](url)` in with the address selected to be \
 typed over. The arithmetic is in `mm_md` beside `wrap`, settled by tests. \
+**A web address pasted over a selection links the selection to it**, the way \
+Mattermost does -- `[what was selected](url)`, caret after -- while any other \
+text pasted over a selection replaces it, and a paste over nothing is the \
+paste it always was. The address test and the arithmetic are in `mm_md` \
+with the rest. Lab-verified by `links-a-pasted-address`, where the lab owns \
+the X clipboard for a moment and answers the client's request for the text \
+the way any program would. \
 Each button asks the icon theme first and is a label -- B, I, S, Link, \
 • List, 1. List, Quote -- where the theme has no such icon, since GTK draws \
 a broken-image placeholder for a name it cannot find and themes drop names \
@@ -1520,9 +1527,10 @@ loader are `Depends` -- the theme because every button in the window is \
 one of its symbolic icons, the loader because they are SVGs and GTK cannot \
 draw one without it; the lab's container showed a window of broken-image \
 placeholders first without the theme and then without the loader; the \
-dictionaries and the GNOME `AppIndicator` extension are `Recommends`, since \
-without them the client still runs -- it just draws no spelling underlines \
-and has no tray. Dependencies are named rather than derived with \
+dictionaries, the GNOME `AppIndicator` extension and an emoji font are \
+`Recommends`, since without them the client still runs -- it just draws no \
+spelling underlines, has no tray, and draws a reaction as a box with a code \
+point in it, which the lab's container showed. Dependencies are named rather than derived with \
 `dpkg-shlibdeps`, which wants a full `debian/` tree to run inside. \
 `Installed-Size` is measured from the staged tree in kibibytes, which is \
 what the field means and is wrong in half the hand-written control files \
