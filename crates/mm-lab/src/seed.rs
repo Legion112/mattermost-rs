@@ -1356,6 +1356,18 @@ impl Admin {
         &self.me
     }
 
+    /// Pin a post to its channel, or unpin it, from the API.
+    pub async fn pin(&self, post_id: &str, pinned: bool) -> Result<()> {
+        let verb = if pinned { "pin" } else { "unpin" };
+        self.api
+            .call(&HttpRequest::new(
+                Method::Post,
+                format!("/api/v4/posts/{post_id}/{verb}"),
+            ))
+            .await
+            .map(|_| ())
+    }
+
     /// Take a mute off a channel, for a lab kept across runs where a
     /// scenario muted it and did not get as far as unmuting.
     pub async fn unmute(&self, channel: &str) -> Result<()> {

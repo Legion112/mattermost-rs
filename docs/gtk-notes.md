@@ -628,11 +628,16 @@ status line written from that controller stayed silent -- and the
 second did; a 1.5-second pause before the first changed nothing, nor did
 returning the focus to the message box, nor closing the menu through
 its button rather than the popover. A pointer click on the entry could
-not be tried: a click into a popover from XTEST does not reach it. So
+not be tried: a click into a popover from XTEST does not reach it. A
+sacrificial Shift tap before the Escape did not absorb it either. So
 whether a keyboard loses that Escape is not known; the lab closes the
 thread with the pane's button after a menu, and a menu entry now hands
 the caret back to the message box regardless, which is where Mattermost
-leaves it.
+leaves it. A relative of it is certain: pressing the title bar's pin
+button while the channel menu was open -- both are called "Pinned in
+this channel" -- left the menu up with its grab, and the next click
+went to the menu. A test that wants the title bar's button opens no
+menu first.
 
 **The clipboard is read the X way.** A window of the lab's own asks
 the selection owner -- the client under test, once it has copied -- to

@@ -30,6 +30,7 @@ pub const SCENARIOS: &[&str] = &[
     "goes-away-and-back",
     "edits-the-profile",
     "shows-a-post-saved-elsewhere",
+    "opens-a-saved-hit",
     "shows-a-thread-reply-count",
     "follows-a-permalink",
     "shows-a-new-reply-in-threads",
@@ -49,9 +50,11 @@ pub const SCENARIOS: &[&str] = &[
     "mutes-and-unmutes",
     "sets-how-the-channel-notifies",
     "keeps-a-draft-on-the-server",
+    "keeps-drafts-across-switches",
     "opens-a-draft-from-the-list",
     "sends-a-draft-with-its-file",
     "sends-a-message",
+    "sends-two-lines",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
     "links-a-pasted-address",
@@ -72,6 +75,7 @@ pub const SCENARIOS: &[&str] = &[
     "opens-a-card-from-a-mention",
     "opens-a-card-from-the-name",
     "pins-from-the-hover-toolbar",
+    "opens-a-pinned-hit",
     "saves-from-the-menu",
     "opens-the-menu-with-a-right-click",
     "forwards-from-the-menu",
@@ -214,6 +218,10 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
         "reacts-with-the-keyboard" => reacts_by_key(screen, admin).await,
         "searches-messages" => searches(screen).await,
         "opens-a-hit-from-search" => opens_hit_from_search(screen).await,
+        "keeps-drafts-across-switches" => keeps_drafts_across_switches(screen).await,
+        "sends-two-lines" => sends_two_lines(screen, admin).await,
+        "opens-a-saved-hit" => opens_saved_hit(screen, admin).await,
+        "opens-a-pinned-hit" => opens_pinned_hit(screen, admin).await,
         "toggles-a-reaction-from-its-chip" => toggles_reaction_from_chip(screen, admin).await,
         "completes-a-mention-in-the-thread-box" => completes_mention_in_thread(screen).await,
         "reloads-channels" => reloads_channels(screen).await,
@@ -2012,6 +2020,130 @@ async fn reloads_channels(screen: &Screen) -> Result<()> {
         return Err(Error(format!("a reload left an error up: {}", error.name)));
     }
     Ok(())
+}
+
+/// A row in the saved list opens the message's channel and thread.
+async fn opens_saved_hit(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Design").await?;
+    admin.save_post("engineering", ROOT, true).await?;
+    screen.press("Saved messages").await?;
+    screen
+        .until("the saved post is listed", |tree| tree.has("label", ROOT))
+        .await?;
+    screen.select_row(ROOT).await?;
+    screen
+        .until("the hit opened its channel and thread", |tree| {
+            tree.iter()
+                .any(|n| n.role == "button" && n.name.starts_with("Engineering"))
+                && tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    admin.save_post("engineering", ROOT, false).await
+}
+
+/// A row in the pinned list opens the message's thread.
+async fn opens_pinned_hit(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let post = admin.post_id_of("engineering", ROOT).await?;
+    admin.pin(&post, true).await?;
+    // The title bar's pin button, not the channel menu's entry of the
+    // same name: with the menu open both exist, and pressing the button
+    // left the menu up with its grab, which took the next click.
+    screen.press("Pinned in this channel").await?;
+    screen
+        .until("the pinned post is listed", |tree| {
+            tree.has("label", "Pinned in Engineering") && tree.has("label", ROOT)
+        })
+        .await?;
+    screen.select_row(ROOT).await?;
+    screen
+        .until("the hit opened its thread", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    admin.pin(&post, false).await?;
+    screen.open_channel("Engineering").await
+}
+
+/// Half-typed text survives leaving: a channel's draft comes back on
+/// returning to the channel, and a thread's reply comes back on
+/// reopening the thread.
+async fn keeps_drafts_across_switches(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let channel_draft = format!("Half said in Engineering at {}", crate::seed::stamp());
+    screen.type_into(&composer, &channel_draft).await?;
+    screen.open_channel("Design").await?;
+    screen.open_channel("Engineering").await?;
+    let composer = screen
+        .tree()
+        .await?
+        .find("text box", "Write a message…")?
+        .clone();
+    composer_says(screen, &composer, &channel_draft).await?;
+    screen.type_into(&composer, "").await?;
+
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
+    let thread_draft = format!("Half replied at {}", crate::seed::stamp());
+    screen.type_into(&reply_box, &thread_draft).await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the thread box is away", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await?;
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is back", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    composer_says(screen, &reply_box, &thread_draft).await?;
+    screen.type_into(&reply_box, "").await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the thread box is away again", |tree| {
+            !tree.has("text box", "Reply…")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Shift+Return puts a line break in; Return sends the lot as one
+/// message, which the server holds with the break in it.
+async fn sends_two_lines(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let first = format!("Sent from the lab in two lines at {}", crate::seed::stamp());
+    screen.type_into(&composer, &first).await?;
+    // The caret sits at the start after a set over the bus; End first.
+    screen.press_key(0xff57, &[])?;
+    screen.press_key(key::RETURN, &[key::SHIFT])?;
+    screen.press_key(0x61, &[])?;
+    let expected = format!("{first}\na");
+    composer_says(screen, &composer, &expected).await?;
+    screen.press_key(key::RETURN, &[])?;
+    for _ in 0..25 {
+        if admin.channel_says("engineering", &expected).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err(Error(
+        "the two-line message did not reach the server as one message".to_owned(),
+    ))
 }
 
 /// Ctrl+K, a few letters and Return open the channel named.
