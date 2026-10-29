@@ -95,6 +95,10 @@ struct Active {
     /// Channels whose first page has already been asked for, so a
     /// resync does not fetch the whole account again.
     warmed: Arc<tokio::sync::Mutex<std::collections::HashSet<ChannelId>>>,
+    /// Whether the window has been handed what was remembered from last
+    /// time. Once: a resync paints nothing from memory, since by then
+    /// the window holds something newer than memory does.
+    replayed: Arc<std::sync::atomic::AtomicBool>,
     /// The tray icon, where there is a tray to put one in. `None` on a
     /// desktop with no `StatusNotifierItem` host -- GNOME without an
     /// `AppIndicator` extension, most notably -- and the window is told,
@@ -306,10 +310,11 @@ fn spawn_sync(a: &Active, events: &async_channel::Sender<Event>) {
     let events = events.clone();
     let collapsed = Arc::clone(&a.collapsed);
     let warmed = Arc::clone(&a.warmed);
+    let first = !a.replayed.swap(true, std::sync::atomic::Ordering::Relaxed);
     let held = Arc::clone(&a.held);
     let dirty = Arc::clone(&a.dirty);
     tokio::spawn(async move {
-        let channels = sync(&client, &session, &events, &collapsed, &held, &dirty).await;
+        let channels = sync(&client, &session, &events, &collapsed, &held, &dirty, first).await;
         // Only once the reader has everything they asked for. Warming
         // first would put speculative requests in front of the sidebar.
         let collapsed = collapsed.load(std::sync::atomic::Ordering::Relaxed);
@@ -1673,12 +1678,18 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
     ));
     let dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
     keep_writing_down(&held, &dirty, &session);
+    let warmed = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new()));
     let socket = tokio::spawn(socket_loop(
         client.clone(),
         session.token.clone(),
         events.clone(),
         typing_rx,
-        Some((Arc::clone(&held), Arc::clone(&dirty))),
+        Some(Keeping {
+            held: Arc::clone(&held),
+            dirty: Arc::clone(&dirty),
+            me: UserId::new(session.user_id.clone()),
+            warmed: Arc::clone(&warmed),
+        }),
     ));
     let socket = Some(socket);
 
@@ -1691,7 +1702,8 @@ async fn activate(session: Session, events: &async_channel::Sender<Event>) -> Op
         read_only: is_read_only(),
         collapsed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         downloads: Arc::new(tokio::sync::Semaphore::new(6)),
-        warmed: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+        warmed,
+        replayed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tray,
         typing,
         held,
@@ -1956,6 +1968,7 @@ async fn sync(
     collapsed: &std::sync::atomic::AtomicBool,
     held: &Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
     dirty: &Arc<std::sync::atomic::AtomicBool>,
+    first: bool,
 ) -> Vec<mm_types::Channel> {
     let _ = events.send(Event::Status("loading…".into())).await;
 
@@ -1963,8 +1976,17 @@ async fn sync(
     // while the requests below are in flight. It is a cache: everything
     // here is overwritten by what follows, and the prune at the end
     // removes whatever the server no longer has.
-    if let Some(held) = crate::snapshot::load(&session.server, &session.user_id) {
-        send_snapshot(events, held, collapsed).await;
+    // What is held in memory, not the file: the file is written on a
+    // timer and the memory is current -- a channel this reader was just
+    // taken out of is gone from memory and still in the file. And on
+    // the first sync only. A resync replayed it too, and what it held
+    // was a sync old: a category folded since came back unfolded in the
+    // store for the moment between the replay and the fresh list, and a
+    // click in that moment read the stale state and folded it again.
+    // The lab caught it once in four sweeps.
+    if first {
+        let remembered = held.lock().await.clone();
+        send_snapshot(events, remembered, collapsed).await;
     }
 
     let (config, preferences) = resolve_settings(client, events, collapsed).await;
@@ -2337,10 +2359,7 @@ async fn socket_loop(
     token: String,
     events: async_channel::Sender<Event>,
     mut typing: tokio::sync::mpsc::UnboundedReceiver<(ChannelId, String)>,
-    keeping: Option<(
-        Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
-        Arc<std::sync::atomic::AtomicBool>,
-    )>,
+    keeping: Option<Keeping>,
 ) -> SocketEnd {
     let mut protocol = WsProtocol::new();
     let mut attempt: u32 = 0;
@@ -2410,16 +2429,24 @@ async fn socket_loop(
     }
 }
 
+/// What the socket task writes down as frames arrive, and whose it is.
+#[derive(Clone)]
+struct Keeping {
+    held: Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
+    dirty: Arc<std::sync::atomic::AtomicBool>,
+    me: UserId,
+    /// Channels whose first page has been asked for: a channel left is
+    /// taken out, so coming back warms it afresh.
+    warmed: Arc<tokio::sync::Mutex<std::collections::HashSet<ChannelId>>>,
+}
+
 /// Decode one frame and pass on what it says. `false` means the window
 /// has gone and the socket should stop.
 async fn handle_frame(
     protocol: &mut WsProtocol,
     text: &str,
     events: &async_channel::Sender<Event>,
-    keeping: Option<&(
-        Arc<tokio::sync::Mutex<crate::snapshot::Snapshot>>,
-        Arc<std::sync::atomic::AtomicBool>,
-    )>,
+    keeping: Option<&Keeping>,
 ) -> bool {
     for outcome in protocol.on_frame(text) {
         match outcome {
@@ -2429,14 +2456,35 @@ async fn handle_frame(
                 // fetched. Without this the local state would be
                 // whatever was last fetched, and a restart would show a
                 // channel missing everything said since.
-                if let (Some((held, dirty)), mm_api::ws::WsEvent::Posted { post, .. }) =
-                    (keeping, &event)
+                if let (Some(keeping), mm_api::ws::WsEvent::Posted { post, .. }) = (keeping, &event)
                 {
                     let mut one = mm_types::PostList::default();
                     one.order.push(post.id.clone());
                     one.posts.insert(post.id.clone(), post.clone());
                     one.prev_post_id = post.id.to_string();
-                    keep(held, dirty, &post.channel_id, &one).await;
+                    keep(&keeping.held, &keeping.dirty, &post.channel_id, &one).await;
+                }
+                // Taken out of a channel, this reader's copy of it goes too.
+                // Kept, it came back on the next sync -- a sync replays what
+                // is held -- and a rejoin then joined that stale run to the
+                // fresh page through the one join notice both had, with
+                // everything said while they were out missing between. The
+                // lab found it, paging up through a channel it had been put
+                // back into. Forgotten here, a rejoin fetches it afresh.
+                if let (
+                    Some(keeping),
+                    mm_api::ws::WsEvent::UserRemovedFromChannel {
+                        channel_id,
+                        user_id,
+                    },
+                ) = (keeping, &event)
+                    && *user_id == keeping.me
+                {
+                    keeping.held.lock().await.conversations.remove(channel_id);
+                    keeping
+                        .dirty
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    keeping.warmed.lock().await.remove(channel_id);
                 }
                 if events.send(Event::Ws(event)).await.is_err() {
                     return false;

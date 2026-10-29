@@ -4812,10 +4812,14 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-/// The shortcuts window, built fresh each time it is asked for.
+/// Show what the keys do, in GTK's own shortcuts window.
 ///
-/// Fresh rather than kept: it is opened rarely and holding one window
-/// per session to save building it once is the wrong trade.
+/// The section goes in through `add_section`, never `set_child`: the
+/// window is built from a template -- a header, a stack, a search bar
+/// -- and setting its child threw that away and left the window
+/// holding pointers to widgets that were gone. Escape, which first
+/// asks the search bar to stand down, then printed four criticals and,
+/// one lab sweep in three, took the client down with it.
 fn open_shortcuts(parent: &adw::ApplicationWindow) {
     let section = gtk::ShortcutsSection::builder()
         .section_name("shortcuts")
@@ -4838,7 +4842,7 @@ fn open_shortcuts(parent: &adw::ApplicationWindow) {
         .modal(true)
         .transient_for(parent)
         .build();
-    window.set_child(Some(&section));
+    window.add_section(&section);
     window.present();
 }
 
@@ -4989,6 +4993,7 @@ fn wire(
             let Some(channel) = selected.borrow().clone() else {
                 return;
             };
+            ui.follow_newest(&channel);
             commands
                 .send(Command::Send {
                     channel,
@@ -10394,6 +10399,23 @@ impl Ui {
         self.shown.set(shown.forward(WINDOW_STEP));
         self.refresh_posts(&channel);
         true
+    }
+
+    /// Back to the newest message, where the reader's own message is
+    /// about to land.
+    ///
+    /// Scrolled back through the history, the window of rows drawn
+    /// ends short of the newest and following the tail was switched
+    /// off by the scroll up: a message sent from up there went into
+    /// the store and was drawn nowhere, which read as a send that
+    /// failed. The lab found it, paging up and writing from the top.
+    fn follow_newest(&self, channel: &ChannelId) {
+        self.stick_to_bottom.set(true);
+        *self.restore_to.borrow_mut() = None;
+        if self.shown.get().skip > 0 {
+            self.shown.set(Window::newest(CHANNEL_WINDOW));
+        }
+        self.refresh_posts(channel);
     }
 
     /// A list of its own for a channel being opened for the first time,

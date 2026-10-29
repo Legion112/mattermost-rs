@@ -930,6 +930,50 @@ impl Admin {
         id_of(&find_root(&page, starts_with)?)
     }
 
+    /// The id of a post in a channel starting with the text, reply or
+    /// root: `post_id_of` finds roots only, and a reply changed from
+    /// elsewhere has to be named by its own id.
+    pub async fn any_post_id_of(&self, channel: &str, starts_with: &str) -> Result<String> {
+        let id = self.channel(channel).await?;
+        let page = self
+            .api
+            .call(&HttpRequest::get(format!(
+                "/api/v4/channels/{id}/posts?per_page=200"
+            )))
+            .await?;
+        page["posts"]
+            .as_object()
+            .and_then(|posts| {
+                posts.values().find(|p| {
+                    p["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .starts_with(starts_with)
+                })
+            })
+            .map(id_of)
+            .transpose()?
+            .ok_or_else(|| Error(format!("no post starting with {starts_with:?}")))
+    }
+
+    /// Post a message carrying an uploaded file, as the signed-in user
+    /// from another client would.
+    pub async fn say_with_file(&self, channel: &str, text: &str, file: &str) -> Result<String> {
+        let id = self.channel(channel).await?;
+        id_of(
+            &self
+                .api
+                .call(
+                    &HttpRequest::new(Method::Post, "/api/v4/posts").json(&json!({
+                        "channel_id": id,
+                        "message": text,
+                        "file_ids": [file],
+                    })),
+                )
+                .await?,
+        )
+    }
+
     /// One of the signed-in user's preferences, as the server holds it.
     pub async fn my_preference(&self, category: &str, name: &str) -> Result<Option<String>> {
         let all = self

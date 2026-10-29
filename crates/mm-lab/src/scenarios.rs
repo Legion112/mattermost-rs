@@ -59,6 +59,12 @@ pub const SCENARIOS: &[&str] = &[
     "sends-a-message",
     "sends-two-lines",
     "keeps-up-with-a-burst",
+    "pages-up-through-history",
+    "follows-changes-in-the-open-thread",
+    "shows-the-shortcuts",
+    "shows-the-new-messages-line",
+    "shows-a-file-from-elsewhere",
+    "deletes-a-reply-from-the-pane",
     "formats-from-the-toolbar",
     "formats-with-the-keys",
     "links-a-pasted-address",
@@ -130,6 +136,9 @@ pub const SCENARIOS: &[&str] = &[
 /// costs nothing.
 const PRACTICE: &str = "leaving-practice";
 const PRACTICE_LABEL: &str = "Leaving Practice";
+/// More messages than the client asks for in one page, so that reaching
+/// the first of them takes a page from the server.
+const HISTORY: usize = 75;
 
 pub async fn run(only: Option<&str>, shots: &Path, keep_data: bool, guest: bool) -> Result<()> {
     // A fresh server unless told otherwise, and this is not fussiness.
@@ -206,6 +215,14 @@ async fn one(name: &str, screen: &Screen, admin: &Admin) -> Result<()> {
             loses_thread_root_deleted_elsewhere(screen, admin).await
         }
         "keeps-up-with-a-burst" => keeps_up_with_a_burst(screen, admin).await,
+        "pages-up-through-history" => pages_up_through_history(screen, admin).await,
+        "follows-changes-in-the-open-thread" => {
+            follows_changes_in_the_open_thread(screen, admin).await
+        }
+        "shows-the-shortcuts" => shows_the_shortcuts(screen).await,
+        "shows-the-new-messages-line" => shows_the_new_messages_line(screen, admin).await,
+        "shows-a-file-from-elsewhere" => shows_a_file_from_elsewhere(screen, admin).await,
+        "deletes-a-reply-from-the-pane" => deletes_a_reply_from_the_pane(screen, admin).await,
         "searches-for-nothing" => searches_for_nothing(screen).await,
         "pastes-text-over-a-selection" => pastes_text_over_selection(screen).await,
         "edits-a-reply-with-the-up-key" => edits_reply_with_up(screen).await,
@@ -2665,6 +2682,331 @@ async fn keeps_up_with_a_burst(screen: &Screen, admin: &Admin) -> Result<()> {
         .until("the burst is gone again", |tree| !tree.has("label", &last))
         .await
         .map(|_| ())
+}
+
+/// Scrolling up through a channel with more history than one page
+/// brings the older page in, and keeps going until the first message.
+///
+/// The history has to be on the server and not in the window: a message
+/// arriving over the socket is held whether or not its channel is open,
+/// and scrolling through what is held asks the server for nothing. So
+/// the reader is taken out of the channel first, the history is written
+/// while they are out, and they are put back -- opening it then fetches
+/// a page, and the rest is the paging under test.
+async fn pages_up_through_history(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    admin.drop_me("random-lab").await?;
+    screen
+        .until("the Random row goes out of the sidebar", |tree| {
+            !in_sidebar(tree, "Random")
+        })
+        .await?;
+    let stamp = crate::seed::stamp();
+    let prefix = format!("Sent from the lab into history at {stamp}, number ");
+    let texts: Vec<String> = (1..=HISTORY).map(|n| format!("{prefix}{n}")).collect();
+    for text in &texts {
+        admin.say_as("ada", "random-lab", text).await?;
+    }
+    admin.rejoin("random-lab").await?;
+    screen
+        .until("the Random row is back", |tree| in_sidebar(tree, "Random"))
+        .await?;
+    screen.open_channel("Random").await?;
+    let last = texts[HISTORY - 1].clone();
+    let newest = screen
+        .until("the newest of the history is drawn", |tree| {
+            tree.has("label", &last)
+        })
+        .await?
+        .find("label", &last)?
+        .clone();
+    // The numbers of the history drawn in a tree, in the order drawn.
+    let numbers = |tree: &Vec<Node>| -> Vec<usize> {
+        tree.iter()
+            .filter_map(|n| {
+                (n.role == "label")
+                    .then(|| n.name.strip_prefix(&prefix))
+                    .flatten()
+            })
+            .filter_map(|rest| rest.parse().ok())
+            .collect()
+    };
+    let mut seen: std::collections::BTreeSet<usize> =
+        numbers(&screen.tree().await?).into_iter().collect();
+    if seen.contains(&1) {
+        return Err(Error(format!(
+            "the first of {HISTORY} messages is drawn before any scrolling: nothing to page"
+        )));
+    }
+    // Where to turn the wheel, worked out once: the list recycles its
+    // rows as it scrolls, and the newest row is gone from the tree long
+    // before the first comes in.
+    let (x, y) = screen.wheel_spot_of(&newest).await?;
+    // The wheel over the list, a little at a time so that no row passes
+    // through the window between two looks, until the first message has
+    // been drawn: each turn at the top widens what is drawn or asks the
+    // server for the page before, and either takes a moment. Every
+    // message has to have been drawn on the way: a page merged with a
+    // hole shows as a number never seen.
+    let mut turns = 0;
+    while !seen.contains(&1) {
+        if turns == 80 {
+            return Err(Error(format!(
+                "the first of the history is still not drawn after {turns} turns of the wheel; seen {seen:?}"
+            )));
+        }
+        crate::input::scroll_at(x, y, true, 4)?;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        seen.extend(numbers(&screen.tree().await?));
+        turns += 1;
+    }
+    let missing: Vec<usize> = (1..=HISTORY).filter(|n| !seen.contains(n)).collect();
+    if !missing.is_empty() {
+        return Err(Error(format!(
+            "the history was scrolled through from the end to the start, and these were never drawn: {missing:?}"
+        )));
+    }
+    // Scrolled up to the first message, a message landing must not pull
+    // the reader to the bottom: what is drawn stays what it was, and the
+    // new one is not among it, a moment after it is said.
+    let before = numbers(&screen.tree().await?);
+    let landed = format!("Sent from the lab while the reader was up at {stamp}");
+    admin.say_as("ada", "random-lab", &landed).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let tree = screen.tree().await?;
+    if numbers(&tree) != before || tree.has("label", &landed) {
+        return Err(Error(
+            "a message landing while the reader was scrolled up moved them".to_owned(),
+        ));
+    }
+    // Sending, though, does: the reader's own message is where they are.
+    let composer = focused_composer(screen).await?;
+    let said = format!("Sent from the lab from the top at {stamp}");
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the sent message is drawn at the bottom", |tree| {
+            tree.has("label", &said) && tree.has("label", &landed)
+        })
+        .await?;
+    admin.sweep_traces("random-lab").await?;
+    screen.open_channel("Engineering").await?;
+    Ok(())
+}
+
+/// A reply in the open thread reacted to, edited and deleted from
+/// elsewhere is redrawn in the pane each time -- the pane, not the
+/// channel, since with collapsed threads a reply is in no channel list.
+async fn follows_changes_in_the_open_thread(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let composer = focused_composer(screen).await?;
+    let said = format!(
+        "Sent from the lab for a thread to change at {}",
+        crate::seed::stamp()
+    );
+    screen.type_into(&composer, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    let first = "A reply, about to change.";
+    admin.reply_as("grace", "engineering", &said, first).await?;
+    let body = screen
+        .until("the reply count is on the message", |tree| {
+            tree.has("button", "1 reply")
+        })
+        .await?
+        .iter()
+        .find(|n| n.role == "label" && n.name == said)
+        .cloned()
+        .ok_or_else(|| Error("the message went out of the tree".to_owned()))?;
+    screen.click_button_near("1 reply", &body).await?;
+    screen
+        .until("the reply is drawn in the pane", |tree| {
+            tree.has("text box", "Reply…") && tree.has("label", first)
+        })
+        .await?;
+    let reply = admin.any_post_id_of("engineering", first).await?;
+    admin.react_as("grace", &reply, "thumbsup").await?;
+    screen
+        .until("the reaction chip is on the reply", |tree| {
+            tree.has("button", "👍 1")
+        })
+        .await?;
+    let edited = "A reply, changed.";
+    admin.edit_as("grace", &reply, edited).await?;
+    screen
+        .until("the edit is drawn in the pane", |tree| {
+            tree.has("label", edited) && !tree.has("label", first)
+        })
+        .await?;
+    admin.delete_as("grace", &reply).await?;
+    screen
+        .until("the deleted reply is gone from the pane", |tree| {
+            !tree.has("label", edited)
+        })
+        .await?;
+    screen.press("Close thread").await?;
+    screen
+        .until("the pane is away", |tree| !tree.has("text box", "Reply…"))
+        .await?;
+    admin.sweep_traces("engineering").await?;
+    screen
+        .until("the message is swept", |tree| !tree.has("label", &said))
+        .await
+        .map(|_| ())
+}
+
+/// Ctrl+/ shows the window of what the keys do, and Escape puts it away.
+async fn shows_the_shortcuts(screen: &Screen) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    focused_composer(screen).await?;
+    screen.press_key(0x2f, &[key::CONTROL])?;
+    screen
+        .until("the shortcuts window is up", |tree| {
+            tree.has("label", "Jump to a channel or a person")
+        })
+        .await?;
+    screen.press_key(key::ESCAPE, &[])?;
+    screen
+        .until("the shortcuts window is away", |tree| {
+            !tree.has("label", "Jump to a channel or a person")
+        })
+        .await
+        .map(|_| ())
+}
+
+/// Opening a channel with messages the reader has not seen draws the
+/// "New messages" line above the first of them.
+async fn shows_the_new_messages_line(screen: &Screen, admin: &Admin) -> Result<()> {
+    // Seen once first, with something to see: the line marks what is
+    // new since the reader last looked, and a channel never looked at
+    // has no "since" -- on a fresh account the server has no view of
+    // Design until the reader opens it with something unread in it.
+    screen.open_channel("Engineering").await?;
+    let stamp = crate::seed::stamp();
+    let earlier = format!("Sent from the lab before Design was looked at, {stamp}");
+    admin.say_as("ada", "design", &earlier).await?;
+    screen
+        .until("the Design row shows the first unread", |tree| {
+            matches!(badge_after(tree, "Design"), Some("●" | "1"))
+        })
+        .await?;
+    screen.open_channel("Design").await?;
+    screen
+        .until("the earlier message is drawn", |tree| {
+            tree.has("label", &earlier)
+        })
+        .await?;
+    screen.open_channel("Engineering").await?;
+    let said = format!("Sent from the lab while Design was closed at {stamp}");
+    admin.say_as("ada", "design", &said).await?;
+    screen
+        .until("the Design row shows the unread", |tree| {
+            matches!(badge_after(tree, "Design"), Some("●" | "1"))
+        })
+        .await?;
+    screen.open_channel("Design").await?;
+    let tree = screen
+        .until("the message is drawn", |tree| tree.has("label", &said))
+        .await?;
+    let at = |text: &str| {
+        tree.iter()
+            .position(|n| n.role == "label" && n.name == text)
+    };
+    let line =
+        at("New messages").ok_or_else(|| Error("no \"New messages\" line is drawn".to_owned()))?;
+    let (Some(before), Some(after)) = (at(&earlier), at(&said)) else {
+        return Err(Error("the messages went out of the tree".to_owned()));
+    };
+    if !(before < line && line < after) {
+        return Err(Error(
+            "the \"New messages\" line is not between what was seen and what is new".to_owned(),
+        ));
+    }
+    // Its own messages only, not a sweep of Design: the card scenario
+    // after this one opens a card from a mention the unread scenario
+    // left there, and a sweep took it.
+    for text in [&earlier, &said] {
+        let post = admin.any_post_id_of("design", text).await?;
+        admin.delete_as("ada", &post).await?;
+    }
+    screen.open_channel("Engineering").await
+}
+
+/// A file posted from elsewhere is drawn under its message, by name.
+async fn shows_a_file_from_elsewhere(screen: &Screen, admin: &Admin) -> Result<()> {
+    screen.open_channel("Engineering").await?;
+    let file = admin
+        .upload_note("engineering", "lab-figures.txt", b"figures from the lab")
+        .await?;
+    let said = format!("Sent from the lab with a file at {}", crate::seed::stamp());
+    admin.say_with_file("engineering", &said, &file).await?;
+    screen
+        .until("the message and its file are drawn", |tree| {
+            tree.has("label", &said) && tree.has("label", "lab-figures.txt")
+        })
+        .await?;
+    admin.sweep_traces("engineering").await?;
+    screen
+        .until("the message is swept", |tree| !tree.has("label", &said))
+        .await
+        .map(|_| ())
+}
+
+/// A reply of the reader's own deleted from its menu in the thread pane
+/// goes from the pane and from the server's count.
+async fn deletes_a_reply_from_the_pane(screen: &Screen, admin: &Admin) -> Result<()> {
+    const ROOT: &str = "Morning. The nightly run";
+    screen.open_channel("Engineering").await?;
+    let before = admin.replies_to("engineering", ROOT).await?;
+    screen.press(" replies").await?;
+    let pane = screen
+        .until("the thread box is up", |tree| {
+            tree.has("text box", "Reply…")
+        })
+        .await?;
+    let reply_box = pane.find("text box", "Reply…")?.clone();
+    screen.click_into(&reply_box).await?;
+    let said = format!(
+        "Replied from the lab to be deleted at {}",
+        crate::seed::stamp()
+    );
+    screen.type_into(&reply_box, &said).await?;
+    screen.press_key(key::RETURN, &[])?;
+    screen
+        .until("the reply is drawn in the pane", |tree| {
+            tree.has("label", &said)
+        })
+        .await?;
+    message_menu(screen, &said).await?;
+    screen.press("Delete message").await?;
+    screen
+        .until("the window asks before deleting", |tree| {
+            tree.has("label", "Delete this message?")
+        })
+        .await?;
+    screen.press("Delete").await?;
+    screen
+        .until("the reply is gone from the pane", |tree| {
+            !tree.has("label", &said)
+        })
+        .await?;
+    let mut after = before + 1;
+    for _ in 0..25 {
+        after = admin.replies_to("engineering", ROOT).await?;
+        if after == before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    screen.press("Close thread").await?;
+    if after != before {
+        return Err(Error(format!(
+            "the thread had {before} replies and has {after} after the deletion"
+        )));
+    }
+    Ok(())
 }
 
 /// The root of the open thread deleted from elsewhere goes from the

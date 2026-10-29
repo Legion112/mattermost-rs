@@ -695,6 +695,16 @@ impl Screen {
         Err(Error(format!("{:?} would not come into view", node.name)))
     }
 
+    /// Where to turn the wheel for the list a widget is in: over its own
+    /// column, half way down the window, so the wheel turns that list and
+    /// not the sidebar beside it. Worked out once and kept, for a list
+    /// that recycles its rows as it scrolls.
+    pub async fn wheel_spot_of(&self, node: &Node) -> Result<(i32, i32)> {
+        let (wx, wy, ww, wh) = self.toplevel_box(node).await?;
+        let (x, _, w, _) = self.extents(node).await?;
+        Ok((wx + (x - wx + w / 2).clamp(0, ww - 1), wy + wh / 2))
+    }
+
     /// Rest the pointer on a widget, for what shows on hover.
     pub async fn hover(&self, node: &Node) -> Result<()> {
         let (x, y, w, h) = self.extents(node).await?;

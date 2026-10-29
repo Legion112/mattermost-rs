@@ -51,7 +51,12 @@ never sits above the reader's own message either -- they were there when \
 they wrote it, whatever the server's view time says -- which the lab's \
 own sent message showed it doing. "Mark as unread" from the message menu \
 is lab-verified: the server counted the channel unread from that message \
-on, and coming back to the channel read it again."""
+on, and coming back to the channel read it again. The line itself is \
+lab-verified (`shows-the-new-messages-line`): a colleague's message in a \
+channel not open, then the channel opened, drew "New messages" above it, \
+and only above it -- the channel had been looked at once before with \
+something in it, since a channel the server has never seen the reader in \
+has no "since" and, as intended, no line."""
 
 [[feature]]
 id       = "calls"
@@ -301,7 +306,25 @@ The timeline holds one contiguous run and REFUSES to merge a page whose \
 adjacency cannot be established, rather than joining two disjoint runs and \
 letting the reader scroll past messages with nothing on screen to say so. The \
 plan's full multi-segment model is not built, which is what `since`-based \
-backfill needs. Until then every fetch is anchored to what is held."""
+backfill needs. Until then every fetch is anchored to what is held. Paging \
+up through what is held and then past it is lab-verified \
+(`pages-up-through-history`): the reader was taken out of a channel, \
+seventy-five messages were written to it while they were out, they were \
+put back, and the wheel at the top of the list reached the first of them, \
+which took a page from the server since the window had been given the \
+newest page only. Up there, a message landing left the reader where they \
+were, and one they sent took them to the bottom. It did not, at first: the \
+window of rows drawn ended short of the newest and following the tail \
+had been switched off by the scroll up, so a message sent from the top \
+went into the store and was drawn nowhere, which read as a send that \
+failed. Sending puts the window back on the newest message now. And the \
+same scenario found a second one: taken out of a channel and put back, the \
+client joined its cached copy of the channel -- a sync replays what it \
+holds, and the file still held the channel it had just left -- to the \
+fresh page through the one join notice both had, with everything said \
+while the reader was out missing between, and a hole the paging could \
+never close. Being taken out forgets the channel's copy now, and a sync \
+replays what is held in memory rather than the file."""
 
 [[feature]]
 id       = "sidebar.hide_departed"
@@ -339,7 +362,12 @@ by folding one from the client and reading the flag back, false then true then \
 false. A folded category still shows its unread channels and whichever channel \
 is open, which is what folding means in Mattermost -- lab-verified by \
 `folds-and-unfolds-a-category`, which clicks the heading, sees the other rows \
-go and the open one stay, reads the flag from the server, and clicks again. An empty `sorting` -- what \
+go and the open one stay, reads the flag from the server, and clicks again. \
+That second click once folded it again instead, one sweep in four: a resync \
+replayed what the client remembered from the sync before, and for the \
+moment between the replay and the fresh list the store held the category \
+unfolded while the sidebar showed it folded. What is remembered is replayed \
+on the first sync of a session only now. An empty `sorting` -- what \
 the server sends for a category nobody has reordered -- is drawn \
 alphabetically, which is inferred from the web app rather than read from the \
 server."""
@@ -405,7 +433,11 @@ server counting none; `filters-threads-to-unreads` sees the Unreads tab \
 list only what is unread and Followed threads list them all again; and \
 `follows-and-unfollows-a-thread` presses the pane's Following toggle both \
 ways and reads the server, which answers 404 for a thread not followed and \
-the thread itself, without an `is_following` field, for one that is."""
+the thread itself, without an `is_following` field, for one that is. \
+A reply in the open thread reacted to, edited and deleted from elsewhere \
+is redrawn in the pane each time (`follows-changes-in-the-open-thread`) \
+-- the pane and not the channel, since with collapsed threads a reply \
+is in no channel list."""
 
 [[feature]]
 id       = "drafts.view"
@@ -1335,7 +1367,10 @@ hands a copy under its own name to the desktop's handler for its kind \
 -- a PDF to the PDF viewer -- which is a preview this client could \
 never draw as well. The copy lives in the cache, one folder per file \
 id, so two attachments called `report.pdf` do not take turns. NOT \
-verified in the lab, which has no handlers to open anything with."""
+verified in the lab, which has no handlers to open anything with. A \
+file posted from another client is drawn under its message by name \
+(`shows-a-file-from-elsewhere`), which the lab can do from the API \
+without handing the window anything."""
 
 [[feature]]
 id       = "desktop.window_geometry"
@@ -1670,7 +1705,12 @@ table rather than something derived: the handlers are spread over a \
 window controller, two composers and two completion popups, and a table \
 that described half of them accurately would be worse than one plainly \
 maintained by hand. Verified on a live account: Ctrl+/ drew both groups \
-with the right keys on them.
+with the right keys on them, and in the lab (`shows-the-shortcuts`), where \
+Escape put the window away again -- and where closing it printed four GTK \
+criticals and, one sweep in three, took the client down: the sections had \
+been put in with `set_child`, which threw away the template the window is \
+built from and left it holding pointers to a search bar that was gone. \
+They go in through `add_section` now, as GTK 4.14 provides.
 
 **Ctrl+Shift+\\ reacts to the last message**, Mattermost's own binding: \
 it opens the emoji picker on the newest message in the channel, whoever \

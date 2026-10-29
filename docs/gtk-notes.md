@@ -650,6 +650,31 @@ property when `SelectionNotify` says it is there. GTK answers that
 request like any other client, so Copy text and Copy link are checked
 against what a paste would give.
 
+**The tree holds the rows in view, and `has` is a substring.** A
+`ListView` builds widgets for the rows around its viewport and no
+others, so a message two screens up is not in the accessibility tree
+at all, and a check that a message "is drawn" is a check that it is
+near the viewport. The lab's `has` matches a label by substring, which
+was right for most of what it looks for and wrong for "number 1" in a
+run of seventy-five: it matched "number 17", and a scenario passed
+that should not have. Paging up through history now scrolls a few
+ticks at a time, reads the tree after every turn, and keeps the set
+of every message it has seen pass through: the test is that all of
+them did, in whatever order the viewport met them, which is what
+reaching the first message by the wheel actually means.
+
+**A kept lab keeps the client's cache.** With `--keep-data` the
+client's state and cache directories survive between runs, and so
+does its snapshot of every channel's newest page, including messages
+the previous run's sweep deleted from the server. A scenario that
+pages through a channel paged through those too, and the join it
+reached was a stale run joined to a fresh page with a hole between
+them -- a real bug in the client, which forgot nothing when the reader
+was taken out of a channel, and which the fresh sweep could never have
+shown because a fresh lab has no cache. The kept lab is worth running
+for that reason alone, and a scenario that fails only there is worth
+believing.
+
 ## The sidebar is patched, not rebuilt
 
 A sidebar of a hundred and thirty rows cost 37ms to rebuild, measured
